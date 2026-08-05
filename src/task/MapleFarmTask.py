@@ -24,6 +24,11 @@ DEFAULT_CONFIG = {
     '拾取间隔(秒)': 30,
     '画面静止上限(秒)': 60,
     '经验停滞上限(分钟)': 10,
+    '攻击模式': '定频',
+    '攻击区宽': 0.6,
+    '攻击区高': 0.6,
+    '攻击区中心X': 0.5,
+    '攻击区中心Y': 0.5,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -58,6 +63,19 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         super().on_create()
         if self.config.get('药水耗尽保护'):
             potions.prewarm()
+
+    @staticmethod
+    def _mob_in_attack_zone(frame, mobs, cfg):
+        """怪物检测框中心落在攻击区内。攻击区以用户标定的站桩点(攻击区中心X/Y)为锚。"""
+        h, w = frame.shape[:2]
+        half_w = cfg['攻击区宽'] / 2 * w
+        half_h = cfg['攻击区高'] / 2 * h
+        cx, cy = cfg['攻击区中心X'] * w, cfg['攻击区中心Y'] * h
+        for mob in mobs:
+            mx, my = mob.x + mob.width / 2, mob.y + mob.height / 2
+            if abs(mx - cx) <= half_w and abs(my - cy) <= half_h:
+                return True
+        return False
 
     @staticmethod
     def _slot_of(key_name):
@@ -133,8 +151,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self.stop_farming(f'{"血" if empty == "hp" else "蓝"}药耗尽')
                 return
 
-        # 4. 定频攻击
-        if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
+        # 4. 攻击
+        if cfg['攻击模式'] == '检测':
+            if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
+                mobs = self.find_mobs(frame)
+                if self._mob_in_attack_zone(frame, mobs, cfg):
+                    self.send_key(keys['攻击键'])
+                    self._last_attack = now
+        elif farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
             self.send_key(keys['攻击键'])
             self._last_attack = now
 

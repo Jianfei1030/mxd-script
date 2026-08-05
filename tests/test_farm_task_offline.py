@@ -77,6 +77,26 @@ class TestFarmTaskOffline(unittest.TestCase):
         run_with_frame(task, hp=0.0)
         task.stop_farming.assert_not_called()
 
+    def test_detect_mode_attacks_when_mob_in_zone(self):
+        task = make_task(**{'攻击模式': '检测'})
+        mob = MagicMock(x=1200, y=700, width=60, height=50)  # 中心 (1230,725),在默认攻击区内
+        task.find_mobs = MagicMock(return_value=[mob])
+        run_with_frame(task)
+        self.assertIn(call('shift'), task.send_key.call_args_list)
+
+    def test_detect_mode_idles_when_no_mob(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task.find_mobs = MagicMock(return_value=[])
+        run_with_frame(task)
+        task.send_key.assert_not_called()  # 无怪停手省蓝
+
+    def test_detect_mode_idles_when_mob_outside_zone(self):
+        task = make_task(**{'攻击模式': '检测'})
+        far = MagicMock(x=10, y=10, width=60, height=50)  # 左上角,攻击区外
+        task.find_mobs = MagicMock(return_value=[far])
+        run_with_frame(task)
+        task.send_key.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
