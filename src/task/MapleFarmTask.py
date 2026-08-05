@@ -3,7 +3,7 @@ import time
 from qfluentwidgets import FluentIcon
 
 from ok import Logger, TriggerTask
-from src.detect import bars, potions
+from src.detect import bars, guards, potions
 from src.task import farm_logic
 from src.task.BaseMapleTask import BaseMapleTask
 
@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
     '药水耗尽保护': True,
     '拾取开关': False,
     '拾取间隔(秒)': 30,
+    '画面静止上限(秒)': 60,
+    '经验停滞上限(分钟)': 10,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -47,6 +49,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._dead_frames = 0
         self._bad_size_frames = 0
         self._last_potion_check = 0.0
+        self._last_sig = None
+        self._last_change_time = 0.0
+        self._last_exp = None
+        self._last_exp_gain_time = 0.0
 
     def on_create(self):
         super().on_create()
@@ -136,3 +142,21 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         if farm_logic.should_pickup(now, self._last_pickup, cfg['拾取间隔(秒)'], cfg['拾取开关']):
             self.send_key(keys['拾取键'])
             self._last_pickup = now
+
+        # 6. 兜底守卫
+        sig = guards.signature(frame)
+        if self._last_sig is None or not guards.frame_frozen(self._last_sig, sig):
+            self._last_sig = sig
+            self._last_change_time = now
+        elif now - self._last_change_time > cfg['画面静止上限(秒)']:
+            self.stop_farming('画面长时间静止(卡死/掉线/弹窗)')
+            return
+
+        exp = bars.read_exp(frame)
+        # 升级后 EXP 条归零:exp 大幅下降同样视为"有收益",复位计时器,否则旧高位卡死计时器必然误停
+        if self._last_exp is None or exp > self._last_exp + 0.001 or exp < self._last_exp - 0.05:
+            self._last_exp = exp
+            self._last_exp_gain_time = now
+        elif now - self._last_exp_gain_time > cfg['经验停滞上限(分钟)'] * 60:
+            self.stop_farming('经验长时间不涨(无效挂机)')
+            return
