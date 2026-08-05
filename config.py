@@ -40,7 +40,7 @@ config = {
         'title': '冒险岛怀旧服',
         'exe': 'Maplestory_Classic.exe',
         'hwnd_class': 'UnityWndClass',
-        'interaction': 'PostMessage',
+        'interaction': 'PyDirect',
         'capture_method': ['WGC', 'BitBlt_RenderFull'],
         'check_hdr': False,
         'force_no_hdr': False,
