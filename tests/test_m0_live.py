@@ -18,6 +18,14 @@ def game_running():
     return bool(found)
 
 
+def is_admin():
+    import ctypes
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
 @unittest.skipUnless(game_running(), '游戏未运行,跳过 M0 实弹测试')
 class TestM0Live(unittest.TestCase):
 
@@ -69,7 +77,7 @@ class TestM0Live(unittest.TestCase):
         self.assertIsNotNone(blue, '蓝药数量 OCR 失败')
         self.assertIsNotNone(red, '红药数量 OCR 失败')
 
-    @unittest.skip('非管理员运行,PyDirect 无法发键')
+    @unittest.skipUnless(is_admin(), '非管理员运行,PyDirect 无法发键')
     def test_postmessage_response(self):
         """判据:面板开合引起**中央 ROI** 帧差显著高于同区域环境基线(3 倍且 >5.0)。
         依次尝试 'i'(道具栏)与 'esc'(系统菜单),任一响应即通过;每个键发两次(开+关还原)。
