@@ -1,0 +1,5 @@
+path: H:/ok-mxd/ok-mxd/dataset
+train: images/train
+val: images/val
+names:
+  0: mob
