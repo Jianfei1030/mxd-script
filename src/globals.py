@@ -1,9 +1,27 @@
+import os
+
 from PySide6.QtCore import QObject
+
+from ok import Logger, get_path_relative_to_exe
+
+logger = Logger.get_logger(__name__)
 
 
 class Globals(QObject):
-    """应用级单例(对应 config['my_app'])。YOLO 等重型资源后续按需加到这里。"""
+    """应用级单例(对应 config['my_app'])。"""
 
     def __init__(self, exit_event):
         super().__init__()
         self.exit_event = exit_event
+        self._yolo_model = None
+
+    @property
+    def yolo_model(self):
+        if self._yolo_model is None:
+            weights = get_path_relative_to_exe(os.path.join('assets', 'mob_model', 'mob.onnx'))
+            from src.OpenVinoYolo8Detect import OpenVinoYolo8Detect
+            self._yolo_model = OpenVinoYolo8Detect(weights=weights)
+        return self._yolo_model
+
+    def yolo_detect(self, image, threshold=0.5, label=-1):
+        return self.yolo_model.detect(image, threshold=threshold, label=label)
