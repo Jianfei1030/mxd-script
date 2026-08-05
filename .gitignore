@@ -7,3 +7,7 @@ screenshots/*
 dataset/raw/
 dataset/images/
 dataset/labels/
+dataset/runs/
+runs/
+yolov8n.pt
+*.pt
