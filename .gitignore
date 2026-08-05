@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+logs/
+configs/
+screenshots/*
+!screenshots/test_frames/
