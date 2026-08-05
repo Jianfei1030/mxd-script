@@ -3,7 +3,7 @@ import time
 from qfluentwidgets import FluentIcon
 
 from ok import Logger, TriggerTask
-from src.detect import bars
+from src.detect import bars, potions
 from src.task import farm_logic
 from src.task.BaseMapleTask import BaseMapleTask
 
@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     '死亡判定线': 0.02,
     '死亡确认帧数': 20,
     '喝药无效上限': 5,
+    '药水检查间隔(秒)': 30,
+    '药水耗尽保护': True,
     '拾取开关': False,
     '拾取间隔(秒)': 30,
 }
@@ -44,6 +46,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_hp = 1.0
         self._dead_frames = 0
         self._bad_size_frames = 0
+        self._last_potion_check = 0.0
+
+    def on_create(self):
+        super().on_create()
+        if self.config.get('药水耗尽保护'):
+            potions.prewarm()
+
+    @staticmethod
+    def _slot_of(key_name):
+        return key_name.lower()
 
     def run(self):
         # TaskExecutor 调度 trigger task 前已取帧(TaskExecutor.py:555),不要再 next_frame()
@@ -103,6 +115,17 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 3. 喝蓝
         if farm_logic.need_mp_potion(mp, cfg['喝蓝阈值']):
             self.send_key(keys['蓝药键'])
+
+        # 3.5 药水耗尽保护(低频 OCR)
+        if cfg['药水耗尽保护'] and now - self._last_potion_check >= cfg['药水检查间隔(秒)']:
+            self._last_potion_check = now
+            hp_count = potions.read_slot_count(frame, self._slot_of(keys['血药键']))
+            mp_count = potions.read_slot_count(frame, self._slot_of(keys['蓝药键']))
+            empty = farm_logic.potions_exhausted(hp, cfg['喝血阈值'], hp_count,
+                                                 mp, cfg['喝蓝阈值'], mp_count)
+            if empty:
+                self.stop_farming(f'{"血" if empty == "hp" else "蓝"}药耗尽')
+                return
 
         # 4. 定频攻击
         if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
