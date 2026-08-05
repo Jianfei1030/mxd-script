@@ -14,7 +14,7 @@ def make_task(**cfg_overrides):
     """config 直接取自模块级 DEFAULT_CONFIG,与 __init__ 同源,
     后续任务新增配置键/状态时本测试不再需要手工同步。"""
     task = MapleFarmTask.__new__(MapleFarmTask)  # 绕过框架 __init__
-    task.config = {**DEFAULT_CONFIG, 'Buff键位': '', **cfg_overrides}
+    task.config = {**DEFAULT_CONFIG, 'Buff键位': '', '药水耗尽保护': False, **cfg_overrides}
     task._reset_state()
     task.send_key = MagicMock()
     task.stop_farming = MagicMock()
