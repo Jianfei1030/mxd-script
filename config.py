@@ -7,7 +7,7 @@ from ok import ConfigOption
 version = "v0.1.0"
 
 key_config_option = ConfigOption('游戏按键', {
-    '攻击键': 'shift',
+    '攻击键': 'ctrl',
     '血药键': 'home',
     '蓝药键': 'insert',
     '回城卷键(可留空)': '',
