@@ -55,5 +55,54 @@ class TestFarmLogic(unittest.TestCase):
         self.assertFalse(fl.is_dead(0.5))
 
 
+class TestAttackZone(unittest.TestCase):
+
+    def test_zone_centered(self):
+        self.assertEqual(fl.attack_zone((1280, 630), 600, 200),
+                         (980.0, 530.0, 1580.0, 730.0))
+
+    def test_point_inside(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertTrue(fl.point_in_zone((1280, 630), zone))
+
+    def test_point_on_edge_counts_as_inside(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertTrue(fl.point_in_zone((980.0, 530.0), zone))
+        self.assertTrue(fl.point_in_zone((1580.0, 730.0), zone))
+
+    def test_point_outside(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertFalse(fl.point_in_zone((1581.0, 630), zone))
+        self.assertFalse(fl.point_in_zone((1280, 529.0), zone))
+
+    def test_mob_in_zone_any(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertTrue(fl.mob_in_zone([(100, 100), (1300, 640)], zone))
+
+    def test_mob_in_zone_none(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertFalse(fl.mob_in_zone([(100, 100), (2400, 1300)], zone))
+
+    def test_no_mobs(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertFalse(fl.mob_in_zone([], zone))
+
+
+class TestAnchorTiming(unittest.TestCase):
+
+    def test_never_acquired_counts_as_expired(self):
+        self.assertTrue(fl.anchor_expired(100.0, None, 10))
+
+    def test_fresh_anchor(self):
+        self.assertFalse(fl.anchor_expired(105.0, 100.0, 10))
+
+    def test_expired_anchor(self):
+        self.assertTrue(fl.anchor_expired(111.0, 100.0, 10))
+
+    def test_rescan_throttle(self):
+        self.assertFalse(fl.should_rescan_anchor(101.0, 100.0, 2))
+        self.assertTrue(fl.should_rescan_anchor(102.0, 100.0, 2))
+
+
 if __name__ == '__main__':
     unittest.main()
