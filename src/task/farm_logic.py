@@ -1,5 +1,7 @@
 """打怪决策纯逻辑。不依赖游戏/框架,全部可离线单测。"""
 
+import random
+
 
 def need_hp_potion(hp_percent, threshold):
     return 0 <= hp_percent < threshold
@@ -135,3 +137,54 @@ def should_approach(body_center, mob_feet_xy, attack_distance):
     cx, _ = body_center
     fx, _ = mob_feet_xy
     return abs(fx - cx) > attack_distance
+
+
+def walk_order(facing):
+    """防挂机走位两段方向顺序,返回 (first, second, resulting_facing)。
+
+    朝向已知(LEFT/RIGHT):先向反方向走出、再朝原方向走回 → 结束时朝向不变,
+    走位不会把角色的面朝方向翻反(修复 2026-08-06 实测的"走位后朝向随机"问题);
+    朝向未知(None,首次走位前):随机一侧走出、反方向走回,
+    resulting_facing = 走完后面朝的方向(第二段方向),由调用方采纳为基线。
+    方向用 'left'/'right' 小写,与 facing_update 一致。
+    """
+    if facing in ('LEFT', 'RIGHT'):
+        first = 'left' if facing == 'RIGHT' else 'right'
+    else:
+        first = random.choice(('left', 'right'))
+    second = 'right' if first == 'left' else 'left'
+    return first, second, ('LEFT' if second == 'left' else 'RIGHT')
+
+
+def nearest_mob_x(centres, zone, body_x):
+    """攻击区内离身体中心水平距离最近的怪中心 x;无怪在区内返回 None。"""
+    in_zone = [x for x, y in centres if point_in_zone((x, y), zone)]
+    if not in_zone:
+        return None
+    return min(in_zone, key=lambda x: abs(x - body_x))
+
+
+def turn_direction(facing, body_x, mob_x):
+    """打怪前需要的转向:怪在面朝反侧(或朝向未知)时,返回要按的方向键
+    'left'/'right';已经面朝怪所在侧 → 返回 None。mob_x 为最近怪的中心 x。"""
+    side = 'left' if mob_x < body_x else 'right'
+    need = 'LEFT' if side == 'left' else 'RIGHT'
+    return side if facing != need else None
+
+
+def same_floor(mob_feet_y, player_feet_y, tolerance):
+    """怪脚底与角色脚底(名字牌 y)高度差在容差内 → 同一层,水平走近可达。
+    容差小于平台间高度差,避免追到别的平台。"""
+    return abs(mob_feet_y - player_feet_y) <= tolerance
+
+
+def seek_direction(mob_entries, body_x, player_feet_y, tolerance):
+    """自动寻怪要按的方向:同层怪中离身体水平距离最近的一个,
+    在左 → 'left',在右 → 'right';没有同层怪 → None。
+    mob_entries: [(中心x, 脚底y), ...] 全部怪。调用方保证当前攻击区内无怪
+    (区内的早已被攻击分支原地处理,本函数只服务"区外寻怪")。"""
+    same_floor_xs = [cx for cx, fy in mob_entries if same_floor(fy, player_feet_y, tolerance)]
+    if not same_floor_xs:
+        return None
+    nearest = min(same_floor_xs, key=lambda cx: abs(cx - body_x))
+    return 'left' if nearest < body_x else 'right'
