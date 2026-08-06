@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, call, patch
 
 import cv2
 
+from src.detect.anchor import Anchor as MapleAnchor
 from src.task.MapleFarmTask import DEFAULT_CONFIG, MapleFarmTask
 
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
@@ -21,6 +22,7 @@ def make_task(**cfg_overrides):
     task.send_key = MagicMock()
     task.stop_farming = MagicMock()
     task.log_warning = MagicMock()
+    task.find_mobs = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
     return task
 
@@ -46,7 +48,7 @@ def run_with_frame(task, hp=None, exp=None):
 class TestFarmTaskOffline(unittest.TestCase):
 
     def test_full_hp_attacks_only(self):
-        task = make_task()
+        task = make_task(**{'攻击模式': '定频'})
         run_with_frame(task)
         self.assertIn(call('shift'), task.send_key.call_args_list)
         task.stop_farming.assert_not_called()
@@ -104,7 +106,7 @@ class TestFarmTaskOffline(unittest.TestCase):
 
     def test_re_enable_resets_stall_timer(self):
         """停止(经验停滞)后通过框架 enable() 重新启用,不应立即再次停止。"""
-        task = make_task()
+        task = make_task(**{'攻击模式': '定频'})
         task._executor = MagicMock()  # enable() 通过 executor property 访问
         task._enabled = True
         # 模拟已经挂机很久,经验条无变化
@@ -122,6 +124,72 @@ class TestFarmTaskOffline(unittest.TestCase):
         run_with_frame(task)
         task.stop_farming.assert_not_called()
         self.assertIn(call('shift'), task.send_key.call_args_list)
+
+
+class TestDetectModeAnchor(unittest.TestCase):
+
+    def test_no_char_name_uses_screen_centre(self):
+        """角色名留空 → 不跑 OCR,直接用屏幕中心当锚点。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': ''})
+        with patch('src.task.MapleFarmTask.anchor.find_in_region') as scan:
+            run_with_frame(task)
+            scan.assert_not_called()
+
+    def test_no_mob_does_not_stop_task(self):
+        """用户明确要求:没怪只停手,任务继续跑。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task.find_mobs = MagicMock(return_value=[])
+        run_with_frame(task)
+        task.send_key.assert_not_called()
+        task.stop_farming.assert_not_called()
+
+    def test_detection_is_throttled_when_idle(self):
+        """无怪时不许每个 0.1s 触发都重跑检测(缺陷 B)。同一时刻连跑 5 次,只应检测 1 次。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task.find_mobs = MagicMock(return_value=[])
+        for _ in range(5):
+            run_with_frame(task)
+        self.assertEqual(task.find_mobs.call_count, 1)
+
+    def test_window_hit_updates_anchor(self):
+        """快通道命中后必须把锚点更新成新值。
+
+        必须先播种旧锚点:_resolve_anchor 的快通道有 `if self._anchor is not None` 前置条件,
+        新任务的 _anchor 是 None,不播种的话根本进不去快通道。旧值要与新值不同,
+        否则断言分不清"更新了"和"本来就是这个值"。
+        """
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1390.0, 905.0)
+        task._anchor_time = 100.0
+        hit = MapleAnchor(1400.0, 900.0, 128)
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=hit), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            run_with_frame(task)
+        self.assertEqual(task._anchor, (1400.0, 900.0))
+
+    def test_cached_anchor_when_both_channels_miss(self):
+        """快通道失灵 + 慢通道被节流 + 锚点未过期 → 沿用上次锚点,不回退画面中心。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '锚点保鲜(秒)': 10})
+        task._anchor = (1400.0, 900.0)
+        task._anchor_time = 99.0        # 时间被固定在 100.0,锚点年龄 1s,未过期
+        task._last_anchor_scan = 99.5   # 距上次扫描 0.5s < 锚点刷新间隔 2s,慢通道被节流
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None) as window, \
+                patch('src.task.MapleFarmTask.anchor.find_in_region') as region:
+            got, source = task._resolve_anchor(cv2.imread(FRAME), 100.0, task.config)
+        self.assertEqual(source, 'cached')
+        self.assertEqual((got.x, got.y), (1400.0, 900.0))
+        window.assert_called_once()
+        region.assert_not_called()
+
+    def test_expired_anchor_falls_back_to_centre(self):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '锚点保鲜(秒)': 5})
+        task._anchor = (400.0, 400.0)
+        task._anchor_time = 90.0  # run_with_frame 把 time.time() 固定在 100.0,已超 5s
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, source = task._resolve_anchor(cv2.imread(FRAME), 100.0, task.config)
+        self.assertEqual(source, 'fallback')
+        self.assertEqual((got.x, got.y), (1280.0, 720.0))
 
 
 if __name__ == '__main__':
