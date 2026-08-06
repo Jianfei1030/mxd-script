@@ -1,6 +1,8 @@
 # ok-mxd
 
-冒险岛怀旧服（进程 `Maplestory_Classic.exe` / 窗口类 `UnityWndClass` / 标题 `冒险岛怀旧服`）站桩自动打怪 MVP，基于 ok-ww 框架。
+冒险岛怀旧服（进程 `Maplestory_Classic.exe` / 窗口类 `UnityWndClass` / 标题 `冒险岛怀旧服`）自动打怪脚本，基于 ok-ww 框架。含站桩打怪（`MapleFarmTask`）与战士（近战）巡逻扩展（Phase 2 开发中，Phase 1 为只读调试可视化）。
+
+> 📖 **完整操作手册（采集→标注→训练→看 bbox→标定→实机打怪）见 [`OPERATION_GUIDE.md`](OPERATION_GUIDE.md)**
 
 ## 功能
 
@@ -25,7 +27,7 @@
    ```
    项目根目录为 `H:\ok-mxd\ok-mxd`。
 3. 在 Start 页启动。
-4. 进入触发任务页，启用「自动打怪」。
+4. 进入触发任务页，启用「自动打怪」（或「战士调试」看可视化三框）。
 
 ## 关键运行约束
 
