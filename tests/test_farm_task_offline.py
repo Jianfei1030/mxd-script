@@ -1231,6 +1231,38 @@ class TestDebugOverlay(unittest.TestCase):
                          mobs=[], mob_present=False)
         self.assertFalse(task._debug_drawn)
 
+    def test_switch_to_fixed_rate_clears_previous_overlay(self):
+        """之前检测模式画过 → 切到定频模式 → run() 里清一次。"""
+        task = make_task(**{'攻击模式': '定频'})
+        task._debug_drawn = True
+        with patch.object(MapleFarmTask, '_clear_debug') as clear:
+            def fake_clear():
+                task._debug_drawn = False
+            clear.side_effect = fake_clear
+            run_with_frame(task, hp=0.9, mp=0.9)
+            clear.assert_called_once()
+
+    def test_fixed_rate_mode_no_clear_when_never_drawn(self):
+        """定频模式、从没画过 → 不必调用清除(_debug_drawn 恒 False 时是 no-op,
+        这里直接断言真实 _clear_debug 不触发 get_overlay_view)。"""
+        task = make_task(**{'攻击模式': '定频'})
+        task.get_overlay_view = MagicMock()
+        run_with_frame(task, hp=0.9, mp=0.9)
+        task.get_overlay_view.assert_not_called()
+
+    def test_disable_clears_debug_overlay(self):
+        """MapleFarmTask.disable() 真正执行(不是 mock 掉),但 super().disable()
+        (MRO 上下一个是 TriggerTask.disable)打桩掉——make_task 是裸 __new__ 出来的,
+        没有框架其余状态,真跑 TriggerTask.disable 会因为缺属性炸掉,与本测试无关。"""
+        from ok.task.task import TriggerTask
+        task = make_task()
+        overlay = MagicMock()
+        task.get_overlay_view = MagicMock(return_value=overlay)
+        task._debug_drawn = True
+        with patch.object(TriggerTask, 'disable'):
+            MapleFarmTask.disable(task)
+        overlay.clear_draw.assert_called_once_with('maple_farm_debug')
+
 
 if __name__ == '__main__':
     unittest.main()

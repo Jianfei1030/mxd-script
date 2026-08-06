@@ -485,11 +485,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def disable(self):
         """停任务前松开可能还按着的长按键,防止角色在任务停止后继续走/打。"""
         self._release_held_keys()
+        self._clear_debug()
         super().disable()
 
     def on_destroy(self):
         """应用退出/executor 销毁前松键(interaction 在任务之后才销毁,此时松键仍可用)。"""
         self._release_held_keys()
+        self._clear_debug()
         super().on_destroy()
 
     def run(self):
@@ -601,9 +603,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 在打/在追 = 忙:坐椅延迟从头算;长按的攻击/方向键已带角色起身,清坐椅标记
             if self._last_mob_present or self._seek_dir is not None:
                 self._mark_busy(now)
-        elif farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
-            self.send_key(keys['攻击键'])
-            self._last_attack = now
+        else:
+            self._clear_debug()  # 定频模式没有锚点/攻击区,之前检测模式画过的框清掉
+            if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
+                self.send_key(keys['攻击键'])
+                self._last_attack = now
 
         # 4.5 防挂机走位(默认开启)。有独立的 120s 节奏,不挂在 1.5s 攻击节拍上;
         # 检测模式下如果这一拍刚好判定有怪(正在打)或在寻怪(正在走),
