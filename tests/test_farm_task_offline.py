@@ -1167,5 +1167,70 @@ class TestBoxesEnabled(unittest.TestCase):
             self.assertFalse(task._boxes_enabled())
 
 
+class TestDebugOverlay(unittest.TestCase):
+
+    def test_boxes_enabled_draws_with_current_state(self):
+        """检测模式一拍跑完(_detect_and_act 被触发)且开关开 → 调一次 _draw_debug,
+        参数是这一拍算出的 body/zone/mob_present,不是重新检测的。"""
+        task = make_task(**{'角色名': ''})  # 角色名空 → anchor 走 fallback,body=画面中心
+        task._boxes_enabled = MagicMock(return_value=True)
+        with patch.object(MapleFarmTask, '_draw_debug') as draw, \
+                patch.object(MapleFarmTask, '_clear_debug') as clear:
+            run_with_frame(task, hp=0.9, mp=0.9)
+            draw.assert_called_once()
+            clear.assert_not_called()
+            _, kwargs = draw.call_args
+            self.assertEqual(kwargs['mob_present'], False)  # find_mobs 默认 mock 返回 []
+            self.assertEqual(kwargs['mobs'], [])
+
+    def test_boxes_disabled_clears_not_draws(self):
+        """开关关 → 不画,且因为之前没画过(_debug_drawn 初始 False)也不必调用清除。"""
+        task = make_task(**{'角色名': ''})
+        task._boxes_enabled = MagicMock(return_value=False)
+        with patch.object(MapleFarmTask, '_draw_debug') as draw, \
+                patch.object(MapleFarmTask, '_clear_debug') as clear:
+            run_with_frame(task, hp=0.9, mp=0.9)
+            draw.assert_not_called()
+            clear.assert_called_once()
+
+    def test_clear_debug_noop_when_never_drawn(self):
+        """_clear_debug 本身:没画过时不碰 overlay(不调用 get_overlay_view)。"""
+        task = make_task()
+        task.get_overlay_view = MagicMock()
+        task._clear_debug()
+        task.get_overlay_view.assert_not_called()
+
+    def test_clear_debug_calls_overlay_when_drawn(self):
+        """_clear_debug 本身:画过之后清 → 调 clear_draw('maple_farm_debug') 并复位标记。"""
+        task = make_task()
+        overlay = MagicMock()
+        task.get_overlay_view = MagicMock(return_value=overlay)
+        task._debug_drawn = True
+        task._clear_debug()
+        overlay.clear_draw.assert_called_once_with('maple_farm_debug')
+        self.assertFalse(task._debug_drawn)
+
+    def test_draw_debug_calls_overlay_draw(self):
+        """_draw_debug 本身:调用 overlay.draw,key 固定 'maple_farm_debug',并置标记。"""
+        task = make_task()
+        overlay = MagicMock()
+        task.get_overlay_view = MagicMock(return_value=overlay)
+        task._draw_debug(task.config, body=(1280, 700), zone=(1000, 600, 1500, 800),
+                         mobs=[], mob_present=False)
+        overlay.draw.assert_called_once()
+        args, _ = overlay.draw.call_args
+        self.assertEqual(args[0], 'maple_farm_debug')
+        self.assertTrue(callable(args[1]))
+        self.assertTrue(task._debug_drawn)
+
+    def test_draw_debug_noop_when_no_overlay(self):
+        """无 GUI(get_overlay_view 返回 None)→ 不抛异常,不置标记。"""
+        task = make_task()
+        task.get_overlay_view = MagicMock(return_value=None)
+        task._draw_debug(task.config, body=(1280, 700), zone=(1000, 600, 1500, 800),
+                         mobs=[], mob_present=False)
+        self.assertFalse(task._debug_drawn)
+
+
 if __name__ == '__main__':
     unittest.main()

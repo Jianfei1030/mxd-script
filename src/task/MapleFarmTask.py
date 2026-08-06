@@ -1,6 +1,8 @@
 import time
 
 from qfluentwidgets import FluentIcon
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QColor, QPen
 
 from ok import Logger, TriggerTask
 from ok.gui.Communicate import communicate
@@ -49,6 +51,8 @@ DEFAULT_CONFIG = {
     '寻怪同层容差(像素)': 60,
     '寻怪刷新间隔(秒)': 0.4,
     '寻怪外推速度(像素/秒)': 250,
+    '玩家宽(像素)': 60,
+    '玩家高(像素)': 120,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -63,6 +67,13 @@ ANCHOR_DEFAULT_SPEED = 250        # 无实测速度时的水平外推速度(像�
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
 DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
 TURN_TAP_SECONDS = 0.05  # 转向轻点:方向键按 50ms 即翻转朝向,位移可忽略(约几像素,方向随怪侧轮换不累积)
+
+DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
+PLAYER_COLOR = QColor(0, 255, 0)
+ZONE_IDLE_COLOR = QColor(0, 128, 255)
+ZONE_HOT_COLOR = QColor(255, 0, 0)
+MOB_COLOR = QColor(255, 255, 0)
+MOB_FOOT_COLOR = QColor(0, 255, 255)
 
 
 class MapleFarmTask(TriggerTask, BaseMapleTask):
@@ -95,6 +106,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '寻怪同层容差(像素)': '判定"同一层"的高度容差:怪脚底与角色名字牌高度差在此范围内才走近,避免追到别的平台',
             '寻怪刷新间隔(秒)': '寻怪中刷新目标方向的最小间隔:越小追怪换目标/接战越快,但 YOLO 跑得越勤;空闲与原地攻击时不受影响',
             '寻怪外推速度(像素/秒)': '寻怪中名字牌被怪遮挡、OCR 连续失败时,攻击区按此速度跟随走动中的角色(水平外推),怪进区即可接战;名字牌一露头快通道立刻重新咬住。无实测速度时用此值,实测行走速度约 250',
+            '玩家宽(像素)': '仅用于调试可视化画框(勾选 GUI「启用标记框」时显示),不影响攻击判定',
+            '玩家高(像素)': '同「玩家宽(像素)」,仅调试画框用',
         })
         self._reset_state()
 
@@ -130,6 +143,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._attack_held = False     # 攻击键是否长按中(检测模式,区内有怪时按住连续挥砍)
         self._sitting = False         # 本轮闲置是否已按过椅子键(再按一次会起身,只能按一次)
         self._last_busy = 0.0         # 最近一次"忙"(攻击/寻怪/走位)时刻,坐椅延迟按它算
+        self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -254,6 +268,55 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             return False
         return bool(ok_config.get('use_overlay', False))
 
+    def _clear_debug(self):
+        """清掉已画的调试 overlay(没画过则什么都不做)。get_overlay_view 失败/返回 None
+        都容错——清理动作不能把主循环搞崩。"""
+        if not self._debug_drawn:
+            return
+        try:
+            overlay = self.get_overlay_view()
+            if overlay is not None:
+                overlay.clear_draw(DEBUG_OVERLAY_KEY)
+        except Exception as e:
+            self.log_error(f'调试 overlay 清除失败: {e!r}')
+        self._debug_drawn = False
+
+    def _draw_debug(self, cfg, body, zone, mobs, mob_present):
+        """画玩家框(绿)/攻击区框(蓝=无怪,红=有怪)/怪物框(黄)+脚底点(青)。
+        画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
+        用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
+        overlay = self.get_overlay_view()
+        if overlay is None:
+            return
+        pw, ph = cfg['玩家宽(像素)'], cfg['玩家高(像素)']
+        zx0, zy0, zx1, zy1 = zone
+        zone_color = ZONE_HOT_COLOR if mob_present else ZONE_IDLE_COLOR
+
+        def paint(painter, widget):
+            ratio = widget.frame_ratio()
+
+            def rect(x, y, w, h):
+                return QRectF(x * ratio, y * ratio, w * ratio, h * ratio)
+
+            painter.setPen(QPen(PLAYER_COLOR, 2))
+            painter.drawRect(rect(body[0] - pw / 2, body[1] - ph / 2, pw, ph))
+            painter.drawText(rect(body[0] - pw / 2, body[1] - ph / 2 - 20, 100, 20), '玩家')
+
+            painter.setPen(QPen(zone_color, 3))
+            painter.drawRect(rect(zx0, zy0, zx1 - zx0, zy1 - zy0))
+            painter.drawText(rect(zx0, zy0 - 20, 100, 20), '攻击区')
+
+            for mob in mobs:
+                painter.setPen(QPen(MOB_COLOR, 2))
+                painter.drawRect(rect(mob.x, mob.y, mob.width, mob.height))
+                painter.drawText(rect(mob.x, mob.y - 20, 100, 20), '怪物')
+                fx, fy = farm_logic.mob_feet(mob)
+                painter.setPen(QPen(MOB_FOOT_COLOR, 4))
+                painter.drawPoint(rect(fx, fy, 1, 1))
+
+        overlay.draw(DEBUG_OVERLAY_KEY, paint)
+        self._debug_drawn = True
+
     def _resolve_facing(self):
         """走位用朝向:配置 朝向=左/右 显式优先(中途改配置立即生效);自动 → 已跟踪的 _facing。"""
         manual = (self.config.get('朝向') or '').strip()
@@ -279,6 +342,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
         mob_present = farm_logic.mob_in_zone(centres, zone)
         self._last_mob_present = mob_present
+        if self._boxes_enabled():
+            self._draw_debug(cfg, body=body, zone=zone, mobs=mobs, mob_present=mob_present)
+        else:
+            self._clear_debug()
         if mob_present:
             self._seek_dir = None  # 怪进攻击区了,停追,原地攻击
             # 面向怪再攻击:怪在面朝反侧(或朝向未知)时先轻点方向键转向。
