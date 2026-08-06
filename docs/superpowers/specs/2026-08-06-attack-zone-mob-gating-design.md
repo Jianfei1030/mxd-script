@@ -155,7 +155,7 @@
 |---|---|---|
 | `src/detect/anchor.py` | 新增 | 名字牌锚点识别。OCR 函数以参数注入，可离线单测 |
 | `src/task/farm_logic.py` | 修改 | 新增纯函数：`mob_in_zone()`、`anchor_expired()`、`attack_zone()` |
-| `src/task/MapleFarmTask.py` | 修改 | 接线 + 新增状态 `_anchor`、`_anchor_time`、`_last_anchor_scan`（进 `_reset_state()`） |
+| `src/task/MapleFarmTask.py` | 修改 | 接线 + 新增状态 `_anchor`、`_anchor_time`、`_last_anchor_scan`、`_last_detect`、`_last_fallback_warn`、`_last_detect_error_log`（均进 `_reset_state()`） |
 | `scripts/calibrate_attack_zone.py` | 新增 | 标定工具：截当前帧，把锚点框、身体中心、攻击区画上去存 PNG |
 | `tests/test_anchor_offline.py` | 新增 | 40 帧回归 |
 | `tests/test_farm_logic.py` | 修改 | 新纯函数单测 |

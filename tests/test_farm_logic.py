@@ -98,6 +98,8 @@ class TestAnchorTiming(unittest.TestCase):
 
     def test_expired_anchor(self):
         self.assertTrue(fl.anchor_expired(111.0, 100.0, 10))
+        # 边界:年龄恰好等于保鲜期 → 按 spec"年龄 ≤ 保鲜期视为不过期",应为 False(实现用严格 >)
+        self.assertFalse(fl.anchor_expired(110.0, 100.0, 10))
 
     def test_rescan_throttle(self):
         self.assertFalse(fl.should_rescan_anchor(101.0, 100.0, 2))
