@@ -61,6 +61,9 @@ config = {
     'error_log_file': 'logs/ok-mxd_error.log',
     'version': version,
     'onetime_tasks': [],
-    'trigger_tasks': [["src.task.MapleFarmTask", "MapleFarmTask"]],
+    'trigger_tasks': [
+        ["src.task.MapleFarmTask", "MapleFarmTask"],
+        ["src.task.WarriorDebugTask", "WarriorDebugTask"],
+    ],
     'scene': ["src.scene.MapleScene", "MapleScene"],
 }
