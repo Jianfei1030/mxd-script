@@ -12,6 +12,8 @@ key_config_option = ConfigOption('游戏按键', {
     '蓝药键': 'insert',
     '回城卷键(可留空)': '',
     '拾取键': 'z',
+    '左移键': 'left',
+    '右移键': 'right',
 }, description='冒险岛游戏内按键,与游戏内键盘设置保持一致', config_description={
     '回城卷键(可留空)': '低血保命用。留空则低血时只停止任务不逃跑',
 }, show_at_tab=True, icon=FluentIcon.GAME)
