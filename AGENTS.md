@@ -162,3 +162,4 @@ calibrate_warrior_zone.py <帧PNG> --name 角色名       # 攻击距离标定
 - 多文件/多步任务用 task 工具跟踪;复杂软件任务优先 sub-agent 执行
 - 改动前对照 spec 与本文档 §5/§6,不默认"站桩"思维(本 fork 是战士巡逻)
 - 提交前跑全量测试确认无回归
+- **视觉相关任务(看截图/验证 overlay 画面/图像类验收)使用 `mimo v2.5` 模型(from opencode go)**——需要视觉能力时指定该模型,不要用无视觉的默认模型
