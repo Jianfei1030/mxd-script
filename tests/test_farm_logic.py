@@ -46,6 +46,11 @@ class TestFarmLogic(unittest.TestCase):
         self.assertTrue(fl.should_pickup(100.0, 0.0, 30.0, True))
         self.assertFalse(fl.should_pickup(20.0, 0.0, 30.0, True))
 
+    def test_should_feed_pet(self):
+        self.assertTrue(fl.should_feed_pet(900.0, 0.0, 900, True))
+        self.assertFalse(fl.should_feed_pet(899.9, 0.0, 900, True))  # 未到间隔
+        self.assertFalse(fl.should_feed_pet(900.0, 0.0, 900, False))  # 开关关
+
     def test_parse_buff_config(self):
         self.assertEqual(fl.parse_buff_config('magic_shield=q,armor=w'),
                          [('magic_shield', 'q'), ('armor', 'w')])

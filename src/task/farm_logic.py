@@ -75,6 +75,11 @@ def should_pickup(now, last_pickup_time, interval, enabled):
     return enabled and now - last_pickup_time >= interval
 
 
+def should_feed_pet(now, last_feed_time, interval, enabled):
+    """喂宠物节流:开关开着且距上次喂药够久才喂(默认 15 分钟一次)。"""
+    return enabled and now - last_feed_time >= interval
+
+
 def parse_buff_config(text):
     """'magic_shield=q,armor=w' -> [('magic_shield','q'),('armor','w')]"""
     result = []
