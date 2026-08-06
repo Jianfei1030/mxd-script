@@ -150,6 +150,35 @@ class TestFarmTaskOffline(unittest.TestCase):
         self.assertIn(call('home'), task.send_key.call_args_list)
         task.stop_farming.assert_not_called()
 
+    def test_potion_switch_off_on_toggle_resets_window_state(self):
+        """开→关→开切换后,残留的喝药窗口状态不触发「连续喝药无效」误停。
+
+        回归:关开关时 _hp_streak/_hp_at_press/_last_hp_potion_press 冻结,
+        重新打开后第一次喝药用切换前的旧基线判定,HP 只降不涨必然累计无效次数,
+        若切换前 streak 已接近上限则切换回来第一个有效药水立刻误停。
+        修复后 off 状态完全无状态:切换回来第一次喝药走哨兵路径(只记基线,不判无效)。
+        """
+        task = make_task(**{'攻击模式': '定频', '走位开关': False})
+        # 开状态把 streak 推到 4(差 1 触发停止)
+        for t in range(100, 105):
+            run_with_frame(task, hp=0.5, now=float(t))
+        self.assertEqual(task._hp_streak, 4)
+        # 关一帧:状态应被清空(修复点)
+        task.config['喝药开关'] = False
+        run_with_frame(task, hp=0.5, now=105.0)
+        # 重新打开,第一次喝药不应误判无效
+        task.config['喝药开关'] = True
+        run_with_frame(task, hp=0.5, now=106.0)
+        task.stop_farming.assert_not_called()
+
+    def test_potion_switch_off_never_ocrs_slot(self):
+        """关开关:不 OCR 快捷栏(药水耗尽保护整段跳过)。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False, '喝药开关': False,
+                            '药水耗尽保护': True})
+        with patch('src.task.MapleFarmTask.potions.read_slot_count') as ocr:
+            run_with_frame(task, hp=0.9, mp=0.9, now=1000.0)
+        ocr.assert_not_called()
+
     def test_detect_mode_attacks_when_mob_in_zone(self):
         task = make_task(**{'攻击模式': '检测'})
         mob = MagicMock(x=1200, y=700, width=60, height=50)  # 中心 (1230,725),在默认攻击区内

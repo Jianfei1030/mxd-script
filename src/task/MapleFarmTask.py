@@ -253,6 +253,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 if empty:
                     self.stop_farming(f'{"血" if empty == "hp" else "蓝"}药耗尽')
                     return
+        else:
+            # 关着的时间段不积累任何喝药状态:切换回来第一次喝药按哨兵路径处理
+            # (只记基线不判无效),防止用切换前的旧基线误判「连续喝药无效」。
+            self._hp_streak = 0
+            self._hp_at_press = 0.0
+            self._last_hp_potion_press = 0.0
 
         # 4. 攻击
         if cfg['攻击模式'] == '检测':
