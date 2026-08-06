@@ -94,7 +94,7 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         # 快通道小窗刷新;失败沿用上一可信锚点(spec §4.2 步骤 4)
         hit = anchor.find_anchor(frame, character_name, prev_anchor=self._anchor)
         if hit is not None:
-            self._facing = self._auto_facing(hit)
+            self._facing = self._resolve_facing(cfg, hit)
             self._anchor = hit
 
         mobs = self.find_mobs(frame)
@@ -104,6 +104,15 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         in_zone = any(farm_logic.mob_in_zone(mob, zone) for mob in mobs)
         self._last_draw = now
         self._draw_debug(frame, cfg, facing=self._facing, in_zone=in_zone, mobs=mobs)
+
+    def _resolve_facing(self, cfg, anchor):
+        """朝向解析(spec §3.3 优先级):①手动 左/右 优先;②自动 = 移动推断;③无历史默认 RIGHT。"""
+        manual = (cfg.get('朝向') or '').strip()
+        if manual == '左':
+            return 'LEFT'
+        if manual == '右':
+            return 'RIGHT'
+        return self._auto_facing(anchor)
 
     def _auto_facing(self, anchor):
         """朝向自动推断:名字牌 x 位移 > 阈值 → 翻转;否则保持。"""

@@ -119,6 +119,31 @@ class TestWarriorDebugOffline(unittest.TestCase):
         # 小位移(噪声)→ 保持
         self.assertEqual(task._auto_facing((1283, 700)), 'LEFT')
 
+    def test_manual_facing_overrides_auto(self):
+        """手动 左/右 优先于自动移动推断(spec §3.3 优先级 ①)。"""
+        task = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '朝向': '左'})
+        task._anchor = (1280, 700)
+        task._facing = 'RIGHT'
+        # 即使锚点右移(自动会判 RIGHT),手动『左』仍优先 → LEFT
+        self.assertEqual(task._resolve_facing(task.config, (1310, 700)), 'LEFT')
+
+        task2 = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '朝向': '右'})
+        task2._anchor = (1280, 700)
+        task2._facing = 'LEFT'
+        # 即使锚点左移(自动会判 LEFT),手动『右』仍优先 → RIGHT
+        self.assertEqual(task2._resolve_facing(task2.config, (1250, 700)), 'RIGHT')
+
+    def test_manual_facing_applied_in_run(self):
+        """手动朝向在 run() 里真正生效:刷新锚点时用 _resolve_facing。"""
+        task = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '朝向': '左'})
+        task._anchor = (1280, 700)
+        task._facing = 'RIGHT'
+        with patch('src.task.WarriorDebugTask.anchor.find_anchor', return_value=(1310, 700)):
+            with patch.object(WarriorDebugTask, '_draw_debug') as draw:
+                run_with_frame(task)
+                _, kwargs = draw.call_args
+                self.assertEqual(kwargs['facing'], 'LEFT')  # 手动『左』生效,而非自动判 RIGHT
+
     def test_throttle_skips_second_run(self):
         """刷新间隔内第二次 run 跳过(节流)。"""
         task = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '调试刷新间隔(秒)': 0.3})
