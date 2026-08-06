@@ -87,3 +87,51 @@ def parse_buff_config(text):
 
 def is_dead(hp_percent, threshold=0.02):
     return hp_percent < threshold
+
+
+def mob_feet(mob):
+    """怪物脚底点 = bbox 底部中心。横版地面距离以脚底为准,不用框中心。"""
+    return mob.x + mob.width / 2, mob.y + mob.height
+
+
+def warrior_attack_zone(body_center, facing, attack_distance, zone_height):
+    """战士近战攻击区 = 身体中心向 facing 侧的半矩形 (x, y, w, h)。
+    朝左 → [cx-距离, cx];朝右 → [cx, cx+距离];未知朝向按右。"""
+    cx, cy = body_center
+    top = cy - zone_height / 2
+    if facing == 'LEFT':
+        return cx - attack_distance, top, attack_distance, zone_height
+    return cx, top, attack_distance, zone_height
+
+
+def mob_feet_in_zone(mob, zone):
+    """怪脚底落入攻击区矩形 → 可攻击。边界像素算命中。
+    (战士/近战专用:与站桩的 mob_in_zone(中心点判定) 分开,见合并说明)"""
+    x, y, w, h = zone
+    fx, fy = mob_feet(mob)
+    return x <= fx <= x + w and y <= fy <= y + h
+
+
+def facing_update(facing, move_direction):
+    """移动方向 → 朝向。无历史(或未知方向)默认 RIGHT。"""
+    if move_direction == 'left':
+        return 'LEFT'
+    if move_direction == 'right':
+        return 'RIGHT'
+    return facing if facing in ('LEFT', 'RIGHT') else 'RIGHT'
+
+
+def patrol_direction(player_ratio, left_bound, right_bound):
+    """单屏折返:比例 < 左界 → 向右走;> 右界 → 向左走;中间(含压界) → 保持(None)。"""
+    if player_ratio < left_bound:
+        return 'right'
+    if player_ratio > right_bound:
+        return 'left'
+    return None
+
+
+def should_approach(body_center, mob_feet_xy, attack_distance):
+    """怪脚底与身体中心水平距离 > 攻击距离 → 需朝怪接近。"""
+    cx, _ = body_center
+    fx, _ = mob_feet_xy
+    return abs(fx - cx) > attack_distance
