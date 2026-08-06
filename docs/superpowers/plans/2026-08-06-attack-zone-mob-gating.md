@@ -247,7 +247,7 @@ EOF
 - Consumes: `ocr_engine.read_texts(image, ocr_fn=None) -> list[TextHit]`
 - Produces:
   - `anchor.Anchor(x: float, y: float, width: int)` —— 名字牌中心与框宽（全帧坐标）
-  - `anchor.search_region(frame_w, frame_h, width_ratio, height_ratio) -> (x0, y0, x1, y1)`
+  - `anchor.search_region(frame_w, frame_h, width_ratio, height_ratio, center_y_ratio=0.55) -> (x0, y0, x1, y1)`
   - `anchor.tiles(region, tile_w=640, tile_h=240, overlap=200) -> list[(x0, y0, x1, y1)]`
   - `anchor.find_in_region(frame, name, region, ocr_fn=None) -> Anchor | None`
   - `anchor.find_in_window(frame, name, center, half_w, half_h, ocr_fn=None) -> Anchor | None`
@@ -285,8 +285,17 @@ def fake_ocr(texts_per_call):
 
 class TestSearchRegion(unittest.TestCase):
 
-    def test_centered_on_frame(self):
-        self.assertEqual(anchor.search_region(2560, 1440, 0.30, 0.30), (896, 504, 1664, 936))
+    def test_matches_measured_baseline_region(self):
+        """默认区域必须与 spec §3.1 的实测基线是同一块:x 0.35-0.65、y 0.40-0.70。
+        名字牌画在角色脚下,而相机对准的是身体,所以牌子系统性地在画面中心偏下
+        (实测 y 738-888,中心 813 > 720)—— 搜索区中心因此取 0.55h 而不是 0.5h。"""
+        self.assertEqual(anchor.search_region(2560, 1440, 0.30, 0.30), (896, 576, 1664, 1008))
+
+    def test_covers_measured_anchor_range(self):
+        """实测 40 帧的名字牌 y ∈ [738, 888]、x ∈ [1073, 1468],必须全落在区内。"""
+        x0, y0, x1, y1 = anchor.search_region(2560, 1440, 0.30, 0.30)
+        self.assertTrue(x0 <= 1073 and 1468 <= x1)
+        self.assertTrue(y0 <= 738 and 888 <= y1)
 
     def test_excludes_known_decoys(self):
         """右侧组队列表(x≈2303,y≈1032)与左下状态栏(x≈732,y≈1421)都写着同一个角色名,
@@ -307,11 +316,11 @@ class TestTiles(unittest.TestCase):
         self.assertGreaterEqual(overlap, 130)
 
     def test_covers_region_edges(self):
-        got = anchor.tiles((896, 504, 1664, 936))
+        got = anchor.tiles((896, 576, 1664, 1008))
         self.assertEqual(min(t[0] for t in got), 896)
         self.assertEqual(max(t[2] for t in got), 1664)
-        self.assertEqual(min(t[1] for t in got), 504)
-        self.assertEqual(max(t[3] for t in got), 936)
+        self.assertEqual(min(t[1] for t in got), 576)
+        self.assertEqual(max(t[3] for t in got), 1008)
 
     def test_terminates_when_overlap_ge_tile(self):
         """重叠 >= 块宽会让步长变成 0,必须有下限保护,不能死循环。"""
@@ -356,7 +365,7 @@ class TestFindInRegion(unittest.TestCase):
 
     def setUp(self):
         self.frame = np.zeros((1440, 2560, 3), np.uint8)
-        self.region = (896, 504, 1664, 936)
+        self.region = (896, 576, 1664, 1008)
 
     def test_returns_first_match_with_global_coordinates(self):
         """第 3 块才命中,坐标必须按第 3 块的原点平移。"""
@@ -418,15 +427,20 @@ TILE_OVERLAP = 200  # 必须 > 名字牌宽度(实测 ~130px)
 Anchor = namedtuple('Anchor', 'x y width')
 
 
-def search_region(frame_w, frame_h, width_ratio, height_ratio):
-    """以画面中心为心的搜索区 (x0, y0, x1, y1)。
+def search_region(frame_w, frame_h, width_ratio, height_ratio, center_y_ratio=0.55):
+    """角色名字牌的搜索区 (x0, y0, x1, y1)。
 
     相机跟随角色,角色恒在画面中部;限定中央区还天然排除了两个同名干扰源——
-    右侧组队列表(x≈2303)与左下角状态栏(x≈732),它们写着同一个角色名。
+    右侧组队列表(x≈2303, y≈1032)与左下角状态栏(x≈732, y≈1421),它们写着同一个角色名。
+
+    纵向中心默认 0.55 而不是 0.5:名字牌画在角色**脚下**,相机对准的却是身体,
+    牌子因此系统性地偏在画面中心下方(实测 40 帧 y ∈ [738, 888],中心 813 > 720)。
+    默认值配合 0.30 比例正好等于 spec §3.1 实测基线所用的区域(x 0.35-0.65 / y 0.40-0.70),
+    基线数据(中位 118ms、干净命中 22/40)才对得上;改动此默认值等于换了区域,基线必须重测。
     """
     half_w = frame_w * width_ratio / 2
     half_h = frame_h * height_ratio / 2
-    cx, cy = frame_w / 2, frame_h / 2
+    cx, cy = frame_w / 2, frame_h * center_y_ratio
     return int(cx - half_w), int(cy - half_h), int(cx + half_w), int(cy + half_h)
 
 
@@ -495,7 +509,7 @@ def body_center(anchor_obj, offset_px):
 ```bash
 PYTHONIOENCODING=utf-8 "H:/ok-mxd/data/apps/ok-ww/python/python.exe" -m unittest tests.test_anchor -v
 ```
-Expected: PASS（13 个测试）
+Expected: PASS（14 个测试）
 
 - [ ] **Step 5: 提交**
 
@@ -543,7 +557,7 @@ import unittest
 
 import cv2
 
-from src.detect import anchor
+from src.detect import anchor, ocr_engine
 
 DATASET = os.path.join('dataset', 'images', 'train')
 NAME = os.environ.get('OK_MXD_CHAR_NAME', 'Yufeng咕咕')
@@ -560,6 +574,8 @@ class TestAnchorOnRealFrames(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # 模型惰性加载是秒级的,不先预热的话第一帧的计时会把加载算进去,判据 D 必挂
+        ocr_engine.prewarm()
         cls.results = []
         for path in frame_files():
             frame = cv2.imread(path)
@@ -601,7 +617,7 @@ if __name__ == '__main__':
 ```bash
 PYTHONIOENCODING=utf-8 "H:/ok-mxd/data/apps/ok-ww/python/python.exe" -m unittest tests.test_anchor_offline -v
 ```
-Expected: 4 个测试 PASS（首次会加载 OCR 模型，整体约 10-15s）。若 `dataset/images/train` 不在本机，Expected: 全部 skip。
+Expected: 4 个测试 PASS（`setUpClass` 里预热模型再计时，整体约 10-15s，其中模型加载不计入判据 D）。若 `dataset/images/train` 不在本机，Expected: 全部 skip —— **skip 不等于通过**，换机器跑要确认这行是 ok 还是 skipped。
 
 **若判据 A 不过**：不要放宽判据。先用 `scripts/calibrate_attack_zone.py`（Task 6）看图确认角色名配置对不对、角色是否落在中央区外；确认是设计问题再回来改 spec。
 
@@ -639,56 +655,56 @@ EOF
 
 - [ ] **Step 1: 写失败的测试**
 
-追加到 `tests/test_farm_logic.py`（保持文件既有风格，import 已存在则不重复加）：
+追加到 `tests/test_farm_logic.py` 末尾。**注意该文件的既有 import 是 `from src.task import farm_logic as fl`**，所以下面全部用 `fl.` 前缀，不要写 `farm_logic.`（会 NameError）：
 
 ```python
 class TestAttackZone(unittest.TestCase):
 
     def test_zone_centered(self):
-        self.assertEqual(farm_logic.attack_zone((1280, 630), 600, 200),
+        self.assertEqual(fl.attack_zone((1280, 630), 600, 200),
                          (980.0, 530.0, 1580.0, 730.0))
 
     def test_point_inside(self):
-        zone = farm_logic.attack_zone((1280, 630), 600, 200)
-        self.assertTrue(farm_logic.point_in_zone((1280, 630), zone))
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertTrue(fl.point_in_zone((1280, 630), zone))
 
     def test_point_on_edge_counts_as_inside(self):
-        zone = farm_logic.attack_zone((1280, 630), 600, 200)
-        self.assertTrue(farm_logic.point_in_zone((980.0, 530.0), zone))
-        self.assertTrue(farm_logic.point_in_zone((1580.0, 730.0), zone))
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertTrue(fl.point_in_zone((980.0, 530.0), zone))
+        self.assertTrue(fl.point_in_zone((1580.0, 730.0), zone))
 
     def test_point_outside(self):
-        zone = farm_logic.attack_zone((1280, 630), 600, 200)
-        self.assertFalse(farm_logic.point_in_zone((1581.0, 630), zone))
-        self.assertFalse(farm_logic.point_in_zone((1280, 529.0), zone))
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertFalse(fl.point_in_zone((1581.0, 630), zone))
+        self.assertFalse(fl.point_in_zone((1280, 529.0), zone))
 
     def test_mob_in_zone_any(self):
-        zone = farm_logic.attack_zone((1280, 630), 600, 200)
-        self.assertTrue(farm_logic.mob_in_zone([(100, 100), (1300, 640)], zone))
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertTrue(fl.mob_in_zone([(100, 100), (1300, 640)], zone))
 
     def test_mob_in_zone_none(self):
-        zone = farm_logic.attack_zone((1280, 630), 600, 200)
-        self.assertFalse(farm_logic.mob_in_zone([(100, 100), (2400, 1300)], zone))
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertFalse(fl.mob_in_zone([(100, 100), (2400, 1300)], zone))
 
     def test_no_mobs(self):
-        zone = farm_logic.attack_zone((1280, 630), 600, 200)
-        self.assertFalse(farm_logic.mob_in_zone([], zone))
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertFalse(fl.mob_in_zone([], zone))
 
 
 class TestAnchorTiming(unittest.TestCase):
 
     def test_never_acquired_counts_as_expired(self):
-        self.assertTrue(farm_logic.anchor_expired(100.0, None, 10))
+        self.assertTrue(fl.anchor_expired(100.0, None, 10))
 
     def test_fresh_anchor(self):
-        self.assertFalse(farm_logic.anchor_expired(105.0, 100.0, 10))
+        self.assertFalse(fl.anchor_expired(105.0, 100.0, 10))
 
     def test_expired_anchor(self):
-        self.assertTrue(farm_logic.anchor_expired(111.0, 100.0, 10))
+        self.assertTrue(fl.anchor_expired(111.0, 100.0, 10))
 
     def test_rescan_throttle(self):
-        self.assertFalse(farm_logic.should_rescan_anchor(101.0, 100.0, 2))
-        self.assertTrue(farm_logic.should_rescan_anchor(102.0, 100.0, 2))
+        self.assertFalse(fl.should_rescan_anchor(101.0, 100.0, 2))
+        self.assertTrue(fl.should_rescan_anchor(102.0, 100.0, 2))
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -768,7 +784,7 @@ EOF
     task.find_mobs = MagicMock(return_value=[])
 ```
 
-把既有的 `test_full_hp_attacks_only` 改成显式定频（它测的是"满血只攻击"，与检测无关）：
+**两个**依赖"默认定频"的既有用例都要显式声明定频，否则默认改成检测 + `find_mobs` 桩成 `[]` 后必然失败（它们测的是满血攻击与计时器复位，与检测无关）：
 
 ```python
     def test_full_hp_attacks_only(self):
@@ -776,6 +792,12 @@ EOF
         run_with_frame(task)
         self.assertIn(call('shift'), task.send_key.call_args_list)
         task.stop_farming.assert_not_called()
+```
+
+`test_re_enable_resets_stall_timer`（`tests/test_farm_task_offline.py:105-124`）第 107 行同样要改 —— 它在 `:124` 断言 `call('shift')`：
+
+```python
+        task = make_task(**{'攻击模式': '定频'})
 ```
 
 既有的三个检测模式测试（`test_detect_mode_attacks_when_mob_in_zone` / `_idles_when_no_mob` / `_idles_when_mob_outside_zone`）保留，但要按新的默认攻击区核对坐标：`角色名` 留空 → 锚点 = 屏幕中心 (1280, 720) → 身体中心 (1280, 630) → 攻击区 x[980,1580]、y[530,730]。原用例的怪中心 (1230, 725) 仍在区内、(40, 35) 仍在区外，断言不用改。
@@ -808,14 +830,35 @@ class TestDetectModeAnchor(unittest.TestCase):
             run_with_frame(task)
         self.assertEqual(task.find_mobs.call_count, 1)
 
-    def test_anchor_from_window_then_cached(self):
-        """快通道命中后记住锚点;下一拍快通道失灵且慢通道被节流时,沿用上次锚点。"""
+    def test_window_hit_updates_anchor(self):
+        """快通道命中后必须把锚点更新成新值。
+
+        必须先播种旧锚点:_resolve_anchor 的快通道有 `if self._anchor is not None` 前置条件,
+        新任务的 _anchor 是 None,不播种的话根本进不去快通道。旧值要与新值不同,
+        否则断言分不清"更新了"和"本来就是这个值"。
+        """
         task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1390.0, 905.0)
+        task._anchor_time = 100.0
         hit = MapleAnchor(1400.0, 900.0, 128)
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=hit), \
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
             run_with_frame(task)
         self.assertEqual(task._anchor, (1400.0, 900.0))
+
+    def test_cached_anchor_when_both_channels_miss(self):
+        """快通道失灵 + 慢通道被节流 + 锚点未过期 → 沿用上次锚点,不回退画面中心。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '锚点保鲜(秒)': 10})
+        task._anchor = (1400.0, 900.0)
+        task._anchor_time = 99.0        # 时间被固定在 100.0,锚点年龄 1s,未过期
+        task._last_anchor_scan = 99.5   # 距上次扫描 0.5s < 锚点刷新间隔 2s,慢通道被节流
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None) as window, \
+                patch('src.task.MapleFarmTask.anchor.find_in_region') as region:
+            got, source = task._resolve_anchor(cv2.imread(FRAME), 100.0, task.config)
+        self.assertEqual(source, 'cached')
+        self.assertEqual((got.x, got.y), (1400.0, 900.0))
+        window.assert_called_once()
+        region.assert_not_called()
 
     def test_expired_anchor_falls_back_to_centre(self):
         task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '锚点保鲜(秒)': 5})
@@ -860,9 +903,12 @@ from src.detect import anchor, bars, guards, ocr_engine, potions
     '名字牌到身体偏移(像素)': 90,
     '锚点搜索区宽(比例)': 0.30,
     '锚点搜索区高(比例)': 0.30,
+    '锚点搜索区中心Y(比例)': 0.55,
     '锚点刷新间隔(秒)': 2,
     '锚点保鲜(秒)': 10,
 ```
+
+（`锚点搜索区中心Y(比例)` 默认 0.55 而非 0.5：名字牌在角色脚下，系统性偏在画面中心下方；0.30/0.30/0.55 三个默认值合起来正好等于 spec §3.1 实测基线所用的区域，判据 A-D 的基线才对得上。）
 
 在 `CALIBRATED_SIZE` 下面加模块常量：
 
@@ -928,7 +974,8 @@ FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防
 
         if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
             self._last_anchor_scan = now
-            region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'])
+            region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
+                                          cfg['锚点搜索区中心Y(比例)'])
             hit = anchor.find_in_region(frame, name, region)
             if hit is not None:
                 self._anchor, self._anchor_time = (hit.x, hit.y), now
@@ -971,7 +1018,7 @@ FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防
 ```bash
 PYTHONIOENCODING=utf-8 "H:/ok-mxd/data/apps/ok-ww/python/python.exe" -m unittest tests.test_farm_task_offline -v
 ```
-Expected: PASS（含新增 5 个）
+Expected: PASS（含新增 5 个；两个既有用例已在 Step 1 改成显式定频）
 
 - [ ] **Step 7: 全量回归**
 
@@ -1052,6 +1099,7 @@ def main():
     p.add_argument('--offset', type=float, default=90)
     p.add_argument('--region-w', type=float, default=0.30)
     p.add_argument('--region-h', type=float, default=0.30)
+    p.add_argument('--region-cy', type=float, default=0.55)
     p.add_argument('--out', default=os.path.join('screenshots', 'calibrate_attack_zone.png'))
     args = p.parse_args()
 
@@ -1061,7 +1109,7 @@ def main():
     h, w = frame.shape[:2]
     canvas = frame.copy()
 
-    region = anchor.search_region(w, h, args.region_w, args.region_h)
+    region = anchor.search_region(w, h, args.region_w, args.region_h, args.region_cy)
     cv2.rectangle(canvas, (region[0], region[1]), (region[2], region[3]), (255, 128, 0), 2)
     cv2.putText(canvas, 'search region', (region[0] + 6, region[1] + 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 128, 0), 2)
