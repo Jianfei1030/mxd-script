@@ -9,7 +9,7 @@ from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmT
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
 KEYS = {'攻击键': 'shift', '血药键': 'home', '蓝药键': 'insert',
         '回城卷键(可留空)': '', '拾取键': 'z', '宠物食物键(可留空)': 'q',
-        '左移键': 'left', '右移键': 'right'}
+        '椅子键(可留空)': 'r', '左移键': 'left', '右移键': 'right'}
 
 
 def make_task(**cfg_overrides):
@@ -26,6 +26,7 @@ def make_task(**cfg_overrides):
     task.stop_farming = MagicMock()
     task.log_warning = MagicMock()
     task.log_error = MagicMock()
+    task.log_info = MagicMock()
     task.find_mobs = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
     return task
@@ -193,14 +194,19 @@ class TestFarmTaskOffline(unittest.TestCase):
         task = make_task(**{'攻击模式': '检测'})
         task.find_mobs = MagicMock(return_value=[])
         run_with_frame(task)
-        task.send_key.assert_not_called()  # 无怪停手省蓝
+        # 无怪停手省蓝:不按攻击键(闲置坐椅会按一次椅子键 r,见 TestSitChair)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('shift', sent)
 
     def test_detect_mode_idles_when_mob_outside_zone(self):
         task = make_task(**{'攻击模式': '检测'})
-        far = MagicMock(x=10, y=10, width=60, height=50)  # 左上角,攻击区外
+        far = MagicMock(x=10, y=10, width=60, height=50)  # 左上角,攻击区外且不同层
         task.find_mobs = MagicMock(return_value=[far])
         run_with_frame(task)
-        task.send_key.assert_not_called()
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('shift', sent)  # 不按攻击键
+        self.assertNotIn('left', sent)   # 不同层怪不追
+        self.assertNotIn('right', sent)
 
     def test_detect_mode_turns_then_attacks_when_mob_behind(self):
         """怪在面朝反侧 → 先轻点方向键转向再攻击,并更新 _facing。"""
@@ -325,14 +331,16 @@ class TestFarmTaskOffline(unittest.TestCase):
         self.assertIsNone(task._seek_dir)
 
     def test_seek_switch_off_idles(self):
-        """寻怪开关关 → 同层远怪也不动。"""
+        """寻怪开关关 → 同层远怪也不动(不按方向键;闲置坐椅会按椅子键)。"""
         task = make_task(**{'攻击模式': '检测', '寻怪开关': False})
         with patch('src.detect.anchor.find_in_region',
                    return_value=MapleAnchor(1280, 800, 130)):
             mob = MagicMock(x=2000, y=680, width=60, height=50)
             task.find_mobs = MagicMock(return_value=[mob])
             run_with_frame(task)
-        task.send_key.assert_not_called()
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
 
     def test_seek_stops_when_mob_enters_zone(self):
         """寻怪途中怪从同侧进攻击区 → 停追,原地攻击(已面朝,不转向),松开方向键。"""
@@ -771,6 +779,100 @@ class TestAttackHold(unittest.TestCase):
         task.send_key_up = MagicMock(side_effect=RuntimeError('key up 失败'))
         task._on_executor_paused(True)  # 不应抛出
         self.assertFalse(task._attack_held)
+
+
+class TestSitChair(unittest.TestCase):
+    """坐椅(_do_sit_chair 直接测,无帧依赖)。
+
+    检测模式、区内没怪且没在寻怪(真正站桩闲置)、离上次"忙"(攻击/寻怪/走位)
+    超过 坐椅延迟 → 按一次椅子键坐下。坐下后再按一次椅子键会起身,所以同一轮
+    闲置只按一次(_sitting 标记);起身不显式按键——怪进区/开始寻怪/走位时,
+    长按的攻击键/方向键/走位按键本身会带角色站起来,下一轮闲置由 _mark_busy
+    清标记后重新坐下。定频模式不坐:它按攻击间隔定时按键,坐下立刻被带起身。
+    """
+
+    def test_sits_when_idle_and_delay_elapsed(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = False
+        task._seek_dir = None
+        task._last_busy = 100.0
+        task._do_sit_chair(task.config, KEYS, 105.0)  # 闲置 5s ≥ 延迟 3s
+        self.assertEqual(task.send_key.call_args_list, [call('r')])
+        self.assertTrue(task._sitting)
+
+    def test_no_repress_while_sitting(self):
+        """同一轮闲置只按一次椅子键——再按一次会起身。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = False
+        task._last_busy = 100.0
+        task._sitting = True
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+
+    def test_no_sit_when_mob_in_zone(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+        self.assertFalse(task._sitting)
+
+    def test_no_sit_while_seeking(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = False
+        task._seek_dir = 'right'
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+
+    def test_no_sit_before_delay(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = False
+        task._last_busy = 104.5  # 闲置 0.5s < 3s
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+        self.assertFalse(task._sitting)
+
+    def test_no_sit_before_first_detection(self):
+        """启动后还没检测过(_last_mob_present 仍是 None)→ 不坐——没有新鲜的
+        "有没有怪"判断就贸然坐下,可能正好坐在怪脸上。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = None
+        task._last_busy = 100.0
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+
+    def test_fixed_mode_never_sits(self):
+        task = make_task(**{'攻击模式': '定频'})
+        task._last_mob_present = False
+        task._last_busy = 100.0
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+
+    def test_switch_off_skips(self):
+        task = make_task(**{'攻击模式': '检测', '坐椅开关': False})
+        task._last_mob_present = False
+        task._last_busy = 100.0
+        task._do_sit_chair(task.config, KEYS, 105.0)
+        task.send_key.assert_not_called()
+
+    def test_unbound_key_keeps_pending(self):
+        """椅子键留空(未绑定)→ 不按键也不置坐椅标记:绑定后立即坐下,不用等
+        下一轮"忙→闲"循环。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = False
+        task._last_busy = 100.0
+        keys = {**KEYS, '椅子键(可留空)': ''}
+        task._do_sit_chair(task.config, keys, 105.0)
+        task.send_key.assert_not_called()
+        self.assertFalse(task._sitting)
+
+    def test_mark_busy_clears_sitting(self):
+        """接战/寻怪/走位 = 忙:清坐椅标记并重算延迟——刚坐下就接战时角色被
+        长按的攻击键/方向键带起身,下一轮闲置必须重新按键坐下。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._sitting = True
+        task._mark_busy(105.0)
+        self.assertFalse(task._sitting)
+        self.assertEqual(task._last_busy, 105.0)
 
 
 class TestDetectModeAnchor(unittest.TestCase):
