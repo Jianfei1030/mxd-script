@@ -20,6 +20,7 @@
 - 配置键、日志、注释一律中文，与既有代码保持一致
 - **不要运行 `main_debug.py`** —— 它启动时会清空 `screenshots/`（含测试用的 `test_frames`）
 - `dataset/images/` 在 `.gitignore` 里，**不入库**；依赖它的测试必须在数据缺失时 skip 而不是 fail
+- `screenshots/` 已于 `add1e5a` 整个加入 `.gitignore`，存档帧 `screenshots/test_frames/training_ground_full_2560x1440.png` **已从版本控制移除**（本机磁盘上还在）。`tests/test_bars.py`、`tests/test_potions.py`、`tests/test_farm_task_offline.py` 都依赖它 —— 换机器/新克隆跑测试会因 `cv2.imread` 返回 `None` 而报 `AttributeError`，不是本计划引入的问题，但排查失败时先看这一条
 - 每个任务结束时提交；提交信息用英文，结尾加：
   `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`
 
