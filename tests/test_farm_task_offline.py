@@ -28,14 +28,16 @@ def make_task(**cfg_overrides):
     return task
 
 
-def run_with_frame(task, hp=None, exp=None, now=100.0):
-    """以存档帧驱动一次 run();hp/exp 不为 None 时替换对应读数。
+def run_with_frame(task, hp=None, mp=None, exp=None, now=100.0):
+    """以存档帧驱动一次 run();hp/mp/exp 不为 None 时替换对应读数。
     now 可推进模拟时间(默认 100.0,与旧调用兼容)。"""
     frame_p = patch.object(MapleFarmTask, 'frame',
                            new=property(lambda self: cv2.imread(FRAME)))
     patches = [frame_p, patch('time.time', return_value=now)]
     if hp is not None:
         patches.append(patch('src.task.MapleFarmTask.bars.read_hp', return_value=hp))
+    if mp is not None:
+        patches.append(patch('src.task.MapleFarmTask.bars.read_mp', return_value=mp))
     if exp is not None:
         patches.append(patch('src.task.MapleFarmTask.bars.read_exp', return_value=exp))
     for p in patches:
@@ -114,6 +116,39 @@ class TestFarmTaskOffline(unittest.TestCase):
         run_with_frame(task, hp=0.60)
         self.assertIn(call('home'), task.send_key.call_args_list)
         self.assertEqual(task._hp_streak, 0)
+
+    def test_potion_switch_off_never_drinks_hp(self):
+        """关开关:HP 低于喝血阈值 → 不按血药键,也不触发无效检测停止。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False, '喝药开关': False})
+        run_with_frame(task, hp=0.5)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('home', sent)
+        task.stop_farming.assert_not_called()
+
+    def test_potion_switch_off_never_drinks_mp(self):
+        """关开关:MP 低于喝蓝阈值 → 不按蓝药键。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False, '喝药开关': False})
+        run_with_frame(task, hp=0.9, mp=0.2)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('insert', sent)
+        task.stop_farming.assert_not_called()
+
+    def test_potion_switch_off_emergency_still_scrolls(self):
+        """关开关 + HP 触保命血线:不按血药键,但回城卷与停任务照常。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False, '喝药开关': False})
+        task.get_global_config = MagicMock(return_value={**KEYS, '回城卷键(可留空)': 't'})
+        run_with_frame(task, hp=0.2)
+        calls = task.send_key.call_args_list
+        self.assertNotIn(call('home'), calls)
+        self.assertIn(call('t', after_sleep=2), calls)
+        task.stop_farming.assert_called_once_with('低血保命')
+
+    def test_potion_switch_on_drinks_by_default(self):
+        """默认(开关开):HP 低于阈值 → 照常喝药,行为不变。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False})
+        run_with_frame(task, hp=0.5)
+        self.assertIn(call('home'), task.send_key.call_args_list)
+        task.stop_farming.assert_not_called()
 
     def test_detect_mode_attacks_when_mob_in_zone(self):
         task = make_task(**{'攻击模式': '检测'})
