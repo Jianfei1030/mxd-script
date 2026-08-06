@@ -118,6 +118,77 @@ class TestFarmTaskOffline(unittest.TestCase):
         self.assertEqual(task.send_key.call_args_list,
                          [call('right', down_time=0.4), call('left', down_time=0.4)])
 
+    def test_walk_switch_off_never_walks(self):
+        task = make_task(**{'走位开关': False, '攻击模式': '定频'})
+        task._last_walk = -1000.0
+        run_with_frame(task)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+
+    def test_walk_fixed_mode_walks_when_due(self):
+        task = make_task(**{'攻击模式': '定频', '走位持续时间(秒)': 0.4})
+        task._last_walk = -1000.0
+        with patch('src.task.MapleFarmTask.random.choice', return_value='左移键'):
+            run_with_frame(task)
+        sent = [c for c in task.send_key.call_args_list if c.args and c.args[0] in ('left', 'right')]
+        self.assertEqual(sent, [call('left', down_time=0.4), call('right', down_time=0.4)])
+        self.assertEqual(task._last_walk, 100.0)  # run_with_frame 把 time.time() 固定在 100.0
+
+    def test_walk_detect_mode_defers_when_mob_present(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_walk = -1000.0
+        mob = MagicMock(x=1200, y=700, width=60, height=50)  # 中心在默认攻击区内
+        task.find_mobs = MagicMock(return_value=[mob])
+        run_with_frame(task)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+        self.assertTrue(task._last_mob_present)
+        self.assertEqual(task._last_walk, -1000.0)  # 未更新,顺延到下一次判定
+
+    def test_walk_detect_mode_walks_when_no_mob(self):
+        task = make_task(**{'攻击模式': '检测', '走位持续时间(秒)': 0.4})
+        task._last_walk = -1000.0
+        task.find_mobs = MagicMock(return_value=[])
+        with patch('src.task.MapleFarmTask.random.choice', return_value='右移键'):
+            run_with_frame(task)
+        sent = [c for c in task.send_key.call_args_list if c.args and c.args[0] in ('left', 'right')]
+        self.assertEqual(sent, [call('right', down_time=0.4), call('left', down_time=0.4)])
+        self.assertFalse(task._last_mob_present)
+        self.assertEqual(task._last_walk, 100.0)
+
+    def test_walk_not_due_yet_skips(self):
+        task = make_task(**{'攻击模式': '定频'})
+        task._last_walk = 99.0  # 100.0-99.0=1s < 默认 120s 间隔,未到
+        run_with_frame(task)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+        self.assertEqual(task._last_walk, 99.0)  # 未变
+
+    def test_walk_detect_mode_no_walk_before_first_detection(self):
+        """启动后一次检测都还没跑过(_last_mob_present 仍是初始值 None),
+        即使到了走位时间点也不许走——没有新鲜的"有没有怪"判断就贸然移动,
+        可能正好撞进怪堆。这里把 _last_detect 设成很接近 now,让本拍的检测
+        本身也不触发(should_attack 判定攻击间隔未到),模拟"两次检测之间、
+        且从未检测过"的窗口。
+
+        注意用的是 _last_detect 不是 _last_attack:合并 feat/attack-zone-mob-gating 后,
+        检测模式是否跑检测这一步单独用 _last_detect 节流(修了旧代码"无怪时 10Hz 每拍
+        都重跑检测"的缺陷),_last_attack 现在只在真的发出攻击键那一刻才更新,不再
+        control 是否跑检测——设 _last_attack 无法阻止这一拍触发检测。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_walk = -1000.0
+        task._last_detect = 99.9  # 100.0-99.9=0.1s < 默认攻击间隔 1.5s,本拍不跑检测
+        task.find_mobs = MagicMock()
+        run_with_frame(task)
+        task.find_mobs.assert_not_called()
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+        self.assertIsNone(task._last_mob_present)
+
 
     def test_re_enable_resets_stall_timer(self):
         """停止(经验停滞)后通过框架 enable() 重新启用,不应立即再次停止。"""
