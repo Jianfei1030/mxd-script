@@ -1223,6 +1223,49 @@ class TestDebugOverlay(unittest.TestCase):
         self.assertTrue(callable(args[1]))
         self.assertTrue(task._debug_drawn)
 
+    def test_draw_debug_paint_closure_runs_with_mobs(self):
+        """回归(2026-08-07 实测日志 13870 条 warning):脚底点曾写成
+        drawPoint(rect(fx, fy, 1, 1))——QRectF 传给只收 QPointF 的 drawPoint,
+        paint 闭包每帧抛 TypeError,被 OverlayWidget.paint_custom 吞掉,第一个怪
+        的脚底点之后的绘制(后续怪物框)全部中断。
+        这里把 paint 闭包对着真 QPainter 跑一遍(NoTextPainter 仅把 drawText 变
+        no-op——沙箱无字体渲染,drawText 会崩进程;drawRect/drawPoint 走真 Qt),
+        有怪时必须不抛异常。"""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QImage, QPainter
+
+        class NoTextPainter:
+            """drawText 变 no-op(本机无字体时会崩进程),其余透传真 QPainter。"""
+
+            def __init__(self, painter):
+                self._p = painter
+
+            def drawText(self, *args, **kwargs):
+                pass
+
+            def __getattr__(self, name):
+                return getattr(self._p, name)
+
+        class FakeWidget:
+            def frame_ratio(self):
+                return 1.0
+
+        mob = SimpleNamespace(x=100, y=200, width=80, height=120)
+        task = make_task()
+        overlay = MagicMock()
+        task.get_overlay_view = MagicMock(return_value=overlay)
+        task._draw_debug(task.config, body=(1280, 700), zone=(1000, 600, 1500, 800),
+                         mobs=[mob], mob_present=True)
+        callback = overlay.draw.call_args.args[1]
+
+        img = QImage(2560, 1440, QImage.Format_RGB32)
+        img.fill(0)
+        painter = QPainter(img)
+        try:
+            callback(NoTextPainter(painter), FakeWidget())  # 修复前这里抛 TypeError
+        finally:
+            painter.end()
+
     def test_draw_debug_noop_when_no_overlay(self):
         """无 GUI(get_overlay_view 返回 None)→ 不抛异常,不置标记。"""
         task = make_task()
