@@ -22,6 +22,7 @@ def make_task(**cfg_overrides):
     task.send_key = MagicMock()
     task.stop_farming = MagicMock()
     task.log_warning = MagicMock()
+    task.log_error = MagicMock()
     task.find_mobs = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
     return task
@@ -190,6 +191,31 @@ class TestDetectModeAnchor(unittest.TestCase):
             got, source = task._resolve_anchor(cv2.imread(FRAME), 100.0, task.config)
         self.assertEqual(source, 'fallback')
         self.assertEqual((got.x, got.y), (1280.0, 720.0))
+
+    def test_ocr_exception_does_not_stop_task(self):
+        """快/慢通道 OCR 任一环节抛异常,只能当作"这一级没拿到锚点"处理,
+        绝不能让异常冒泡出 run() —— 冒泡会被 TaskExecutor 的通用 except 抓住并 disable() 整个任务,
+        连保命/喝药都停,违反"无怪只停手,任务继续跑"的核心契约。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1400.0, 900.0)
+        task._anchor_time = 100.0
+        task._last_anchor_scan = 0.0  # 确保慢通道也会被触发,两条通道都测到
+        with patch('src.task.MapleFarmTask.anchor.find_in_window',
+                   side_effect=RuntimeError('模型炸了')) as window, \
+                patch('src.task.MapleFarmTask.anchor.find_in_region',
+                     side_effect=RuntimeError('模型炸了')) as region:
+            run_with_frame(task)  # 不应抛出
+        window.assert_called_once()
+        region.assert_called_once()
+        task.stop_farming.assert_not_called()
+
+    def test_find_mobs_exception_stops_attack_not_task(self):
+        """YOLO 找怪抛异常时视为"没找到怪"——停手不放技能,但任务本身不能被停。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': ''})  # 角色名留空,聚焦测 find_mobs 异常
+        task.find_mobs = MagicMock(side_effect=RuntimeError('模型炸了'))
+        run_with_frame(task)  # 不应抛出
+        task.send_key.assert_not_called()
+        task.stop_farming.assert_not_called()
 
 
 if __name__ == '__main__':

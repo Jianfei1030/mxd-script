@@ -41,6 +41,7 @@ CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
 FAST_HALF_W = 240        # 快通道搜索窗半宽(像素)
 FAST_HALF_H = 80         # 快通道搜索窗半高
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
+DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
 
 
 class MapleFarmTask(TriggerTask, BaseMapleTask):
@@ -78,6 +79,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_anchor_scan = 0.0
         self._last_detect = 0.0
         self._last_fallback_warn = 0.0
+        self._last_detect_error_log = 0.0
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -91,10 +93,23 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         if self.config.get('攻击模式') == '检测' and (self.config.get('角色名') or '').strip():
             ocr_engine.prewarm()
 
+    def _log_detect_error(self, now, context, exc):
+        """检测环节(OCR/YOLO)异常限频记录,防 10Hz 主循环下刷爆日志。
+
+        不许静默吞异常:异常发生时按"这一级没检测到"降级处理(继续沿阶梯往下走/停手),
+        但必须留痕,否则模型持续报错会在用户毫无察觉的情况下一直退化运行。
+        """
+        if now - self._last_detect_error_log >= DETECT_ERROR_LOG_INTERVAL:
+            self._last_detect_error_log = now
+            self.log_error(f'{context}异常,本次按未检测到处理(不影响任务继续运行): {exc!r}', exception=exc)
+
     def _resolve_anchor(self, frame, now, cfg):
         """按四级阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
         快通道(上次锚点附近小窗) → 慢通道(中央区分块,节流) → 沿用上次 → 回退屏幕中心。
+        OCR 调用可能抛异常(模型/引擎故障等),任一通道抛出都当作"这一级没拿到锚点"处理,
+        绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的通用 except 抓住并
+        直接 disable() 整个任务,连保命/喝药都会停,违反"无怪只停手,任务继续跑"的契约。
         """
         h, w = frame.shape[:2]
         centre = anchor.Anchor(w / 2.0, h / 2.0, 0)
@@ -103,7 +118,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             return centre, 'fallback'
 
         if self._anchor is not None:
-            hit = anchor.find_in_window(frame, name, self._anchor, FAST_HALF_W, FAST_HALF_H)
+            try:
+                hit = anchor.find_in_window(frame, name, self._anchor, FAST_HALF_W, FAST_HALF_H)
+            except Exception as e:
+                hit = None
+                self._log_detect_error(now, '快通道锚点 OCR', e)
             if hit is not None:
                 self._anchor, self._anchor_time = (hit.x, hit.y), now
                 return hit, 'window'
@@ -112,7 +131,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._last_anchor_scan = now
             region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
                                           cfg['锚点搜索区中心Y(比例)'])
-            hit = anchor.find_in_region(frame, name, region)
+            try:
+                hit = anchor.find_in_region(frame, name, region)
+            except Exception as e:
+                hit = None
+                self._log_detect_error(now, '慢通道锚点 OCR', e)
             if hit is not None:
                 self._anchor, self._anchor_time = (hit.x, hit.y), now
                 return hit, 'region'
@@ -208,7 +231,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 anchor_hit, source = self._resolve_anchor(frame, now, cfg)
                 body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
                 zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
-                centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in self.find_mobs(frame)]
+                try:
+                    mobs = self.find_mobs(frame)
+                except Exception as e:
+                    mobs = []
+                    self._log_detect_error(now, 'YOLO 找怪', e)
+                centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
                 if farm_logic.mob_in_zone(centres, zone):
                     self.send_key(keys['攻击键'])
                     self._last_attack = now
