@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from src.task import farm_logic as fl
 
@@ -161,6 +162,80 @@ class TestWarriorZone(unittest.TestCase):
         # 怪脚底与身体中心水平距离 > 攻击距离 → 需接近
         self.assertTrue(fl.should_approach((1280, 700), (1000, 700), 120))
         self.assertFalse(fl.should_approach((1280, 700), (1250, 700), 120))
+
+    def test_walk_order_facing_left_stays_left(self):
+        # 朝左 → 先向右走出、再向左走回,结束时仍朝左(走位不翻转朝向)
+        self.assertEqual(fl.walk_order('LEFT'), ('right', 'left', 'LEFT'))
+
+    def test_walk_order_facing_right_stays_right(self):
+        # 朝右 → 先向左走出、再向右走回,结束时仍朝右
+        self.assertEqual(fl.walk_order('RIGHT'), ('left', 'right', 'RIGHT'))
+
+    def test_walk_order_unknown_random_left(self):
+        # 朝向未知(首次走位):随机一侧出、反方向回,采纳走完后的实际朝向(第二段方向)
+        with patch('src.task.farm_logic.random.choice', return_value='left'):
+            self.assertEqual(fl.walk_order(None), ('left', 'right', 'RIGHT'))
+
+    def test_walk_order_unknown_random_right(self):
+        with patch('src.task.farm_logic.random.choice', return_value='right'):
+            self.assertEqual(fl.walk_order(None), ('right', 'left', 'LEFT'))
+
+    def test_turn_direction_facing_wrong_side(self):
+        # 朝右但怪在左 → 需按左转向;朝左但怪在右 → 需按右转向
+        self.assertEqual(fl.turn_direction('RIGHT', 1280, 1000), 'left')
+        self.assertEqual(fl.turn_direction('LEFT', 1280, 1500), 'right')
+
+    def test_turn_direction_facing_correct_side(self):
+        # 已面朝怪所在侧 → 不转向
+        self.assertIsNone(fl.turn_direction('RIGHT', 1280, 1500))
+        self.assertIsNone(fl.turn_direction('LEFT', 1280, 1000))
+
+    def test_turn_direction_unknown_facing_turns_to_mob(self):
+        # 朝向未知 → 按怪所在侧转向
+        self.assertEqual(fl.turn_direction(None, 1280, 1000), 'left')
+        self.assertEqual(fl.turn_direction(None, 1280, 1500), 'right')
+
+    def test_nearest_mob_x_picks_closest_in_zone(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)  # x∈[980,1580], y∈[530,730]
+        centres = [(1500, 640), (1000, 700), (2000, 200)]
+        self.assertEqual(fl.nearest_mob_x(centres, zone, 1280), 1500)  # 区内两个,取近的
+
+    def test_nearest_mob_x_none_in_zone(self):
+        zone = fl.attack_zone((1280, 630), 600, 200)
+        self.assertIsNone(fl.nearest_mob_x([(2000, 200), (100, 100)], zone, 1280))
+
+    def test_same_floor_within_tolerance(self):
+        self.assertTrue(fl.same_floor(800, 800, 60))      # 同高
+        self.assertTrue(fl.same_floor(830, 800, 60))      # 差 30 ≤ 容差
+        self.assertTrue(fl.same_floor(860, 800, 60))      # 边界:恰好容差 → 同层
+
+    def test_same_floor_beyond_tolerance(self):
+        self.assertFalse(fl.same_floor(861, 800, 60))     # 差 61 > 容差 → 不同层
+        self.assertFalse(fl.same_floor(700, 800, 60))     # 高一层(负方向同样不追)
+
+    def test_seek_direction_nearest_same_floor_mob(self):
+        # 同层怪左右都有 → 取水平距离最近的;不同层的忽略
+        entries = [(700, 800), (2000, 800), (900, 950)]   # (中心x, 脚底y)
+        self.assertEqual(fl.seek_direction(entries, 1280, 800, 60), 'left')
+        # 改近在右侧时 → 向右
+        entries = [(700, 800), (1700, 800)]
+        self.assertEqual(fl.seek_direction(entries, 1280, 800, 60), 'right')
+
+    def test_seek_direction_left_only(self):
+        entries = [(900, 800)]
+        self.assertEqual(fl.seek_direction(entries, 1280, 800, 60), 'left')
+
+    def test_seek_direction_right_only(self):
+        entries = [(1800, 800)]
+        self.assertEqual(fl.seek_direction(entries, 1280, 800, 60), 'right')
+
+    def test_seek_direction_ignores_other_floor(self):
+        # 有怪但全在不同层 → 不寻怪
+        entries = [(900, 1000), (1800, 900)]
+        self.assertIsNone(fl.seek_direction(entries, 1280, 800, 60))
+
+    def test_seek_direction_empty(self):
+        self.assertIsNone(fl.seek_direction([], 1280, 800, 60))
 
 
 if __name__ == '__main__':

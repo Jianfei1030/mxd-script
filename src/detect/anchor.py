@@ -8,7 +8,9 @@
   → 必须切成 640x240 的小块
 - 名字牌宽约 130px,块重叠必须大于它,否则骑在边界上被两侧切断
 - 宠物名字牌会遮挡角色名(只剩 'ng咕咕'),邻近玩家的牌子会粘连成 '小白雪人ifeng咕咕'
-  → 只收"文本恰好等于角色名"的框,截断/粘连一律丢弃,靠调用方的沿用+回退兜底
+  → 完全匹配优先;剩尾巴且过半长的部分匹配也收(战斗中持续被挡,总比 10s+ 后
+  退化到画面中心强,中心点会因此右偏,可接受);粘连文本比全名长,天然不会被当成后缀收下
+  (详见 _matches,及 2026-08-06 第二轮"被打后打怪异常"复查)
 - 名字牌模板匹配不可行:底框半透明,模板会把地图背景一起吃进去
 """
 from collections import namedtuple
@@ -61,8 +63,23 @@ def tiles(region, tile_w=TILE_W, tile_h=TILE_H, overlap=TILE_OVERLAP):
     return out
 
 
+def _matches(text, target):
+    """完全匹配,或被遮挡后只剩尾巴的部分匹配。
+
+    只认后缀:遮挡源(自己的宠物牌、相邻玩家牌子)压在名字前半,OCR 只读出尾巴
+    (实测 'ng咕咕')——用它当近似锚点,好过战斗中连续多帧被挡满 10s 直接退化到
+    画面中心。尾巴太短(<半长)信息量不够,容易撞上别的同尾缀玩家,仍然丢弃。
+    粘连文本(如 '小白雪人ifeng咕咕')比 target 长,不可能是它的后缀,天然被排除。
+    """
+    text = text.strip()
+    if text == target:
+        return True
+    min_len = max(3, len(target) // 2)
+    return len(text) >= min_len and target.endswith(text)
+
+
 def _scan(frame, name, boxes, ocr_fn):
-    """在给定小块里找"文本恰好等于 name"的框,返回全帧坐标的 Anchor 或 None。"""
+    """在给定小块里找匹配 name 的框(完全匹配优先,详见 _matches),返回全帧坐标的 Anchor 或 None。"""
     target = (name or '').strip()
     if not target:
         return None
@@ -71,7 +88,7 @@ def _scan(frame, name, boxes, ocr_fn):
         if crop.size == 0:
             continue
         for hit in read_texts(crop, ocr_fn=ocr_fn):
-            if hit.text.strip() == target:
+            if _matches(hit.text, target):
                 return Anchor(x0 + hit.cx, y0 + hit.cy, hit.width)
     return None
 

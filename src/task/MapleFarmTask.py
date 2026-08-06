@@ -1,9 +1,9 @@
-import random
 import time
 
 from qfluentwidgets import FluentIcon
 
 from ok import Logger, TriggerTask
+from ok.gui.Communicate import communicate
 from src.detect import anchor, bars, guards, ocr_engine, potions
 from src.task import farm_logic
 from src.task.BaseMapleTask import BaseMapleTask
@@ -40,6 +40,10 @@ DEFAULT_CONFIG = {
     '走位持续时间(秒)': 0.4,
     '走位开关': True,
     '走位间隔(秒)': 120,
+    '朝向': '自动',
+    '寻怪开关': True,
+    '寻怪同层容差(像素)': 60,
+    '寻怪刷新间隔(秒)': 0.4,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -48,24 +52,33 @@ FAST_HALF_W = 240        # 快通道搜索窗半宽(像素)
 FAST_HALF_H = 80         # 快通道搜索窗半高
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
 DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
+TURN_TAP_SECONDS = 0.05  # 转向轻点:方向键按 50ms 即翻转朝向,位移可忽略(约几像素,方向随怪侧轮换不累积)
 
 
 class MapleFarmTask(TriggerTask, BaseMapleTask):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # F9 全局暂停时 executor 不再调用 run(),长按的方向键必须在这里松,
+        # 否则角色会在暂停期间一直走下去
+        communicate.executor_paused.connect(self._on_executor_paused)
         self.name = "自动打怪"
         self.description = "站桩定频攻击+自动喝药+低血保命"
         self.icon = FluentIcon.GAME
         self.trigger_interval = 0.1  # ~10Hz 轮询,保命响应足够快
         self.default_config.update(DEFAULT_CONFIG)
         self.config_type['攻击模式'] = {'type': 'drop_down', 'options': ['定频', '检测']}
+        self.config_type['朝向'] = {'type': 'drop_down', 'options': ['自动', '左', '右']}
         self.config_description.update({
             '角色名': '检测模式用它 OCR 定位角色(名字牌)。留空则攻击区锚在画面中心',
             '攻击区宽(像素)': '2560x1440 下标定。用 scripts/calibrate_attack_zone.py 看图调',
             '名字牌到身体偏移(像素)': '名字牌在角色脚下,该值是牌子中心到身体中心的距离',
             '喝药判定间隔(秒)': 'HP 低于阈值时,两次喝药/判效的最小间隔。药水起效需要时间,间隔太短会误判"喝药无效"',
             '喝药开关': '总开关:关闭后不自动喝血/喝蓝;保命时也不按血药键(回城卷与停任务照常)',
+            '朝向': '走位(防挂机)结束后面朝哪边:左/右显式指定(推荐);自动 = 首次走位后采纳实际朝向',
+            '寻怪开关': '同层有怪但都在攻击区外时,自动朝最近的怪走近并攻击(仅检测模式)',
+            '寻怪同层容差(像素)': '判定"同一层"的高度容差:怪脚底与角色名字牌高度差在此范围内才走近,避免追到别的平台',
+            '寻怪刷新间隔(秒)': '寻怪中刷新目标方向的最小间隔:越小追怪换目标/接战越快,但 YOLO 跑得越勤;空闲与原地攻击时不受影响',
         })
         self._reset_state()
 
@@ -91,6 +104,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_detect_error_log = 0.0
         self._last_walk = 0.0
         self._last_mob_present = None
+        self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
+        self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
+        self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
+        self._seek_key = None         # 寻怪长按中按下的方向键名('左移键'/'右移键');None=未按住
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -163,13 +180,118 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def _slot_of(key_name):
         return key_name.lower()
 
+    def _resolve_facing(self):
+        """走位用朝向:配置 朝向=左/右 显式优先(中途改配置立即生效);自动 → 已跟踪的 _facing。"""
+        manual = (self.config.get('朝向') or '').strip()
+        if manual == '左':
+            return 'LEFT'
+        if manual == '右':
+            return 'RIGHT'
+        return self._facing
+
+    def _detect_and_act(self, frame, now, cfg, keys):
+        """一个检测拍:锚点 → 找怪 → 攻击区内最近的怪,或确定寻怪方向。
+
+        完整检测拍与寻怪快速刷新拍共用。攻击键受 _last_attack 节流:
+        快速刷新拍发现怪进区时,节流到点才补攻击——连点无益且费蓝。
+        """
+        anchor_hit, source = self._resolve_anchor(frame, now, cfg)
+        body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
+        zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
+        try:
+            mobs = self.find_mobs(frame)
+        except Exception as e:
+            mobs = []
+            self._log_detect_error(now, 'YOLO 找怪', e)
+        centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
+        mob_present = farm_logic.mob_in_zone(centres, zone)
+        self._last_mob_present = mob_present
+        if mob_present:
+            self._seek_dir = None  # 怪进攻击区了,停追,原地攻击
+            if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
+                # 面向怪再攻击:怪在面朝反侧(或朝向未知)时先轻点方向键转向。
+                # 战士只能打面朝方向,朝向错攻击必然打空;转向后 _facing 随怪侧更新,
+                # 之后的走位与攻击都按此朝向保持(方案 2,spec §4.4 HUNTING 前置)。
+                turn = farm_logic.turn_direction(self._facing, body[0],
+                                                 farm_logic.nearest_mob_x(centres, zone, body[0]))
+                if turn is not None:
+                    key = '左移键' if turn == 'left' else '右移键'
+                    self.send_key(keys[key], down_time=TURN_TAP_SECONDS)
+                    self._facing = 'LEFT' if turn == 'left' else 'RIGHT'
+                    # 转向本身就是"活动":走位倒计时从头算,不紧跟着又走位
+                    # (刚转完向立刻两段走位会显得很怪;且正在打怪就不是挂机闲逛)
+                    self._last_walk = now
+                self.send_key(keys['攻击键'])
+                self._last_attack = now
+        else:
+            # 自动寻怪:区内没怪 → 在同层(脚底高度容差内)找最近的怪,记下要朝它走的方向。
+            # 只追同层:跨平台的怪走不过去,追了只会撞墙/掉台子。
+            self._seek_dir = None
+            if cfg['寻怪开关']:
+                entries = [(m.x + m.width / 2, m.y + m.height) for m in mobs]
+                self._seek_dir = farm_logic.seek_direction(entries, body[0], anchor_hit.y,
+                                                           cfg['寻怪同层容差(像素)'])
+                if self._seek_dir is not None:
+                    # 寻怪本身就在移动=活动中,防挂机走位倒计时顺延;
+                    # 刷新节流也从这一拍起算,避免启动后第一拍立即重复刷新
+                    self._last_walk = now
+                    self._last_seek_refresh = now
+
     def _do_walk(self, keys):
-        """防挂机走位:随机一侧走出去再走回来,净位移 0,不会走出站桩点或掉下平台。"""
+        """防挂机走位:两段方向由朝向决定(先反方向出、朝原方向回),结束时朝向不翻转
+        ——旧版随机往返会把面朝方向翻反,战士只能打面朝方向,翻反后攻击一直打空;
+        净位移 0,不会走出站桩点或掉下平台。首次走位前朝向未知(自动模式):
+        随机一侧走,走完把实际朝向(第二段方向)采纳为基线。"""
         hold = self.config['走位持续时间(秒)']
-        first = random.choice(('左移键', '右移键'))
-        second = '右移键' if first == '左移键' else '左移键'
-        self.send_key(keys[first], down_time=hold)
-        self.send_key(keys[second], down_time=hold)
+        first, second, new_facing = farm_logic.walk_order(self._resolve_facing())
+        key_first = '左移键' if first == 'left' else '右移键'
+        key_second = '右移键' if second == 'right' else '左移键'
+        self.send_key(keys[key_first], down_time=hold)
+        self.send_key(keys[key_second], down_time=hold)
+        self._facing = new_facing
+
+    def _do_seek_move(self, cfg, keys):
+        """寻怪移动:长按方向键向怪连续走(每拍重按一次、从不松开,直到
+        变向/接战/无怪/开关关才松)——旧版每拍按下又松开(按 0.1s),
+        刷新拍的 OCR+YOLO 阻塞期间键没按住,追怪时走走停停"一下一下";
+        每拍重按还能在窗口短暂不可点击导致按键漏发时自动补上。"""
+        if cfg['寻怪开关'] and self._seek_dir is not None:
+            key = '左移键' if self._seek_dir == 'left' else '右移键'
+            if self._seek_key is not None and self._seek_key != key:
+                self.send_key_up(keys[self._seek_key])  # 换向:先松旧键
+            self.send_key_down(keys[key])
+            self._seek_key = key
+            self._facing = 'LEFT' if self._seek_dir == 'left' else 'RIGHT'
+        elif self._seek_key is not None:
+            self._release_seek_key()
+
+    def _release_seek_key(self):
+        """松开寻怪长按的方向键(没按着就无事可做)。尽力而为:任何失败都只记日志
+        不抛出——松键失败不能把停任务/暂停流程搞崩,按键最终也会随窗口失焦自然失效。"""
+        if self._seek_key is None:
+            return
+        try:
+            keys = self.get_global_config('游戏按键')
+            self.send_key_up(keys[self._seek_key])
+        except Exception as e:
+            self.log_error(f'松开寻怪方向键失败: {e!r}')
+        self._seek_key = None
+
+    def _on_executor_paused(self, paused):
+        """F9 全局暂停时松开寻怪长按键——executor 暂停后 run() 不再被调用,
+        不在这松键角色会一直走下去;恢复(False)不做事,下一拍会自动重新按下。"""
+        if paused:
+            self._release_seek_key()
+
+    def disable(self):
+        """停任务前松开可能还按着的寻怪方向键,防止角色在任务停止后继续走。"""
+        self._release_seek_key()
+        super().disable()
+
+    def on_destroy(self):
+        """应用退出/executor 销毁前松键(interaction 在任务之后才销毁,此时松键仍可用)。"""
+        self._release_seek_key()
+        super().on_destroy()
 
     def run(self):
         # TaskExecutor 调度 trigger task 前已取帧(TaskExecutor.py:555),不要再 next_frame()
@@ -262,33 +384,30 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         # 4. 攻击
         if cfg['攻击模式'] == '检测':
-            # 节流用独立的 _last_detect:无怪时不更新 _last_attack,否则 10Hz 每拍都要跑
-            # 一遍 OCR + YOLO(旧代码的行为)
+            # 完整检测拍(OCR 锚点 + YOLO)按攻击间隔节流;寻怪激活时另用更快的
+            # 刷新间隔(默认 0.4s)重算方向/接战——目标死了/换近了不用等满攻击间隔
             if farm_logic.should_attack(now, self._last_detect, cfg['攻击间隔(秒)']):
                 self._last_detect = now
-                anchor_hit, source = self._resolve_anchor(frame, now, cfg)
-                body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
-                zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
-                try:
-                    mobs = self.find_mobs(frame)
-                except Exception as e:
-                    mobs = []
-                    self._log_detect_error(now, 'YOLO 找怪', e)
-                centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
-                mob_present = farm_logic.mob_in_zone(centres, zone)
-                self._last_mob_present = mob_present
-                if mob_present:
-                    self.send_key(keys['攻击键'])
-                    self._last_attack = now
+                self._detect_and_act(frame, now, cfg, keys)
+            elif cfg['寻怪开关'] and self._seek_dir is not None and farm_logic.should_attack(
+                    now, self._last_seek_refresh, cfg['寻怪刷新间隔(秒)']):
+                # 寻怪中快速刷新:只重跑找怪(锚点走缓存/快通道),方向立即更新;
+                # 怪进攻击区立即停追接战(攻击键仍受 _last_attack 节流,不破坏攻击间隔)
+                self._last_seek_refresh = now
+                self._detect_and_act(frame, now, cfg, keys)
+            # 寻怪移动:检测拍定了方向后长按方向键连续向怪走(每拍重按、不松开,
+            # 检测阻塞不再打断行走);怪进攻击区/无同层怪/开关关闭时松开
+            self._do_seek_move(cfg, keys)
         elif farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
             self.send_key(keys['攻击键'])
             self._last_attack = now
 
         # 4.5 防挂机走位(默认开启)。有独立的 120s 节奏,不挂在 1.5s 攻击节拍上;
-        # 检测模式下如果这一拍刚好判定有怪(正在打),顺延到下一次判定"无怪"再走,
-        # 不打断输出。定频模式没有"有没有怪"这个概念,到点直接走。
+        # 检测模式下如果这一拍刚好判定有怪(正在打)或在寻怪(正在走),
+        # 顺延到下一次判定"无怪且不寻怪"再走,不打断输出。定频模式没有"有没有怪"这个概念,到点直接走。
         if cfg['走位开关'] and farm_logic.should_attack(now, self._last_walk, cfg['走位间隔(秒)']):
-            can_walk = cfg['攻击模式'] == '定频' or self._last_mob_present is False
+            can_walk = cfg['攻击模式'] == '定频' or (self._last_mob_present is False
+                                                    and self._seek_dir is None)
             if can_walk:
                 self._do_walk(keys)
                 self._last_walk = now

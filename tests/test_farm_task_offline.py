@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, call, patch
 import cv2
 
 from src.detect.anchor import Anchor as MapleAnchor
-from src.task.MapleFarmTask import DEFAULT_CONFIG, MapleFarmTask
+from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmTask)
 
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
 KEYS = {'攻击键': 'shift', '血药键': 'home', '蓝药键': 'insert',
@@ -20,6 +20,8 @@ def make_task(**cfg_overrides):
     task.capture_config = None
     task._reset_state()
     task.send_key = MagicMock()
+    task.send_key_down = MagicMock()
+    task.send_key_up = MagicMock()
     task.stop_farming = MagicMock()
     task.log_warning = MagicMock()
     task.log_error = MagicMock()
@@ -199,19 +201,254 @@ class TestFarmTaskOffline(unittest.TestCase):
         run_with_frame(task)
         task.send_key.assert_not_called()
 
-    def test_do_walk_left_first(self):
+    def test_detect_mode_turns_then_attacks_when_mob_behind(self):
+        """怪在面朝反侧 → 先轻点方向键转向再攻击,并更新 _facing。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'LEFT'
+        # 固定锚点:名字牌 (1280, 800) → 身体中心 (1280, 710),默认攻击区 x∈[980,1580]
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=1500, y=700, width=60, height=50)  # 中心 (1530, 725),在身体右侧
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertIn(call('right', down_time=TURN_TAP_SECONDS), task.send_key.call_args_list)
+        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_detect_mode_attacks_without_turn_when_facing_mob(self):
+        """已面朝怪所在侧 → 不转向直接攻击,_facing 不变。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=1500, y=700, width=60, height=50)  # 右侧
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+        self.assertIn('shift', sent)
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_detect_mode_unknown_facing_turns_to_mob_then_attacks(self):
+        """朝向未知 → 按怪所在侧转向再攻击,自动确定基线朝向。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=1500, y=700, width=60, height=50)  # 右侧
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertIn(call('right', down_time=TURN_TAP_SECONDS), task.send_key.call_args_list)
+        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_detect_mode_turns_left_when_mob_on_left(self):
+        """怪在左侧 → 按左转向再攻击。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=960, y=700, width=60, height=50)  # 中心 (990, 725),区内左侧
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertIn(call('left', down_time=TURN_TAP_SECONDS), task.send_key.call_args_list)
+        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_turn_restarts_walk_countdown(self):
+        """转向本身就是"活动":走位倒计时从头算——即使本拍到点也不走位,
+        之后 120s 内不再走。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_walk = -1000.0  # 走位早已到点
+        task._facing = 'LEFT'
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=1500, y=700, width=60, height=50)  # 右侧,需转向
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertEqual(task._last_walk, 100.0)  # 转向重置了计时
+        walk_calls = [c for c in task.send_key.call_args_list if c.kwargs.get('down_time') == 0.4]
+        self.assertEqual(walk_calls, [])  # 本拍不再走位
+
+    def test_attack_without_turn_keeps_walk_timer(self):
+        """已面朝怪 → 只攻击不转向,走位计时不受影响。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_walk = -1000.0
+        task._facing = 'RIGHT'
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=1500, y=700, width=60, height=50)  # 右侧,不需转向
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertEqual(task._last_walk, -1000.0)  # 没转向就不重置
+
+    def test_seek_walks_toward_same_floor_mob_outside_zone(self):
+        """寻怪:同层怪在攻击区外 → 长按方向键朝怪走(按下不松),重置走位计时。
+        (角色名留空 → 锚点 fallback 画面中心 (1280,720),怪脚底 730 差 10 ≤ 容差 60 → 同层)"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_walk = -1000.0  # 走位早已到点:若寻怪不重置,这里会触发防挂机走位
+        task._facing = 'LEFT'
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=2000, y=680, width=60, height=50)  # 中心 (2030,705),脚底 (2030,730)
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertEqual(task.send_key_down.call_args_list, [call('right')])
+        task.send_key_up.assert_not_called()
+        self.assertEqual(task._seek_key, '右移键')
+        self.assertEqual(task._seek_dir, 'right')
+        self.assertEqual(task._facing, 'RIGHT')
+        self.assertEqual(task._last_walk, 100.0)  # 寻怪=活动,防挂机走位顺延
+
+    def test_seek_walks_left_toward_mob_on_left(self):
+        """怪在左侧远处 → 长按左走。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=300, y=680, width=60, height=50)  # 中心 (330,705),脚底 (330,730)
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        self.assertIn(call('left'), task.send_key_down.call_args_list)
+        self.assertEqual(task._seek_dir, 'left')
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_seek_ignores_other_floor_mob(self):
+        """不同层的怪不追(脚底高度差超容差)→ 不动。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=2000, y=500, width=60, height=50)  # 脚底 (2030,550),差 170 > 60
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        task.send_key.assert_not_called()
+        self.assertIsNone(task._seek_dir)
+
+    def test_seek_switch_off_idles(self):
+        """寻怪开关关 → 同层远怪也不动。"""
+        task = make_task(**{'攻击模式': '检测', '寻怪开关': False})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            mob = MagicMock(x=2000, y=680, width=60, height=50)
+            task.find_mobs = MagicMock(return_value=[mob])
+            run_with_frame(task)
+        task.send_key.assert_not_called()
+
+    def test_seek_stops_when_mob_enters_zone(self):
+        """寻怪途中怪从同侧进攻击区 → 停追,原地攻击(已面朝,不转向),松开方向键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=2000, y=680, width=60, height=50)])
+            run_with_frame(task)  # 第一拍:同层远怪 → 寻怪右走
+            self.assertEqual(task._seek_dir, 'right')
+            task.send_key.reset_mock()
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
+            run_with_frame(task, now=102.0)  # 第二拍(隔 2s ≥ 攻击间隔):怪从右侧进区
+        self.assertIsNone(task._seek_dir)
+        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])  # 接战后松键
+        self.assertIsNone(task._seek_key)
+
+    def test_seek_refresh_switches_direction_at_interval(self):
+        """寻怪激活时按独立刷新间隔(0.4s)重算方向,不必等攻击间隔(1.0s)。
+        0.3s 时方向保持(刷新未到),0.5s 时怪换到另一侧 → 换向:松旧键按新键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=2000, y=680, width=60, height=50)])
+            run_with_frame(task)  # 完整拍:同层远怪右 → 寻怪右,长按右
+            self.assertEqual(task._seek_dir, 'right')
+            task.send_key_down.reset_mock()
+            task.send_key_up.reset_mock()
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=300, y=680, width=60, height=50)])
+            run_with_frame(task, now=100.3)  # 0.3s < 刷新间隔 0.4 → 方向保持
+            self.assertEqual(task._seek_dir, 'right')
+            self.assertEqual(task.send_key_down.call_args_list, [call('right')])  # 重按保持
+            self.assertEqual(task.send_key_up.call_args_list, [])
+            run_with_frame(task, now=100.5)  # 0.5s ≥ 刷新间隔 → 换向
+        self.assertEqual(task._seek_dir, 'left')
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])   # 松旧键
+        self.assertEqual(task.send_key_down.call_args_list, [call('right'), call('left')])
+
+    def test_seek_refresh_engages_when_mob_enters_zone(self):
+        """寻怪中怪进攻击区 → 刷新拍立即停追接战,不必等下一完整检测拍。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=2000, y=680, width=60, height=50)])
+            run_with_frame(task)
+            self.assertEqual(task._seek_dir, 'right')
+            task.send_key.reset_mock()
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
+            run_with_frame(task, now=100.5)  # 刷新拍(完整拍 1.0s 未到)
+        self.assertIsNone(task._seek_dir)
+        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+
+    def test_seek_refresh_stops_chase_without_attack_when_interval_not_due(self):
+        """刷新拍发现怪进区但攻击节流未到 → 停追,不连发攻击键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=MapleAnchor(1280, 800, 130)):
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=2000, y=680, width=60, height=50)])
+            run_with_frame(task)
+            self.assertEqual(task._seek_dir, 'right')
+            task.send_key.reset_mock()
+            task._last_attack = 100.4  # 0.1s 前攻击过,1.0s 节流未到
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
+            run_with_frame(task, now=100.5)
+        self.assertIsNone(task._seek_dir)
+        task.send_key.assert_not_called()
+
+    def test_do_walk_unknown_facing_random_left_first(self):
+        """朝向未知(自动+首次走位):随机一侧出、反方向回,采纳实际朝向为基线。"""
         task = make_task(**{'走位持续时间(秒)': 0.4})
-        with patch('src.task.MapleFarmTask.random.choice', return_value='左移键'):
+        with patch('src.task.farm_logic.random.choice', return_value='left'):
             task._do_walk(KEYS)
         self.assertEqual(task.send_key.call_args_list,
                          [call('left', down_time=0.4), call('right', down_time=0.4)])
+        self.assertEqual(task._facing, 'RIGHT')  # 走完面朝第二段方向
 
-    def test_do_walk_right_first(self):
+    def test_do_walk_unknown_facing_random_right_first(self):
         task = make_task(**{'走位持续时间(秒)': 0.4})
-        with patch('src.task.MapleFarmTask.random.choice', return_value='右移键'):
+        with patch('src.task.farm_logic.random.choice', return_value='right'):
             task._do_walk(KEYS)
         self.assertEqual(task.send_key.call_args_list,
                          [call('right', down_time=0.4), call('left', down_time=0.4)])
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_do_walk_facing_left_walks_right_then_left(self):
+        """朝向已知 LEFT → 先向右出、再向左回,结束时仍朝左(走位不翻转朝向)。"""
+        task = make_task(**{'走位持续时间(秒)': 0.4})
+        task._facing = 'LEFT'
+        task._do_walk(KEYS)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('right', down_time=0.4), call('left', down_time=0.4)])
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_do_walk_facing_right_walks_left_then_right(self):
+        task = make_task(**{'走位持续时间(秒)': 0.4})
+        task._facing = 'RIGHT'
+        task._do_walk(KEYS)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('left', down_time=0.4), call('right', down_time=0.4)])
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_do_walk_config_left_overrides_tracked_facing(self):
+        """配置 朝向=左 显式优先:即使已跟踪 RIGHT 也按左走位,并更新 _facing。"""
+        task = make_task(**{'走位持续时间(秒)': 0.4, '朝向': '左'})
+        task._facing = 'RIGHT'
+        task._do_walk(KEYS)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('right', down_time=0.4), call('left', down_time=0.4)])
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_do_walk_config_right_with_unknown_facing(self):
+        """配置 朝向=右 + 从未走位过(_facing=None):按右走位,不依赖随机。"""
+        task = make_task(**{'走位持续时间(秒)': 0.4, '朝向': '右'})
+        task._do_walk(KEYS)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('left', down_time=0.4), call('right', down_time=0.4)])
+        self.assertEqual(task._facing, 'RIGHT')
 
     def test_walk_switch_off_never_walks(self):
         task = make_task(**{'走位开关': False, '攻击模式': '定频'})
@@ -224,7 +461,7 @@ class TestFarmTaskOffline(unittest.TestCase):
     def test_walk_fixed_mode_walks_when_due(self):
         task = make_task(**{'攻击模式': '定频', '走位持续时间(秒)': 0.4})
         task._last_walk = -1000.0
-        with patch('src.task.MapleFarmTask.random.choice', return_value='左移键'):
+        with patch('src.task.farm_logic.random.choice', return_value='left'):
             run_with_frame(task)
         sent = [c for c in task.send_key.call_args_list if c.args and c.args[0] in ('left', 'right')]
         self.assertEqual(sent, [call('left', down_time=0.4), call('right', down_time=0.4)])
@@ -246,7 +483,7 @@ class TestFarmTaskOffline(unittest.TestCase):
         task = make_task(**{'攻击模式': '检测', '走位持续时间(秒)': 0.4})
         task._last_walk = -1000.0
         task.find_mobs = MagicMock(return_value=[])
-        with patch('src.task.MapleFarmTask.random.choice', return_value='右移键'):
+        with patch('src.task.farm_logic.random.choice', return_value='right'):
             run_with_frame(task)
         sent = [c for c in task.send_key.call_args_list if c.args and c.args[0] in ('left', 'right')]
         self.assertEqual(sent, [call('right', down_time=0.4), call('left', down_time=0.4)])
@@ -305,6 +542,109 @@ class TestFarmTaskOffline(unittest.TestCase):
         run_with_frame(task)
         task.stop_farming.assert_not_called()
         self.assertIn(call('shift'), task.send_key.call_args_list)
+
+
+class TestSeekMove(unittest.TestCase):
+    """寻怪长按移动(_do_seek_move 直接测,无帧依赖)。
+
+    修复回归:旧版每拍按下又松开(按 0.1s),刷新拍的 OCR+YOLO 阻塞期间键没按住,
+    追怪时走走停停"一下一下";改为长按(按下不松)后,检测阻塞不再打断行走。
+    """
+
+    def test_holds_key_never_released_while_chasing(self):
+        """追怪中每拍重按保持、从不松开:两拍之间没有 key_up,不打断行走。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task._do_seek_move(task.config, KEYS)  # 下一拍:键保持,仅重按补发
+        self.assertEqual(task.send_key_down.call_args_list, [call('right'), call('right')])
+        task.send_key_up.assert_not_called()
+        self.assertEqual(task._seek_key, '右移键')
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_direction_flip_releases_old_holds_new(self):
+        """换向(怪从另一侧靠近):先松旧键再按新键。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task._seek_dir = 'left'
+        task._do_seek_move(task.config, KEYS)
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])
+        self.assertEqual(task.send_key_down.call_args_list, [call('right'), call('left')])
+        self.assertEqual(task._seek_key, '左移键')
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_seek_ends_releases_key(self):
+        """怪进攻击区/无同层怪(_seek_dir 置 None)→ 松开按着的方向键。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task._seek_dir = None
+        task._do_seek_move(task.config, KEYS)
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])
+        self.assertIsNone(task._seek_key)
+
+    def test_switch_off_releases_held_key(self):
+        """追怪途中关掉寻怪开关 → 松开长按的方向键。"""
+        task = make_task(**{'寻怪开关': False})
+        task._seek_dir = 'right'
+        task._seek_key = '右移键'
+        task._do_seek_move(task.config, KEYS)
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])
+        self.assertIsNone(task._seek_key)
+
+    def test_switch_off_idle_does_nothing(self):
+        task = make_task(**{'寻怪开关': False})
+        task._do_seek_move(task.config, KEYS)
+        task.send_key_down.assert_not_called()
+        task.send_key_up.assert_not_called()
+
+    def test_no_key_when_not_seeking(self):
+        task = make_task()
+        task._do_seek_move(task.config, KEYS)
+        task.send_key_down.assert_not_called()
+        task.send_key_up.assert_not_called()
+
+    def test_executor_pause_releases_held_key(self):
+        """F9 暂停(executor_paused 信号)时松开长按的方向键:
+        暂停后 run() 不再被调用,不松键角色会一直走下去。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task._on_executor_paused(True)
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])
+        self.assertIsNone(task._seek_key)
+        # 恢复:下一拍重新按下
+        task._do_seek_move(task.config, KEYS)
+        self.assertEqual(task.send_key_down.call_args_list, [call('right'), call('right')])
+
+    def test_pause_resume_signal_false_does_nothing(self):
+        """暂停信号带 False(恢复)不松键。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task._on_executor_paused(False)
+        task.send_key_up.assert_not_called()
+        self.assertEqual(task._seek_key, '右移键')
+
+    def test_disable_releases_held_key(self):
+        """停任务(框架 disable)→ 松开长按的方向键,角色不会在任务停止后继续走。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task._executor = MagicMock()
+        task.disable()
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])
+        self.assertIsNone(task._seek_key)
+
+    def test_release_failure_still_clears_state(self):
+        """松键失败(窗口不可点/交互异常)不抛出、状态仍清空,避免停任务流程被卡死。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._do_seek_move(task.config, KEYS)
+        task.send_key_up = MagicMock(side_effect=RuntimeError('key up 失败'))
+        task._on_executor_paused(True)  # 不应抛出
+        self.assertIsNone(task._seek_key)
 
 
 class TestDetectModeAnchor(unittest.TestCase):

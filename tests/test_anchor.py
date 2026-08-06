@@ -84,9 +84,15 @@ class TestFindInWindow(unittest.TestCase):
         fn = fake_ocr([['小白雪人ifeng咕咕']])
         self.assertIsNone(anchor.find_in_window(self.frame, NAME, (1300, 880), 240, 80, ocr_fn=fn))
 
-    def test_rejects_truncated_text(self):
-        """被宠物牌遮挡后只剩尾巴(实测 'ng咕咕'),中心右偏,同样丢弃。"""
+    def test_accepts_truncated_suffix(self):
+        """被宠物牌遮挡后只剩尾巴(实测 'ng咕咕'),长度过半,当作近似锚点收下——
+        中心会右偏,但战斗中"有个大概位置"好过连续遮挡 10s+ 后整个退化到画面中心。"""
         fn = fake_ocr([['ng咕咕']])
+        self.assertIsNotNone(anchor.find_in_window(self.frame, NAME, (1300, 880), 240, 80, ocr_fn=fn))
+
+    def test_rejects_too_short_suffix(self):
+        """尾巴太短(如只剩 '咕咕' 2 字)信息量不够,容易撞上别的同尾缀玩家,丢弃。"""
+        fn = fake_ocr([['咕咕']])
         self.assertIsNone(anchor.find_in_window(self.frame, NAME, (1300, 880), 240, 80, ocr_fn=fn))
 
     def test_ignores_surrounding_whitespace(self):
