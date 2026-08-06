@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 定频 / 检测双模式攻击
+- 定频 / 检测双模式攻击;检测模式**长按攻击键连挥**(游戏按动画速度出刀,无击打空档),区内有怪才打、无怪即松
 - 自动喝血蓝
 - 低血保命（回城 / 停机）
 - 死亡检测（连续 20 帧空血）
@@ -36,7 +36,7 @@
 - **按键方案**：`PyDirect`（SendInput 驱动级），必须以管理员运行，且游戏窗口必须保持前台。PostMessage 后台方案已被 BlackCipher 拦截（error 5 / 静默忽略，2026-08-05 实测）。
 - **只支持 2560x1440 挂机**：主循环带帧尺寸守卫，连续 10 帧不符即停。实测 UI 随分辨率缩放（2026-08-05：HP 条 200px@1440p，约 110px@1080p），其他分辨率 ROI 会偏。
 - 挂机期间**不得拖动 / 缩放 / 折叠**游戏内 UI 面板，不得改分辨率。
-- 按键须与游戏内设置保持一致（默认：攻击 `ctrl`、血药 `home`、蓝药 `insert`、拾取 `z`、回城卷留空）。GUI 设置页可改，改动写入 `configs/` 持久化。
+- 按键须与游戏内设置保持一致（默认：攻击 `ctrl`、血药 `home`、蓝药 `insert`、拾取 `z`、宠物食物键留空、回城卷留空）。GUI 设置页可改，改动写入 `configs/` 持久化。
 - 检测模式默认开启，攻击区锚定角色本人：需要在任务配置里填「角色名」（与游戏内完全一致），程序用 OCR 找角色脚下的名字牌定位。留空则攻击区锚在画面中心。
 - 攻击区用像素标定：`scripts/calibrate_attack_zone.py --frame <截图> --name <角色名>` 会输出一张标注图，看图调「攻击区宽/高(像素)」与「名字牌到身体偏移(像素)」。
 - GUI（`main_debug.py`）启动会清空 `screenshots/` 目录（框架行为）。⚠️ `screenshots/` 现已整个进入 `.gitignore`，存档测试帧 `screenshots/test_frames/training_ground_full_2560x1440.png` **不在版本控制里，`git checkout` 恢复不了**；备份在 `H:\ok-mxd\_frames_backup\`。`tests/test_bars.py`、`tests/test_potions.py`、`tests/test_farm_task_offline.py` 都依赖这张帧，丢了这三个模块会直接报错。

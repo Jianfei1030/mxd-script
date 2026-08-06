@@ -8,7 +8,8 @@ from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmT
 
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
 KEYS = {'攻击键': 'shift', '血药键': 'home', '蓝药键': 'insert',
-        '回城卷键(可留空)': '', '拾取键': 'z', '左移键': 'left', '右移键': 'right'}
+        '回城卷键(可留空)': '', '拾取键': 'z', '宠物食物键(可留空)': 'q',
+        '左移键': 'left', '右移键': 'right'}
 
 
 def make_task(**cfg_overrides):
@@ -186,7 +187,7 @@ class TestFarmTaskOffline(unittest.TestCase):
         mob = MagicMock(x=1200, y=700, width=60, height=50)  # 中心 (1230,725),在默认攻击区内
         task.find_mobs = MagicMock(return_value=[mob])
         run_with_frame(task)
-        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 长按接管
 
     def test_detect_mode_idles_when_no_mob(self):
         task = make_task(**{'攻击模式': '检测'})
@@ -212,7 +213,7 @@ class TestFarmTaskOffline(unittest.TestCase):
             task.find_mobs = MagicMock(return_value=[mob])
             run_with_frame(task)
         self.assertIn(call('right', down_time=TURN_TAP_SECONDS), task.send_key.call_args_list)
-        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 转向后长按攻击
         self.assertEqual(task._facing, 'RIGHT')
 
     def test_detect_mode_attacks_without_turn_when_facing_mob(self):
@@ -227,7 +228,7 @@ class TestFarmTaskOffline(unittest.TestCase):
         sent = [c.args[0] for c in task.send_key.call_args_list if c.args]
         self.assertNotIn('left', sent)
         self.assertNotIn('right', sent)
-        self.assertIn('shift', sent)
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])
         self.assertEqual(task._facing, 'RIGHT')
 
     def test_detect_mode_unknown_facing_turns_to_mob_then_attacks(self):
@@ -239,7 +240,7 @@ class TestFarmTaskOffline(unittest.TestCase):
             task.find_mobs = MagicMock(return_value=[mob])
             run_with_frame(task)
         self.assertIn(call('right', down_time=TURN_TAP_SECONDS), task.send_key.call_args_list)
-        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 转向后长按攻击
         self.assertEqual(task._facing, 'RIGHT')
 
     def test_detect_mode_turns_left_when_mob_on_left(self):
@@ -252,7 +253,7 @@ class TestFarmTaskOffline(unittest.TestCase):
             task.find_mobs = MagicMock(return_value=[mob])
             run_with_frame(task)
         self.assertIn(call('left', down_time=TURN_TAP_SECONDS), task.send_key.call_args_list)
-        self.assertIn(call('shift'), task.send_key.call_args_list)
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 转向后长按攻击
         self.assertEqual(task._facing, 'LEFT')
 
     def test_turn_restarts_walk_countdown(self):
@@ -345,8 +346,9 @@ class TestFarmTaskOffline(unittest.TestCase):
             task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
             run_with_frame(task, now=102.0)  # 第二拍(隔 2s ≥ 攻击间隔):怪从右侧进区
         self.assertIsNone(task._seek_dir)
-        self.assertEqual(task.send_key.call_args_list, [call('shift')])
-        self.assertEqual(task.send_key_up.call_args_list, [call('right')])  # 接战后松键
+        self.assertEqual(task.send_key.call_args_list, [])  # 攻击键走长按,不轻点
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 接战立即长按
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])  # 松寻怪键
         self.assertIsNone(task._seek_key)
 
     def test_seek_refresh_switches_direction_at_interval(self):
@@ -379,13 +381,18 @@ class TestFarmTaskOffline(unittest.TestCase):
             run_with_frame(task)
             self.assertEqual(task._seek_dir, 'right')
             task.send_key.reset_mock()
+            task.send_key_down.reset_mock()
+            task.send_key_up.reset_mock()
             task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
             run_with_frame(task, now=100.5)  # 刷新拍(完整拍 1.0s 未到)
         self.assertIsNone(task._seek_dir)
-        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+        self.assertEqual(task.send_key.call_args_list, [])  # 不轻点
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 立即长按攻击
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])    # 松寻怪键
 
-    def test_seek_refresh_stops_chase_without_attack_when_interval_not_due(self):
-        """刷新拍发现怪进区但攻击节流未到 → 停追,不连发攻击键。"""
+    def test_seek_refresh_holds_attack_regardless_of_interval(self):
+        """接战不留空档:刷新拍怪进区时攻击长按立即接管——即使距上次攻击
+        不到 攻击间隔(旧版这里等节流,会出现 1.5s 空打/发呆)。"""
         task = make_task(**{'攻击模式': '检测'})
         with patch('src.detect.anchor.find_in_region',
                    return_value=MapleAnchor(1280, 800, 130)):
@@ -393,11 +400,14 @@ class TestFarmTaskOffline(unittest.TestCase):
             run_with_frame(task)
             self.assertEqual(task._seek_dir, 'right')
             task.send_key.reset_mock()
+            task.send_key_down.reset_mock()
+            task.send_key_up.reset_mock()
             task._last_attack = 100.4  # 0.1s 前攻击过,1.0s 节流未到
             task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
             run_with_frame(task, now=100.5)
         self.assertIsNone(task._seek_dir)
-        task.send_key.assert_not_called()
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift')])  # 立即长按,不等节流
+        self.assertEqual(task.send_key_up.call_args_list, [call('right')])    # 松寻怪键
 
     def test_do_walk_unknown_facing_random_left_first(self):
         """朝向未知(自动+首次走位):随机一侧出、反方向回,采纳实际朝向为基线。"""
@@ -645,6 +655,122 @@ class TestSeekMove(unittest.TestCase):
         task.send_key_up = MagicMock(side_effect=RuntimeError('key up 失败'))
         task._on_executor_paused(True)  # 不应抛出
         self.assertIsNone(task._seek_key)
+
+
+class TestPetFeed(unittest.TestCase):
+    """喂宠物(_do_pet_feed 直接测,无帧依赖)。"""
+
+    def test_feed_presses_key_when_due(self):
+        """到 15 分钟 → 按宠物食物键,记录时刻。"""
+        task = make_task()
+        task._do_pet_feed(task.config, KEYS, 900.0)
+        self.assertEqual(task.send_key.call_args_list, [call('q')])
+        self.assertEqual(task._last_pet_feed, 900.0)
+
+    def test_feed_not_due_skips(self):
+        task = make_task()
+        task._last_pet_feed = 899.0
+        task._do_pet_feed(task.config, KEYS, 900.0)  # 距上次仅 1s < 900s
+        task.send_key.assert_not_called()
+        self.assertEqual(task._last_pet_feed, 899.0)
+
+    def test_feed_switch_off_skips(self):
+        task = make_task(**{'喂宠物开关': False})
+        task._do_pet_feed(task.config, KEYS, 900.0)
+        task.send_key.assert_not_called()
+
+    def test_feed_unbound_key_keeps_pending(self):
+        """宠物食物键留空(未绑定)→ 不按键也不推进计时:用户在设置页绑好键后
+        立即补喂,不用再等一个完整间隔。"""
+        task = make_task()
+        keys = {**KEYS, '宠物食物键(可留空)': ''}
+        task._do_pet_feed(task.config, keys, 900.0)
+        task.send_key.assert_not_called()
+        self.assertEqual(task._last_pet_feed, 0.0)
+
+
+class TestAttackHold(unittest.TestCase):
+    """检测模式攻击长按(_do_attack_hold 直接测,无帧依赖)。
+
+    修复目标:旧版每 攻击间隔(秒) 轻点一下攻击键(20ms),动画放完就站着等
+    下一拍 → "每次打完愣一下";长按后游戏按动画速度连续挥砍,不留空档。
+    定频模式不在这里管(无"有没有怪"概念,仍按 攻击间隔 定时轻点)。
+    """
+
+    def test_holds_attack_never_released_while_mob_in_zone(self):
+        """区内有怪 → 按下攻击键并保持,两拍之间不松键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task._do_attack_hold(task.config, KEYS)  # 下一拍:保持 + 重按补发
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift'), call('shift')])
+        task.send_key_up.assert_not_called()
+        self.assertTrue(task._attack_held)
+
+    def test_release_when_mob_leaves_zone(self):
+        """怪离开攻击区(或打死)→ 松开攻击键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task._last_mob_present = False
+        task._do_attack_hold(task.config, KEYS)
+        self.assertEqual(task.send_key_up.call_args_list, [call('shift')])
+        self.assertFalse(task._attack_held)
+
+    def test_not_held_before_first_detection(self):
+        """启动后还没检测过(_last_mob_present 初始 None)→ 不按攻击键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._do_attack_hold(task.config, KEYS)
+        task.send_key_down.assert_not_called()
+        task.send_key_up.assert_not_called()
+
+    def test_fixed_mode_releases_held_attack(self):
+        """挂机中从检测切到定频 → 松开长按的攻击键(定频仍走定时轻点)。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task.config['攻击模式'] = '定频'
+        task._do_attack_hold(task.config, KEYS)
+        self.assertEqual(task.send_key_up.call_args_list, [call('shift')])
+        self.assertFalse(task._attack_held)
+
+    def test_pause_releases_attack_key(self):
+        """F9 全局暂停 → 松开长按;恢复后下一拍自动重新按下。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task._on_executor_paused(True)
+        self.assertEqual(task.send_key_up.call_args_list, [call('shift')])
+        self.assertFalse(task._attack_held)
+        task._do_attack_hold(task.config, KEYS)  # 恢复:下一拍重新按下
+        self.assertEqual(task.send_key_down.call_args_list, [call('shift'), call('shift')])
+
+    def test_pause_resume_signal_false_does_nothing(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task.send_key_up.reset_mock()
+        task._on_executor_paused(False)
+        task.send_key_up.assert_not_called()
+        self.assertTrue(task._attack_held)
+
+    def test_disable_releases_attack_key(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task._executor = MagicMock()
+        task.disable()
+        self.assertEqual(task.send_key_up.call_args_list, [call('shift')])
+        self.assertFalse(task._attack_held)
+
+    def test_release_failure_still_clears_state(self):
+        """松键失败(窗口不可点/交互异常)不抛出、状态仍清空,避免停任务流程被卡死。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_mob_present = True
+        task._do_attack_hold(task.config, KEYS)
+        task.send_key_up = MagicMock(side_effect=RuntimeError('key up 失败'))
+        task._on_executor_paused(True)  # 不应抛出
+        self.assertFalse(task._attack_held)
 
 
 class TestDetectModeAnchor(unittest.TestCase):

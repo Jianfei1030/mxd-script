@@ -25,6 +25,8 @@ DEFAULT_CONFIG = {
     '药水耗尽保护': True,
     '拾取开关': False,
     '拾取间隔(秒)': 30,
+    '喂宠物开关': True,
+    '喂宠物间隔(秒)': 900,
     '画面静止上限(秒)': 60,
     '经验停滞上限(分钟)': 10,
     '攻击模式': '检测',
@@ -70,12 +72,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self.config_type['攻击模式'] = {'type': 'drop_down', 'options': ['定频', '检测']}
         self.config_type['朝向'] = {'type': 'drop_down', 'options': ['自动', '左', '右']}
         self.config_description.update({
+            '攻击间隔(秒)': '定频模式:攻击按键节奏。检测模式:完整检测拍(锚点OCR+YOLO)的节流——攻击本身长按持续,不再受此限制',
             '角色名': '检测模式用它 OCR 定位角色(名字牌)。留空则攻击区锚在画面中心',
             '攻击区宽(像素)': '2560x1440 下标定。用 scripts/calibrate_attack_zone.py 看图调',
             '名字牌到身体偏移(像素)': '名字牌在角色脚下,该值是牌子中心到身体中心的距离',
             '喝药判定间隔(秒)': 'HP 低于阈值时,两次喝药/判效的最小间隔。药水起效需要时间,间隔太短会误判"喝药无效"',
             '喝药开关': '总开关:关闭后不自动喝血/喝蓝;保命时也不按血药键(回城卷与停任务照常)',
             '朝向': '走位(防挂机)结束后面朝哪边:左/右显式指定(推荐);自动 = 首次走位后采纳实际朝向',
+            '喂宠物开关': '到点自动按宠物食物键喂宠物(需先在游戏内把宠物食物拖到快捷键,再在设置页「游戏按键」绑定)',
+            '喂宠物间隔(秒)': '喂宠物的最小间隔,默认 15 分钟一次',
             '寻怪开关': '同层有怪但都在攻击区外时,自动朝最近的怪走近并攻击(仅检测模式)',
             '寻怪同层容差(像素)': '判定"同一层"的高度容差:怪脚底与角色名字牌高度差在此范围内才走近,避免追到别的平台',
             '寻怪刷新间隔(秒)': '寻怪中刷新目标方向的最小间隔:越小追怪换目标/接战越快,但 YOLO 跑得越勤;空闲与原地攻击时不受影响',
@@ -86,6 +91,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         """全部可变运行时状态。__init__ 与测试共用,新增状态只改这里。"""
         self._last_attack = 0.0
         self._last_pickup = 0.0
+        self._last_pet_feed = 0.0
         self._hp_streak = 0
         self._hp_at_press = 0.0           # 上次按下药键时的 HP,作窗口判定的基线
         self._last_hp_potion_press = 0.0  # 上次按下药键时刻;0.0 哨兵=尚无上一窗口,只记基线不判无效
@@ -108,6 +114,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
         self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
         self._seek_key = None         # 寻怪长按中按下的方向键名('左移键'/'右移键');None=未按住
+        self._attack_held = False     # 攻击键是否长按中(检测模式,区内有怪时按住连续挥砍)
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -190,11 +197,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         return self._facing
 
     def _detect_and_act(self, frame, now, cfg, keys):
-        """一个检测拍:锚点 → 找怪 → 攻击区内最近的怪,或确定寻怪方向。
+        """一个检测拍:锚点 → 找怪 → 区内有怪则转向接战,否则确定寻怪方向。
 
-        完整检测拍与寻怪快速刷新拍共用。攻击键受 _last_attack 节流:
-        快速刷新拍发现怪进区时,节流到点才补攻击——连点无益且费蓝。
-        """
+        完整检测拍与寻怪快速刷新拍共用。攻击键本身不在这里按——由 _do_attack_hold
+        按"_last_mob_present"长按接管(每拍都重按保持,游戏按动画速度连续挥砍)。"""
         anchor_hit, source = self._resolve_anchor(frame, now, cfg)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
         zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
@@ -208,21 +214,19 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_mob_present = mob_present
         if mob_present:
             self._seek_dir = None  # 怪进攻击区了,停追,原地攻击
-            if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
-                # 面向怪再攻击:怪在面朝反侧(或朝向未知)时先轻点方向键转向。
-                # 战士只能打面朝方向,朝向错攻击必然打空;转向后 _facing 随怪侧更新,
-                # 之后的走位与攻击都按此朝向保持(方案 2,spec §4.4 HUNTING 前置)。
-                turn = farm_logic.turn_direction(self._facing, body[0],
-                                                 farm_logic.nearest_mob_x(centres, zone, body[0]))
-                if turn is not None:
-                    key = '左移键' if turn == 'left' else '右移键'
-                    self.send_key(keys[key], down_time=TURN_TAP_SECONDS)
-                    self._facing = 'LEFT' if turn == 'left' else 'RIGHT'
-                    # 转向本身就是"活动":走位倒计时从头算,不紧跟着又走位
-                    # (刚转完向立刻两段走位会显得很怪;且正在打怪就不是挂机闲逛)
-                    self._last_walk = now
-                self.send_key(keys['攻击键'])
-                self._last_attack = now
+            # 面向怪再攻击:怪在面朝反侧(或朝向未知)时先轻点方向键转向。
+            # 战士只能打面朝方向,朝向错攻击必然打空;转向后 _facing 随怪侧更新,
+            # 之后的走位与攻击都按此朝向保持(方案 2,spec §4.4 HUNTING 前置)。
+            # 攻击键本身由 _do_attack_hold 长按接管,不在这里轻点
+            turn = farm_logic.turn_direction(self._facing, body[0],
+                                             farm_logic.nearest_mob_x(centres, zone, body[0]))
+            if turn is not None:
+                key = '左移键' if turn == 'left' else '右移键'
+                self.send_key(keys[key], down_time=TURN_TAP_SECONDS)
+                self._facing = 'LEFT' if turn == 'left' else 'RIGHT'
+                # 转向本身就是"活动":走位倒计时从头算,不紧跟着又走位
+                # (刚转完向立刻两段走位会显得很怪;且正在打怪就不是挂机闲逛)
+                self._last_walk = now
         else:
             # 自动寻怪:区内没怪 → 在同层(脚底高度容差内)找最近的怪,记下要朝它走的方向。
             # 只追同层:跨平台的怪走不过去,追了只会撞墙/掉台子。
@@ -249,6 +253,27 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self.send_key(keys[key_first], down_time=hold)
         self.send_key(keys[key_second], down_time=hold)
         self._facing = new_facing
+
+    def _do_pet_feed(self, cfg, keys, now):
+        """喂宠物:到间隔按宠物食物键(默认 15 分钟一次)。食物键留空(未绑定)
+        时不按键也不推进计时——用户在设置页绑好键后立即补喂,不用再等一个完整间隔。"""
+        if farm_logic.should_feed_pet(now, self._last_pet_feed, cfg['喂宠物间隔(秒)'],
+                                      cfg['喂宠物开关']):
+            key = keys.get('宠物食物键(可留空)', '')
+            if key:
+                self.send_key(key)
+                self._last_pet_feed = now
+
+    def _do_attack_hold(self, cfg, keys):
+        """攻击:检测模式且最近一次检测区内有怪 → 长按攻击键,游戏按动画速度
+        连续挥砍,不再等 攻击间隔 的拍点(每次打完不再"愣一下";接战刷新拍也
+        立即接管,不留节流空档)。每拍重按补发漏键。无怪/切到定频 → 松开。
+        定频模式不在这里管,仍按 攻击间隔 定时轻点。"""
+        if cfg['攻击模式'] == '检测' and self._last_mob_present:
+            self.send_key_down(keys['攻击键'])
+            self._attack_held = True
+        elif self._attack_held:
+            self._release_attack_key()
 
     def _do_seek_move(self, cfg, keys):
         """寻怪移动:长按方向键向怪连续走(每拍重按一次、从不松开,直到
@@ -277,20 +302,37 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self.log_error(f'松开寻怪方向键失败: {e!r}')
         self._seek_key = None
 
+    def _release_attack_key(self):
+        """松开攻击长按(没按着就无事可做)。尽力而为:任何失败都只记日志
+        不抛出——松键失败不能把停任务/暂停流程搞崩,按键最终也会随窗口失焦自然失效。"""
+        if not self._attack_held:
+            return
+        try:
+            keys = self.get_global_config('游戏按键')
+            self.send_key_up(keys['攻击键'])
+        except Exception as e:
+            self.log_error(f'松开攻击键失败: {e!r}')
+        self._attack_held = False
+
+    def _release_held_keys(self):
+        """松开全部长按键(寻怪方向键 + 攻击键)。"""
+        self._release_seek_key()
+        self._release_attack_key()
+
     def _on_executor_paused(self, paused):
-        """F9 全局暂停时松开寻怪长按键——executor 暂停后 run() 不再被调用,
-        不在这松键角色会一直走下去;恢复(False)不做事,下一拍会自动重新按下。"""
+        """F9 全局暂停时松开所有长按键——executor 暂停后 run() 不再被调用,
+        不在这松键角色会一直走下去/打下去;恢复(False)不做事,下一拍会自动重新按下。"""
         if paused:
-            self._release_seek_key()
+            self._release_held_keys()
 
     def disable(self):
-        """停任务前松开可能还按着的寻怪方向键,防止角色在任务停止后继续走。"""
-        self._release_seek_key()
+        """停任务前松开可能还按着的长按键,防止角色在任务停止后继续走/打。"""
+        self._release_held_keys()
         super().disable()
 
     def on_destroy(self):
         """应用退出/executor 销毁前松键(interaction 在任务之后才销毁,此时松键仍可用)。"""
-        self._release_seek_key()
+        self._release_held_keys()
         super().on_destroy()
 
     def run(self):
@@ -392,11 +434,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             elif cfg['寻怪开关'] and self._seek_dir is not None and farm_logic.should_attack(
                     now, self._last_seek_refresh, cfg['寻怪刷新间隔(秒)']):
                 # 寻怪中快速刷新:只重跑找怪(锚点走缓存/快通道),方向立即更新;
-                # 怪进攻击区立即停追接战(攻击键仍受 _last_attack 节流,不破坏攻击间隔)
+                # 怪进攻击区立即停追接战,攻击长按同步接管,不留空档
                 self._last_seek_refresh = now
                 self._detect_and_act(frame, now, cfg, keys)
-            # 寻怪移动:检测拍定了方向后长按方向键连续向怪走(每拍重按、不松开,
-            # 检测阻塞不再打断行走);怪进攻击区/无同层怪/开关关闭时松开
+            # 攻击/寻怪移动:区内有怪 → 长按攻击键连续挥砍;寻怪 → 长按方向键。
+            # 各自在条件不成立时松键(无怪/接战/无同层怪/开关关/切模式)
+            self._do_attack_hold(cfg, keys)
             self._do_seek_move(cfg, keys)
         elif farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
             self.send_key(keys['攻击键'])
@@ -416,6 +459,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         if farm_logic.should_pickup(now, self._last_pickup, cfg['拾取间隔(秒)'], cfg['拾取开关']):
             self.send_key(keys['拾取键'])
             self._last_pickup = now
+
+        # 5.5 喂宠物(默认 15 分钟一次;食物键留空则不喂)
+        self._do_pet_feed(cfg, keys, now)
 
         # 6. 兜底守卫
         sig = guards.signature(frame)
