@@ -2,8 +2,7 @@ __pycache__/
 *.pyc
 logs/
 configs/
-screenshots/*
-!screenshots/test_frames/
+screenshots/
 dataset/raw/
 dataset/images/
 dataset/labels/
