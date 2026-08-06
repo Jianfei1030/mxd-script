@@ -37,7 +37,8 @@
 - 按键须与游戏内设置保持一致（默认：攻击 `ctrl`、血药 `home`、蓝药 `insert`、拾取 `z`、回城卷留空）。GUI 设置页可改，改动写入 `configs/` 持久化。
 - 检测模式默认开启，攻击区锚定角色本人：需要在任务配置里填「角色名」（与游戏内完全一致），程序用 OCR 找角色脚下的名字牌定位。留空则攻击区锚在画面中心。
 - 攻击区用像素标定：`scripts/calibrate_attack_zone.py --frame <截图> --name <角色名>` 会输出一张标注图，看图调「攻击区宽/高(像素)」与「名字牌到身体偏移(像素)」。
-- GUI（`main_debug.py`）启动会清空 `screenshots/` 目录（框架行为）。存档测试帧在 git 里，误删后用 `git checkout -- screenshots/test_frames/` 恢复。
+- GUI（`main_debug.py`）启动会清空 `screenshots/` 目录（框架行为）。⚠️ `screenshots/` 现已整个进入 `.gitignore`，存档测试帧 `screenshots/test_frames/training_ground_full_2560x1440.png` **不在版本控制里，`git checkout` 恢复不了**；备份在 `H:\ok-mxd\_frames_backup\`。`tests/test_bars.py`、`tests/test_potions.py`、`tests/test_farm_task_offline.py` 都依赖这张帧，丢了这三个模块会直接报错。
+- **改了 `src/detect/*` 或 `src/task/farm_logic.py` 后必须重启 GUI**：框架的调试文件监视器只 `importlib.reload` 任务模块自身（`ok/gui/tasks/TaskManger.py:333-349`），不递归重载依赖，否则会出现「新任务代码调用旧依赖模块」的 `AttributeError`。只改 `MapleFarmTask.py` 才能靠热重载生效。
 - **急停**：`F9` 全局急停（已验证），或在 GUI 里停用任务。
 
 ## 兜底行为说明
