@@ -71,6 +71,25 @@ def should_rescan_anchor(now, last_scan, interval):
     return now - last_scan >= interval
 
 
+def anchor_vx_update(old_vx, dx, dt, dy,
+                     max_age=2.0, max_speed=600.0, platform_dy=30.0):
+    """低通学习名字牌实测水平速度(像素/秒):0.7*v + 0.3*旧值。
+
+    三种情况不学,返回旧值:
+    - dt 不在 (0, max_age] 内(相邻命中太久,位移可能含停/回退,速度不可信);
+    - |dy| >= platform_dy(名字牌 y 突变 = 换平台,位移来自换层不是行走);
+    - |v| > max_speed(回退/误检/窗口切换的跳变,不许污染外推速度)。
+    """
+    if not 0 < dt <= max_age:
+        return old_vx
+    if abs(dy) >= platform_dy:
+        return old_vx
+    v = dx / dt
+    if abs(v) > max_speed:
+        return old_vx
+    return 0.7 * v + 0.3 * old_vx
+
+
 def should_pickup(now, last_pickup_time, interval, enabled):
     return enabled and now - last_pickup_time >= interval
 

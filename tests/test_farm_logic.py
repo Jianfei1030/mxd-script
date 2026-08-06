@@ -115,6 +115,22 @@ class TestAnchorTiming(unittest.TestCase):
         self.assertFalse(fl.should_rescan_anchor(101.0, 100.0, 2))
         self.assertTrue(fl.should_rescan_anchor(102.0, 100.0, 2))
 
+    def test_anchor_vx_learns_lowpass(self):
+        # 相邻命中 dt=1s,右移 20px → v=20;低通 0.7*20 + 0.3*0
+        self.assertEqual(fl.anchor_vx_update(0.0, dx=20, dt=1, dy=0), 0.7 * 20.0)
+
+    def test_anchor_vx_rejects_implausible_spike(self):
+        # 720px/s 的跳变(回退/误检)不许学
+        self.assertEqual(fl.anchor_vx_update(0.0, dx=720, dt=1, dy=0), 0.0)
+
+    def test_anchor_vx_rejects_platform_change(self):
+        # 名字牌 y 位移 50px(换平台)≠ 行走,不学
+        self.assertEqual(fl.anchor_vx_update(0.0, dx=20, dt=1, dy=50), 0.0)
+
+    def test_anchor_vx_rejects_stale_gap(self):
+        # dt 超 2s:期间可能停过/回退过,速度不可信
+        self.assertEqual(fl.anchor_vx_update(0.0, dx=20, dt=3, dy=0), 0.0)
+
 
 class TestWarriorZone(unittest.TestCase):
     """战士巡逻/近战攻击区纯函数(T1.1, spec §3.3)。"""
