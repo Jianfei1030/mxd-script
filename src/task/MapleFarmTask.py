@@ -59,6 +59,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_exp = None
         self._last_exp_gain_time = 0.0
 
+    def enable(self):
+        """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
+        self._reset_state()
+        super().enable()
+
     def on_create(self):
         super().on_create()
         if self.config.get('药水耗尽保护'):

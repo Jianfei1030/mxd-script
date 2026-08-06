@@ -15,6 +15,8 @@ def make_task(**cfg_overrides):
     后续任务新增配置键/状态时本测试不再需要手工同步。"""
     task = MapleFarmTask.__new__(MapleFarmTask)  # 绕过框架 __init__
     task.config = {**DEFAULT_CONFIG, 'Buff键位': '', '药水耗尽保护': False, **cfg_overrides}
+    task.info = {}
+    task.capture_config = None
     task._reset_state()
     task.send_key = MagicMock()
     task.stop_farming = MagicMock()
@@ -23,13 +25,15 @@ def make_task(**cfg_overrides):
     return task
 
 
-def run_with_frame(task, hp=None):
-    """以存档帧驱动一次 run();hp 不为 None 时替换血条读数。"""
+def run_with_frame(task, hp=None, exp=None):
+    """以存档帧驱动一次 run();hp/exp 不为 None 时替换对应读数。"""
     frame_p = patch.object(MapleFarmTask, 'frame',
                            new=property(lambda self: cv2.imread(FRAME)))
     patches = [frame_p, patch('time.time', return_value=100.0)]
     if hp is not None:
         patches.append(patch('src.task.MapleFarmTask.bars.read_hp', return_value=hp))
+    if exp is not None:
+        patches.append(patch('src.task.MapleFarmTask.bars.read_exp', return_value=exp))
     for p in patches:
         p.start()
     try:
@@ -96,6 +100,28 @@ class TestFarmTaskOffline(unittest.TestCase):
         task.find_mobs = MagicMock(return_value=[far])
         run_with_frame(task)
         task.send_key.assert_not_called()
+
+
+    def test_re_enable_resets_stall_timer(self):
+        """停止(经验停滞)后通过框架 enable() 重新启用,不应立即再次停止。"""
+        task = make_task()
+        task._executor = MagicMock()  # enable() 通过 executor property 访问
+        task._enabled = True
+        # 模拟已经挂机很久,经验条无变化
+        task._last_exp = 0.5
+        task._last_exp_gain_time = -1000.0  # 远超 10 分钟上限
+        run_with_frame(task, exp=0.5)
+        task.stop_farming.assert_called_once()
+        task.stop_farming.reset_mock()
+        task.send_key.reset_mock()
+        # 框架禁用后再启用(用户日常点开关)
+        task._enabled = False
+        task.enable()
+        self.assertTrue(task._enabled)
+        # 重新跑一帧:计时器已复位,不应秒停,且应继续攻击
+        run_with_frame(task)
+        task.stop_farming.assert_not_called()
+        self.assertIn(call('shift'), task.send_key.call_args_list)
 
 
 if __name__ == '__main__':

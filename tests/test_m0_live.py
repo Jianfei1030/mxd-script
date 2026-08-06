@@ -78,7 +78,7 @@ class TestM0Live(unittest.TestCase):
         self.assertIsNotNone(red, '红药数量 OCR 失败')
 
     @unittest.skipUnless(is_admin(), '非管理员运行,PyDirect 无法发键')
-    def test_postmessage_response(self):
+    def test_pydirect_response(self):
         """判据:面板开合引起**对应面板区域 ROI** 帧差显著高于同区域环境基线(3 倍且 >5.0)。
         'i'(道具栏)开在左侧,用左区 ROI;'esc'(系统菜单)开在右下,用右下 ROI;任一响应即通过。
         每个键发两次(开+关还原)。全帧比对不可用:训练场 ambient 会淹没信号(假阴性)。
