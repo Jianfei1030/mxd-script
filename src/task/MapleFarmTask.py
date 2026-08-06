@@ -48,12 +48,18 @@ DEFAULT_CONFIG = {
     '寻怪开关': True,
     '寻怪同层容差(像素)': 60,
     '寻怪刷新间隔(秒)': 0.4,
+    '寻怪外推速度(像素/秒)': 250,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
 
 FAST_HALF_W = 240        # 快通道搜索窗半宽(像素)
 FAST_HALF_H = 80         # 快通道搜索窗半高
+ANCHOR_EXTRAPOLATE_MIN_AGE = 0.5  # 锚点年龄 ≥ 此值才开始外推:新鲜锚点不需要推
+ANCHOR_VX_MAX_AGE = 2.0           # 实测速度在此窗口内可信,超时退化用配置速度
+ANCHOR_VX_MAX_SPEED = 600         # 实测速度上限(像素/秒):跳变 = 回退/误检,不学
+ANCHOR_VX_PLATFORM_DY = 30        # 名字牌 y 位移超此值视为换平台,不学速度
+ANCHOR_DEFAULT_SPEED = 250        # 无实测速度时的水平外推速度(像素/秒)
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
 DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
 TURN_TAP_SECONDS = 0.05  # 转向轻点:方向键按 50ms 即翻转朝向,位移可忽略(约几像素,方向随怪侧轮换不累积)
@@ -88,6 +94,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '寻怪开关': '同层有怪但都在攻击区外时,自动朝最近的怪走近并攻击(仅检测模式)',
             '寻怪同层容差(像素)': '判定"同一层"的高度容差:怪脚底与角色名字牌高度差在此范围内才走近,避免追到别的平台',
             '寻怪刷新间隔(秒)': '寻怪中刷新目标方向的最小间隔:越小追怪换目标/接战越快,但 YOLO 跑得越勤;空闲与原地攻击时不受影响',
+            '寻怪外推速度(像素/秒)': '寻怪中名字牌被怪遮挡、OCR 连续失败时,攻击区按此速度跟随走动中的角色(水平外推),怪进区即可接战;名字牌一露头快通道立刻重新咬住。无实测速度时用此值,实测行走速度约 250',
         })
         self._reset_state()
 
@@ -108,6 +115,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_exp_gain_time = 0.0
         self._anchor = None            # (x, y) 名字牌中心,全帧坐标
         self._anchor_time = None
+        self._anchor_vx = 0.0          # 名字牌实测水平速度(像素/秒),低通学习;0.0=无实测
+        self._last_anchor_hit = 0.0    # 上次快/慢通道命中锚点的时刻;0.0 哨兵=从未命中
         self._last_anchor_scan = 0.0
         self._last_detect = 0.0
         self._last_fallback_warn = 0.0
@@ -144,10 +153,45 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._last_detect_error_log = now
             self.log_error(f'{context}异常,本次按未检测到处理(不影响任务继续运行): {exc!r}', exception=exc)
 
+    def _update_anchor(self, hit, now):
+        """任一通道命中 → 更新锚点,并低通学习实测水平速度(学习条件见
+        farm_logic.anchor_vx_update:dt 窗口内、非换平台、速率不跳变)。
+        实测速度是外推的优先依据:外推准不准全靠它(配置速度只是兜底)。"""
+        if self._anchor is not None and self._anchor_time is not None:
+            dt = now - self._anchor_time
+            dx = hit.x - self._anchor[0]
+            dy = abs(hit.y - self._anchor[1])
+            self._anchor_vx = farm_logic.anchor_vx_update(self._anchor_vx, dx, dt, dy)
+        self._anchor, self._anchor_time = (hit.x, hit.y), now
+        self._last_anchor_hit = now
+
+    def _extrapolated_anchor_x(self, now, cfg):
+        """寻怪中锚点超龄 → 角色此刻应在的水平 x(实测速度优先,无实测用配置速度 × 寻怪方向)。
+
+        只在"正在寻怪(角色在走动)"时推:站桩外推只会把攻击区推离原地;
+        锚点新鲜(年龄 < 0.5s)不推——刚命中过,位置就是真值,推了反而引入误差;
+        已过期(年龄 > 保鲜)不推——位置本身已不可信,交给回退分支。
+        返回值钳在 [0, 2560] 内,极端外推不出帧。
+        """
+        if self._seek_dir is None or self._anchor is None or self._anchor_time is None:
+            return self._anchor[0] if self._anchor is not None else None
+        age = now - self._anchor_time
+        if age < ANCHOR_EXTRAPOLATE_MIN_AGE or age > cfg['锚点保鲜(秒)']:
+            return self._anchor[0]
+        if now - self._last_anchor_hit <= ANCHOR_VX_MAX_AGE and self._anchor_vx != 0.0:
+            vx = self._anchor_vx
+        else:
+            speed = cfg.get('寻怪外推速度(像素/秒)', ANCHOR_DEFAULT_SPEED)
+            vx = speed if self._seek_dir == 'right' else -speed
+        return max(0.0, min(CALIBRATED_SIZE[0], self._anchor[0] + vx * age))
+
     def _resolve_anchor(self, frame, now, cfg):
         """按四级阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
-        快通道(上次锚点附近小窗) → 慢通道(中央区分块,节流) → 沿用上次 → 回退屏幕中心。
+        快通道(上次锚点附近小窗,寻怪中超龄时小窗跟外推位置) → 慢通道(中央区分块,节流)
+        → 沿用上次(寻怪中超龄则按外推位置回) → 回退(屏幕中心 x + 最后已知层高 y)。
+        怪堆里名字牌被遮挡 OCR 连续失败时,攻击区不再冻在旧位置——角色边走路边外推,
+        怪进区就能接战(2026-08-06 实测"身边很多怪时一直寻怪不攻击"根因,spec §4.2)。
         OCR 调用可能抛异常(模型/引擎故障等),任一通道抛出都当作"这一级没拿到锚点"处理,
         绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的通用 except 抓住并
         直接 disable() 整个任务,连保命/喝药都会停,违反"无怪只停手,任务继续跑"的契约。
@@ -159,13 +203,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             return centre, 'fallback'
 
         if self._anchor is not None:
+            search_x = self._extrapolated_anchor_x(now, cfg)
             try:
-                hit = anchor.find_in_window(frame, name, self._anchor, FAST_HALF_W, FAST_HALF_H)
+                hit = anchor.find_in_window(frame, name, (search_x, self._anchor[1]),
+                                            FAST_HALF_W, FAST_HALF_H)
             except Exception as e:
                 hit = None
                 self._log_detect_error(now, '快通道锚点 OCR', e)
             if hit is not None:
-                self._anchor, self._anchor_time = (hit.x, hit.y), now
+                self._update_anchor(hit, now)
                 return hit, 'window'
 
         if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
@@ -178,16 +224,20 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 hit = None
                 self._log_detect_error(now, '慢通道锚点 OCR', e)
             if hit is not None:
-                self._anchor, self._anchor_time = (hit.x, hit.y), now
+                self._update_anchor(hit, now)
                 return hit, 'region'
 
         if not farm_logic.anchor_expired(now, self._anchor_time, cfg['锚点保鲜(秒)']):
-            return anchor.Anchor(self._anchor[0], self._anchor[1], 0), 'cached'
+            x = self._extrapolated_anchor_x(now, cfg)
+            return anchor.Anchor(x, self._anchor[1], 0), 'cached'
 
         if now - self._last_fallback_warn >= FALLBACK_WARN_INTERVAL:
             self._last_fallback_warn = now
-            self.log_warning(f'{cfg["锚点保鲜(秒)"]}s 未定位到角色「{name}」,攻击区暂锚在画面中心')
-        return centre, 'fallback'
+            self.log_warning(f'{cfg["锚点保鲜(秒)"]}s 未定位到角色「{name}」,攻击区锚在画面中心,'
+                             f'纵向保留最后已知层高')
+        # 名字牌 y 同平台极稳定(实测 887-888,差 1-2px),回退保留 y 才能罩住脚下这层怪;
+        # 纯屏幕中心 y=720 比实测层高 ~165px,怪全在攻击区外(2026-08-06 实测"怪堆里坐下")
+        return anchor.Anchor(w / 2.0, self._anchor[1] if self._anchor is not None else h / 2.0, 0), 'fallback'
 
     @staticmethod
     def _slot_of(key_name):

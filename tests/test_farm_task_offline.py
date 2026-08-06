@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 import cv2
+import numpy as np
 
 from src.detect.anchor import Anchor as MapleAnchor
 from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmTask)
@@ -32,11 +33,24 @@ def make_task(**cfg_overrides):
     return task
 
 
+def _synthetic_frame():
+    """合成 2560x1440 黑色帧:离线测试不依赖缺失的存档截图(见 FRAME)。
+    黑帧的 HP/MP 读数 0.0 会误触发死亡判定,跑 run() 时需补 patch read_hp/read_mp/read_exp。"""
+    return np.zeros((1440, 2560, 3), dtype=np.uint8)
+
+
+def _load_frame():
+    """存档帧缺失(CI/其他机器,gitignore 的截图不在本地)时退回合成帧;
+    需要帧内容的测试(不 patch HP 的)仍依赖存档帧,只在有截图的机器上真跑。"""
+    frame = cv2.imread(FRAME)
+    return frame if frame is not None else _synthetic_frame()
+
+
 def run_with_frame(task, hp=None, mp=None, exp=None, now=100.0):
     """以存档帧驱动一次 run();hp/mp/exp 不为 None 时替换对应读数。
     now 可推进模拟时间(默认 100.0,与旧调用兼容)。"""
     frame_p = patch.object(MapleFarmTask, 'frame',
-                           new=property(lambda self: cv2.imread(FRAME)))
+                           new=property(lambda self: _load_frame()))
     patches = [frame_p, patch('time.time', return_value=now)]
     if hp is not None:
         patches.append(patch('src.task.MapleFarmTask.bars.read_hp', return_value=hp))
@@ -897,7 +911,7 @@ class TestDetectModeAnchor(unittest.TestCase):
         task = make_task(**{'攻击模式': '检测'})
         task.find_mobs = MagicMock(return_value=[])
         for _ in range(5):
-            run_with_frame(task)
+            run_with_frame(task, hp=0.9, mp=0.9)  # 补 HP 读数:黑帧 0.0 会误触发死亡判定
         self.assertEqual(task.find_mobs.call_count, 1)
 
     def test_window_hit_updates_anchor(self):
@@ -913,7 +927,9 @@ class TestDetectModeAnchor(unittest.TestCase):
         hit = MapleAnchor(1400.0, 900.0, 128)
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=hit), \
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
-            run_with_frame(task)
+            got, source = task._resolve_anchor(_synthetic_frame(), 100.0, task.config)
+        self.assertEqual(source, 'window')
+        self.assertEqual((got.x, got.y), (1400.0, 900.0))
         self.assertEqual(task._anchor, (1400.0, 900.0))
 
     def test_cached_anchor_when_both_channels_miss(self):
@@ -924,21 +940,25 @@ class TestDetectModeAnchor(unittest.TestCase):
         task._last_anchor_scan = 99.5   # 距上次扫描 0.5s < 锚点刷新间隔 2s,慢通道被节流
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None) as window, \
                 patch('src.task.MapleFarmTask.anchor.find_in_region') as region:
-            got, source = task._resolve_anchor(cv2.imread(FRAME), 100.0, task.config)
+            got, source = task._resolve_anchor(_synthetic_frame(), 100.0, task.config)
         self.assertEqual(source, 'cached')
         self.assertEqual((got.x, got.y), (1400.0, 900.0))
         window.assert_called_once()
         region.assert_not_called()
 
-    def test_expired_anchor_falls_back_to_centre(self):
+    def test_expired_anchor_falls_back_to_last_known_y(self):
+        """锚点过期 → 回退到 (屏幕中心 x, 最后已知 y) 而非 (中心, 中心):
+        名字牌 y 同平台极稳定(实测 887-888),保留 y 攻击区才能罩住脚下这层怪;
+        纯屏幕中心 y=720 比实测层高 ~165px,怪全在区外(2026-08-06 实测"怪堆里坐下")。"""
         task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '锚点保鲜(秒)': 5})
-        task._anchor = (400.0, 400.0)
+        task._anchor = (400.0, 887.0)
         task._anchor_time = 90.0  # run_with_frame 把 time.time() 固定在 100.0,已超 5s
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
-            got, source = task._resolve_anchor(cv2.imread(FRAME), 100.0, task.config)
+            got, source = task._resolve_anchor(_synthetic_frame(), 100.0, task.config)
         self.assertEqual(source, 'fallback')
-        self.assertEqual((got.x, got.y), (1280.0, 720.0))
+        self.assertEqual(got.x, 1280.0)   # 水平仍回退屏幕中心(相机跟随角色)
+        self.assertEqual(got.y, 887.0)    # 纵向保留最后已知层高
 
     def test_ocr_exception_does_not_stop_task(self):
         """快/慢通道 OCR 任一环节抛异常,只能当作"这一级没拿到锚点"处理,
@@ -952,7 +972,7 @@ class TestDetectModeAnchor(unittest.TestCase):
                    side_effect=RuntimeError('模型炸了')) as window, \
                 patch('src.task.MapleFarmTask.anchor.find_in_region',
                      side_effect=RuntimeError('模型炸了')) as region:
-            run_with_frame(task)  # 不应抛出
+            run_with_frame(task, hp=0.9, mp=0.9)  # 不应抛出(补 HP 读数防黑帧误判死亡)
         window.assert_called_once()
         region.assert_called_once()
         task.stop_farming.assert_not_called()
@@ -964,6 +984,158 @@ class TestDetectModeAnchor(unittest.TestCase):
         run_with_frame(task)  # 不应抛出
         task.send_key.assert_not_called()
         task.stop_farming.assert_not_called()
+
+
+class TestAnchorExtrapolation(unittest.TestCase):
+    """寻怪中名字牌被怪遮挡(OCR 连续失败)时,攻击区必须外推跟随走动中的角色。
+
+    回归:怪堆里"一直寻怪不攻击"——锚点冻结在旧位置,攻击区不跟随走动的角色,
+    怪永远进不了攻击区,寻怪永不收敛(2026-08-06 实测日志:10s 未定位角色告警 ×124,
+    期间反复"闲置坐椅")。用合成帧,不依赖缺失的存档截图。
+    """
+
+    def test_cached_anchor_extrapolates_with_seek_speed(self):
+        """寻怪中 OCR 连续失败(锚点 3s 未更新)→ 按 配置外推速度 × 年龄 前移 x;
+        快通道小窗也搜外推位置,名字牌一露头就能重新咬住。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 200})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'right'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None) as window, \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, source = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(source, 'cached')
+        self.assertEqual(got.x, 1280 + 200 * 3)  # 3s × 配置速度
+        self.assertEqual(got.y, 800.0)           # y 不推(同平台稳定)
+        window.assert_called_once()
+        self.assertEqual(window.call_args[0][2], (1280 + 600.0, 800.0))  # 小窗跟外推位置
+
+    def test_cached_anchor_uses_measured_velocity_when_fresh(self):
+        """近 2s 内有实测速度(低通后)→ 优先用它,而不是配置速度。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 200})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._anchor_vx = 120.0
+        task._last_anchor_hit = 102.0  # 1s 前命中:实测速度仍可信
+        task._seek_dir = 'right'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(got.x, 1280 + 120 * 3)
+
+    def test_seek_left_extrapolates_negative(self):
+        """朝左寻怪 → 按负方向外推(默认速度 250)。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'left'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 101.0, task.config)
+        self.assertEqual(got.x, 1280 - 250.0)
+
+    def test_no_extrapolation_when_anchor_fresh(self):
+        """锚点刚命中(年龄 < 0.5s)→ 不推,用原始值:外推对新鲜锚点只会引入误差。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 103.0  # now=103.0,年龄 0
+        task._seek_dir = 'right'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(got.x, 1280.0)
+
+    def test_no_extrapolation_when_not_seeking(self):
+        """没在寻怪(站桩)→ 不外推:OCR 失败期间攻击区留在最后可信位置。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = None
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(got.x, 1280.0)
+
+    def test_fallback_never_anchored_uses_centre(self):
+        """从未锚定过(角色名刚填/首次)→ 回退仍是纯屏幕中心(原行为)。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, source = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(source, 'fallback')
+        self.assertEqual((got.x, got.y), (1280.0, 720.0))
+
+    def test_velocity_learned_from_window_hit(self):
+        """快通道命中 → 用位移/时间学习实测速度(低通,防单帧噪声)。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        hit = MapleAnchor(1300, 800, 130)
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=hit), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            task._resolve_anchor(_synthetic_frame(), 101.0, task.config)
+        self.assertEqual(task._anchor_vx, 0.7 * 20.0)  # v=20px/s,低通 0.7*20+0.3*0
+        self.assertEqual(task._anchor, (1300.0, 800.0))
+        self.assertEqual(task._last_anchor_hit, 101.0)
+
+    def test_velocity_rejects_implausible_spikes(self):
+        """跳变(>600px/s,如回退/误检)不许污染实测速度。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        hit = MapleAnchor(2000, 800, 130)  # 720px/s 跳变
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=hit), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            task._resolve_anchor(_synthetic_frame(), 101.0, task.config)
+        self.assertEqual(task._anchor_vx, 0.0)
+
+    def test_velocity_not_learned_on_platform_change(self):
+        """平台切换(名字牌 y 突变)→ 不学速度:位移来自换层,不是行走。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕'})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        hit = MapleAnchor(1300, 750, 130)  # y 变了 50px(换平台)
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=hit), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            task._resolve_anchor(_synthetic_frame(), 101.0, task.config)
+        self.assertEqual(task._anchor_vx, 0.0)
+
+    def test_seek_with_occluded_nameplate_eventually_attacks(self):
+        """回归(怪堆里"一直寻怪不攻击"):寻怪中名字牌一直被怪遮挡(快/慢通道全失败),
+        角色向右走 0.5s 后攻击区外推跟上 → 怪进区 → 停追接战。
+        旧代码攻击区冻在 (1280,800):怪中心 (1900,725) 永在 1200px 区外 → 永远寻怪不攻击。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '走位开关': False,
+                            '攻击区宽(像素)': 1200})  # 用户实测配置宽度
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        mob = MagicMock(x=1850, y=650, width=100, height=150)  # 中心 (1900,725),脚底 (1900,800)
+        task.find_mobs = MagicMock(return_value=[mob])
+        frame_p = patch.object(MapleFarmTask, 'frame',
+                               new=property(lambda self: _synthetic_frame()))
+        frame_p.start()
+        try:
+            with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                    patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None), \
+                    patch('src.task.MapleFarmTask.bars.read_hp', return_value=0.9), \
+                    patch('src.task.MapleFarmTask.bars.read_mp', return_value=0.9), \
+                    patch('src.task.MapleFarmTask.bars.read_exp', return_value=0.5), \
+                    patch('time.time', return_value=100.0):
+                task.run()  # 第一拍:怪在区外 → 寻怪右走
+                self.assertEqual(task._seek_dir, 'right')
+            with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                    patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None), \
+                    patch('src.task.MapleFarmTask.bars.read_hp', return_value=0.9), \
+                    patch('src.task.MapleFarmTask.bars.read_mp', return_value=0.9), \
+                    patch('src.task.MapleFarmTask.bars.read_exp', return_value=0.5), \
+                    patch('time.time', return_value=100.5):
+                task.run()  # 0.5s 后:攻击区外推跟上 → 怪进区 → 接战
+        finally:
+            frame_p.stop()
+        self.assertIsNone(task._seek_dir)
+        self.assertIsNone(task._seek_key)
+        self.assertIn(call('shift'), task.send_key_down.call_args_list)
 
 
 if __name__ == '__main__':
