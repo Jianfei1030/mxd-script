@@ -93,7 +93,7 @@ def find_in_window(frame, name, center, half_w, half_h, ocr_fn=None):
 def body_center(anchor_obj, offset_px):
     """名字牌中心 → 角色身体中心。名字牌在脚下,所以身体在它上方。
 
-    offset_px 必须由 scripts/calibrate_attack_zone.py 实测标定;
-    目测得过 82px 与 98px 两个不一致的值,默认 90 只是占位。
+    offset_px 已由 scripts/calibrate_attack_zone.py 实测标定:几何中心偏移 ≈83px,
+    默认 90 落在角色轮廓内(肩/手高度),有意保留,不再是占位值(详见 spec §3.5)。
     """
     return anchor_obj.x, anchor_obj.y - offset_px
