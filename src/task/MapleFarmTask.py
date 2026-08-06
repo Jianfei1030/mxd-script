@@ -1,7 +1,7 @@
 import time
 
 from qfluentwidgets import FluentIcon
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QPen
 
 from ok import Logger, TriggerTask
@@ -312,7 +312,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 painter.drawText(rect(mob.x, mob.y - 20, 100, 20), '怪物')
                 fx, fy = farm_logic.mob_feet(mob)
                 painter.setPen(QPen(MOB_FOOT_COLOR, 4))
-                painter.drawPoint(rect(fx, fy, 1, 1))
+                painter.drawPoint(QPointF(fx * ratio, fy * ratio))
 
         overlay.draw(DEBUG_OVERLAY_KEY, paint)
         self._debug_drawn = True
