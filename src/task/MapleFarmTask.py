@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
     '锚点刷新间隔(秒)': 2,
     '锚点保鲜(秒)': 10,
     '走位持续时间(秒)': 0.4,
+    '走位开关': True,
+    '走位间隔(秒)': 120,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -82,6 +84,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_detect = 0.0
         self._last_fallback_warn = 0.0
         self._last_detect_error_log = 0.0
+        self._last_walk = 0.0
+        self._last_mob_present = None
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -247,12 +251,23 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     mobs = []
                     self._log_detect_error(now, 'YOLO 找怪', e)
                 centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
-                if farm_logic.mob_in_zone(centres, zone):
+                mob_present = farm_logic.mob_in_zone(centres, zone)
+                self._last_mob_present = mob_present
+                if mob_present:
                     self.send_key(keys['攻击键'])
                     self._last_attack = now
         elif farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
             self.send_key(keys['攻击键'])
             self._last_attack = now
+
+        # 4.5 防挂机走位(默认开启)。有独立的 120s 节奏,不挂在 1.5s 攻击节拍上;
+        # 检测模式下如果这一拍刚好判定有怪(正在打),顺延到下一次判定"无怪"再走,
+        # 不打断输出。定频模式没有"有没有怪"这个概念,到点直接走。
+        if cfg['走位开关'] and farm_logic.should_attack(now, self._last_walk, cfg['走位间隔(秒)']):
+            can_walk = cfg['攻击模式'] == '定频' or self._last_mob_present is False
+            if can_walk:
+                self._do_walk(keys)
+                self._last_walk = now
 
         # 5. 拾取(默认关闭,靠宠物)
         if farm_logic.should_pickup(now, self._last_pickup, cfg['拾取间隔(秒)'], cfg['拾取开关']):
