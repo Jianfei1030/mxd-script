@@ -243,6 +243,17 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def _slot_of(key_name):
         return key_name.lower()
 
+    def _boxes_enabled(self):
+        """GUI Start 页「启用标记框」(Enable Boxes)全局开关的读法,
+        与 ok/feature/FeatureSet.py::_draw_boxes_enabled 同一套(og.app.ok_config['use_overlay'])。
+        无 GUI/未初始化(离线测试、og.app 尚为 None)时安全降级为 False,不抛异常。"""
+        from ok import og
+        app = getattr(og, 'app', None)
+        ok_config = getattr(app, 'ok_config', None)
+        if ok_config is None:
+            return False
+        return bool(ok_config.get('use_overlay', False))
+
     def _resolve_facing(self):
         """走位用朝向:配置 朝向=左/右 显式优先(中途改配置立即生效);自动 → 已跟踪的 _facing。"""
         manual = (self.config.get('朝向') or '').strip()
