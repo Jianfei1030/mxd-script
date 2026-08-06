@@ -27,6 +27,8 @@ DEFAULT_CONFIG = {
     '拾取间隔(秒)': 30,
     '喂宠物开关': True,
     '喂宠物间隔(秒)': 900,
+    '坐椅开关': True,
+    '坐椅延迟(秒)': 3.0,
     '画面静止上限(秒)': 60,
     '经验停滞上限(分钟)': 10,
     '攻击模式': '检测',
@@ -80,6 +82,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '喝药开关': '总开关:关闭后不自动喝血/喝蓝;保命时也不按血药键(回城卷与停任务照常)',
             '朝向': '走位(防挂机)结束后面朝哪边:左/右显式指定(推荐);自动 = 首次走位后采纳实际朝向',
             '喂宠物开关': '到点自动按宠物食物键喂宠物(需先在游戏内把宠物食物拖到快捷键,再在设置页「游戏按键」绑定)',
+            '坐椅开关': '检测模式没怪时自动坐椅子回血蓝(需先在游戏内把椅子拖到快捷键,再在设置页「游戏按键」绑定椅子键)',
+            '坐椅延迟(秒)': '闲置这么久才坐下,避免怪一刷新就起来坐下反复横跳',
             '喂宠物间隔(秒)': '喂宠物的最小间隔,默认 15 分钟一次',
             '寻怪开关': '同层有怪但都在攻击区外时,自动朝最近的怪走近并攻击(仅检测模式)',
             '寻怪同层容差(像素)': '判定"同一层"的高度容差:怪脚底与角色名字牌高度差在此范围内才走近,避免追到别的平台',
@@ -115,6 +119,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
         self._seek_key = None         # 寻怪长按中按下的方向键名('左移键'/'右移键');None=未按住
         self._attack_held = False     # 攻击键是否长按中(检测模式,区内有怪时按住连续挥砍)
+        self._sitting = False         # 本轮闲置是否已按过椅子键(再按一次会起身,只能按一次)
+        self._last_busy = 0.0         # 最近一次"忙"(攻击/寻怪/走位)时刻,坐椅延迟按它算
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -263,6 +269,29 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             if key:
                 self.send_key(key)
                 self._last_pet_feed = now
+
+    def _do_sit_chair(self, cfg, keys, now):
+        """坐椅:检测模式、区内没怪且没在寻怪(真正站桩闲置)、离上次"忙"
+        (攻击/寻怪/走位)已过 坐椅延迟 → 按一次椅子键坐下。坐下后再按一次椅子键
+        会起身,所以同一轮闲置只按一次(_sitting 标记)。起身不显式按键——怪进区/
+        开始寻怪/走位时,长按的攻击键/方向键/走位按键本身就会带角色站起来,
+        下一轮闲置由 _mark_busy 清标记后重新坐下。定频模式不坐:它按攻击间隔
+        定时按键,坐下立刻会被带起身。"""
+        if (cfg['坐椅开关'] and cfg['攻击模式'] == '检测'
+                and self._last_mob_present is False and self._seek_dir is None
+                and not self._sitting
+                and farm_logic.should_attack(now, self._last_busy, cfg['坐椅延迟(秒)'])):
+            key = keys.get('椅子键(可留空)', '')
+            if key:
+                self.send_key(key)
+                self._sitting = True
+                self.log_info(f'闲置 {now - self._last_busy:.1f} 秒,按椅子键坐下')
+
+    def _mark_busy(self, now):
+        """在打/在追/在走 = 忙:坐椅延迟从头算,并清坐椅标记(可能刚坐下就接战,
+        长按的攻击键/方向键会带角色起身,下一轮闲置需重新按键坐下)。"""
+        self._last_busy = now
+        self._sitting = False
 
     def _do_attack_hold(self, cfg, keys):
         """攻击:检测模式且最近一次检测区内有怪 → 长按攻击键,游戏按动画速度
@@ -441,6 +470,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 各自在条件不成立时松键(无怪/接战/无同层怪/开关关/切模式)
             self._do_attack_hold(cfg, keys)
             self._do_seek_move(cfg, keys)
+            # 在打/在追 = 忙:坐椅延迟从头算;长按的攻击/方向键已带角色起身,清坐椅标记
+            if self._last_mob_present or self._seek_dir is not None:
+                self._mark_busy(now)
         elif farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
             self.send_key(keys['攻击键'])
             self._last_attack = now
@@ -454,6 +486,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             if can_walk:
                 self._do_walk(keys)
                 self._last_walk = now
+                self._mark_busy(now)  # 走位中角色在动,不算闲置(坐着的也会被走位键带起身)
+
+        # 4.6 坐椅(检测模式专属):闲置超过延迟自动坐椅子回血蓝。
+        # 定频模式不坐——它按攻击间隔定时按键,坐下也会立刻被带起身
+        self._do_sit_chair(cfg, keys, now)
 
         # 5. 拾取(默认关闭,靠宠物)
         if farm_logic.should_pickup(now, self._last_pickup, cfg['拾取间隔(秒)'], cfg['拾取开关']):
