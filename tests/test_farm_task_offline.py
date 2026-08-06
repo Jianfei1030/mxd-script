@@ -8,7 +8,7 @@ from src.task.MapleFarmTask import DEFAULT_CONFIG, MapleFarmTask
 
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
 KEYS = {'攻击键': 'shift', '血药键': 'home', '蓝药键': 'insert',
-        '回城卷键(可留空)': '', '拾取键': 'z'}
+        '回城卷键(可留空)': '', '拾取键': 'z', '左移键': 'left', '右移键': 'right'}
 
 
 def make_task(**cfg_overrides):
@@ -103,6 +103,20 @@ class TestFarmTaskOffline(unittest.TestCase):
         task.find_mobs = MagicMock(return_value=[far])
         run_with_frame(task)
         task.send_key.assert_not_called()
+
+    def test_do_walk_left_first(self):
+        task = make_task(**{'走位持续时间(秒)': 0.4})
+        with patch('src.task.MapleFarmTask.random.choice', return_value='左移键'):
+            task._do_walk(KEYS)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('left', down_time=0.4), call('right', down_time=0.4)])
+
+    def test_do_walk_right_first(self):
+        task = make_task(**{'走位持续时间(秒)': 0.4})
+        with patch('src.task.MapleFarmTask.random.choice', return_value='右移键'):
+            task._do_walk(KEYS)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('right', down_time=0.4), call('left', down_time=0.4)])
 
 
     def test_re_enable_resets_stall_timer(self):
