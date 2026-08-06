@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import cv2
@@ -1136,6 +1137,34 @@ class TestAnchorExtrapolation(unittest.TestCase):
         self.assertIsNone(task._seek_dir)
         self.assertIsNone(task._seek_key)
         self.assertIn(call('shift'), task.send_key_down.call_args_list)
+
+
+class TestBoxesEnabled(unittest.TestCase):
+
+    def test_no_app_returns_false(self):
+        """og.app 未设置(默认 None,离线/无 GUI)→ False,不抛异常。"""
+        task = make_task()
+        self.assertFalse(task._boxes_enabled())
+
+    def test_app_without_use_overlay_key_returns_false(self):
+        """ok_config 里没有 use_overlay 键 → 按默认值 False。"""
+        from ok import og
+        task = make_task()
+        with patch.object(og, 'app', SimpleNamespace(ok_config={})):
+            self.assertFalse(task._boxes_enabled())
+
+    def test_use_overlay_true_returns_true(self):
+        """GUI「启用标记框」开着(use_overlay=True)→ True。"""
+        from ok import og
+        task = make_task()
+        with patch.object(og, 'app', SimpleNamespace(ok_config={'use_overlay': True})):
+            self.assertTrue(task._boxes_enabled())
+
+    def test_use_overlay_false_returns_false(self):
+        from ok import og
+        task = make_task()
+        with patch.object(og, 'app', SimpleNamespace(ok_config={'use_overlay': False})):
+            self.assertFalse(task._boxes_enabled())
 
 
 if __name__ == '__main__':
