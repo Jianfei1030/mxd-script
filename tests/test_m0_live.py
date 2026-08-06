@@ -79,21 +79,26 @@ class TestM0Live(unittest.TestCase):
 
     @unittest.skipUnless(is_admin(), '非管理员运行,PyDirect 无法发键')
     def test_postmessage_response(self):
-        """判据:面板开合引起**中央 ROI** 帧差显著高于同区域环境基线(3 倍且 >5.0)。
-        依次尝试 'i'(道具栏)与 'esc'(系统菜单),任一响应即通过;每个键发两次(开+关还原)。
-        全帧比对不可用:面板在 2560x1440 上占比小,训练场 ambient 会淹没信号(假阴性)。
+        """判据:面板开合引起**对应面板区域 ROI** 帧差显著高于同区域环境基线(3 倍且 >5.0)。
+        'i'(道具栏)开在左侧,用左区 ROI;'esc'(系统菜单)开在右下,用右下 ROI;任一响应即通过。
+        每个键发两次(开+关还原)。全帧比对不可用:训练场 ambient 会淹没信号(假阴性)。
+        注意:菜单开着时 'i' 会被吞,但随后的 'esc' 关菜单仍会在右下 ROI 产生差异(2026-08-06 实测)。
         建议在空频道/安静地图跑。失败先把差异帧存 screenshots/ 供人眼复核,再下降级结论。"""
         import cv2
         from ok.device.interaction_methods.pydirect import PyDirectInteraction
         inter = PyDirectInteraction(self.cap, self.win)
 
-        def roi(f):
+        def roi_left(f):      # 道具栏面板区
             h, w = f.shape[:2]
-            return f[int(0.2 * h):int(0.8 * h), int(0.25 * w):int(0.75 * w)]
+            return f[int(0.1 * h):int(0.9 * h), 0:int(0.45 * w)]
+
+        def roi_menu(f):      # esc 系统菜单区(右下)
+            h, w = f.shape[:2]
+            return f[int(0.45 * h):int(1.0 * h), int(0.55 * w):w]
 
         responded = False
         f2 = f3 = None
-        for key in ('i', 'esc'):
+        for key, roi in (('i', roi_left), ('esc', roi_menu)):
             inter.on_run()  # PyDirect: 尝试把游戏窗口置前台再发真实键
             f1 = self._frame()
             time.sleep(0.8)
@@ -112,5 +117,5 @@ class TestM0Live(unittest.TestCase):
             cv2.imwrite('screenshots/m0_fail_before.png', f2)
             cv2.imwrite('screenshots/m0_fail_after.png', f3)
         self.assertTrue(responded,
-                        'i/esc 中央 ROI 均无响应,PostMessage 疑似被拦截;'
+                        'i/esc 面板区域 ROI 均无响应,按键疑似未送达;'
                         '差异帧已存 screenshots/m0_fail_*.png,人眼复核后再定降级')
