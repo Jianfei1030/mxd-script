@@ -3,23 +3,14 @@ import re
 
 import cv2
 
+from src.detect.ocr_engine import prewarm, read_texts  # noqa: F401  prewarm 对外再导出
+
 SLOT_ORIGIN = (1746 / 2560, 1171 / 1440)
 SLOT_SIZE = (67 / 2560, 65 / 1440)
 SLOT_KEYS = [
     ['shift', 'insert', 'home', 'pageup'],
     ['ctrl', 'delete', 'end', 'pagedown'],
 ]
-
-_ocr_instance = None
-
-
-def _get_ocr():
-    """惰性创建 onnxocr 实例(离线直读,不走框架 executor)。"""
-    global _ocr_instance
-    if _ocr_instance is None:
-        from onnxocr.onnx_paddleocr import ONNXPaddleOcr
-        _ocr_instance = ONNXPaddleOcr(use_angle_cls=False, use_det=True, use_rec=True, use_openvino=True)
-    return _ocr_instance
 
 
 def parse_count(text):
@@ -56,21 +47,9 @@ def read_slot_count(frame, slot_key, ocr_fn=None):
         return None
     # 67x29 小号描边数字,PaddleOCR det 在小图上易漏检,放大 3 倍再送
     crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    if ocr_fn is None:
-        ocr_fn = lambda img: _get_ocr().ocr(img)
-    texts = []
-    for line in ocr_fn(crop) or []:
-        try:
-            texts.append(line[1][0] if isinstance(line[1], (tuple, list)) else str(line[1]))
-        except (TypeError, IndexError):
-            continue
-    for t in texts:
-        count = parse_count(t)
+    # ocr_fn 为 None 时 read_texts 内部退回共享单例,这里原样透传即可
+    for hit in read_texts(crop, ocr_fn=ocr_fn):
+        count = parse_count(hit.text)
         if count is not None:
             return count
     return None
-
-
-def prewarm():
-    """任务启用时预热 OCR 模型(加载秒级),避免首次调用卡 10Hz 触发循环。"""
-    _get_ocr()
