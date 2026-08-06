@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     '死亡判定线': 0.02,
     '死亡确认帧数': 20,
     '喝药无效上限': 5,
+    '喝药判定间隔(秒)': 1.0,
     '药水检查间隔(秒)': 30,
     '药水耗尽保护': True,
     '拾取开关': False,
@@ -62,6 +63,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '角色名': '检测模式用它 OCR 定位角色(名字牌)。留空则攻击区锚在画面中心',
             '攻击区宽(像素)': '2560x1440 下标定。用 scripts/calibrate_attack_zone.py 看图调',
             '名字牌到身体偏移(像素)': '名字牌在角色脚下,该值是牌子中心到身体中心的距离',
+            '喝药判定间隔(秒)': 'HP 低于阈值时,两次喝药/判效的最小间隔。药水起效需要时间,间隔太短会误判"喝药无效"',
         })
         self._reset_state()
 
@@ -70,7 +72,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_attack = 0.0
         self._last_pickup = 0.0
         self._hp_streak = 0
-        self._last_hp = 1.0
+        self._hp_at_press = 0.0           # 上次按下药键时的 HP,作窗口判定的基线
+        self._last_hp_potion_press = 0.0  # 上次按下药键时刻;0.0 哨兵=尚无上一窗口,只记基线不判无效
         self._dead_frames = 0
         self._bad_size_frames = 0
         self._last_potion_check = 0.0
@@ -209,17 +212,26 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self.stop_farming('低血保命')
             return
 
-        # 2. 喝血(连续无效检测:喝完 HP 不涨则累计,超上限停任务)
+        # 2. 喝血(连续无效检测:按 1s 窗口判定——按下药键一个窗口后 HP 仍未涨过 1%
+        #    才累计,超上限停任务。绝不在按下药键的同一帧判定:那一帧药效还没出来,
+        #    渐进回血(战斗中常见)每 0.1s 一跳往往不足 1%,逐帧判定必误停;
+        #    窗口内也只按一次药键,避免 10Hz 连按浪费药水)
         if farm_logic.need_hp_potion(hp, cfg['喝血阈值']):
-            self.send_key(keys['血药键'])
-            self._hp_streak = self._hp_streak + 1 if hp <= self._last_hp + 0.01 else 0
-            self._last_hp = hp
-            if farm_logic.potion_not_working(self._hp_streak, cfg['喝药无效上限']):
-                self.stop_farming('连续喝药无效')
-                return
+            if farm_logic.potion_window_elapsed(now, self._last_hp_potion_press,
+                                                cfg['喝药判定间隔(秒)']):
+                # 上一窗口已结束,和按下药键时的 HP 对比:涨了说明药在起效,清零
+                if self._last_hp_potion_press > 0:
+                    self._hp_streak = self._hp_streak + 1 if hp <= self._hp_at_press + 0.01 else 0
+                self._hp_at_press = hp
+                self.send_key(keys['血药键'])
+                self._last_hp_potion_press = now
+                if farm_logic.potion_not_working(self._hp_streak, cfg['喝药无效上限']):
+                    self.stop_farming('连续喝药无效')
+                    return
         else:
+            # 血回到阈值上:清零,下次掉血视为"新的一轮"(只记基线,不计无效)
             self._hp_streak = 0
-            self._last_hp = hp
+            self._last_hp_potion_press = 0.0
 
         # 3. 喝蓝
         if farm_logic.need_mp_potion(mp, cfg['喝蓝阈值']):

@@ -23,6 +23,11 @@ def potion_not_working(streak, limit):
     return streak >= limit
 
 
+def potion_window_elapsed(now, last_press_time, interval):
+    """喝药判定窗口是否已过:距上次按下药键够久,可以对比 HP 判效果/再喝一次。"""
+    return now - last_press_time >= interval
+
+
 def potions_exhausted(hp, hp_threshold, hp_count, mp, mp_threshold, mp_count):
     """count 为 None 表示 OCR 未读出(未知),不判耗尽。"""
     if hp_count == 0 and need_hp_potion(hp, hp_threshold):

@@ -28,11 +28,12 @@ def make_task(**cfg_overrides):
     return task
 
 
-def run_with_frame(task, hp=None, exp=None):
-    """以存档帧驱动一次 run();hp/exp 不为 None 时替换对应读数。"""
+def run_with_frame(task, hp=None, exp=None, now=100.0):
+    """以存档帧驱动一次 run();hp/exp 不为 None 时替换对应读数。
+    now 可推进模拟时间(默认 100.0,与旧调用兼容)。"""
     frame_p = patch.object(MapleFarmTask, 'frame',
                            new=property(lambda self: cv2.imread(FRAME)))
-    patches = [frame_p, patch('time.time', return_value=100.0)]
+    patches = [frame_p, patch('time.time', return_value=now)]
     if hp is not None:
         patches.append(patch('src.task.MapleFarmTask.bars.read_hp', return_value=hp))
     if exp is not None:
@@ -83,6 +84,36 @@ class TestFarmTaskOffline(unittest.TestCase):
         run_with_frame(task, hp=0.9)   # 回血,计数清零
         run_with_frame(task, hp=0.0)
         task.stop_farming.assert_not_called()
+
+    def test_working_potion_under_combat_not_stopped(self):
+        """回归(连续打怪喝药无效误停):药水在起效但回血渐进(<1%/0.1s),
+        战斗中 HP 徘徊在阈值下。旧代码按帧判定,5 帧(0.5s)就误停;
+        修复后按 1s 窗口判定,每窗口喝一次,不应停任务。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False})
+        # 10Hz 连续帧,HP 每 1s 涨 1.5%(药在起效但还没过阈值),持续 4 个窗口
+        hp_schedule = [0.65] * 10 + [0.665] * 10 + [0.68] * 10 + [0.695] * 10
+        for t, hp in enumerate(hp_schedule):
+            run_with_frame(task, hp=hp, now=100.0 + t * 0.1)
+        task.stop_farming.assert_not_called()
+        # 每个窗口恰好喝一次,不 10Hz 连按
+        self.assertEqual(task.send_key.call_args_list.count(call('home')), 4)
+
+    def test_broken_potion_still_stops(self):
+        """对照:药水真失效(HP 纹丝不动),喝 5 个窗口仍无起效 → 停任务。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False})
+        for t in range(60):  # 6s,HP 恒 0.65
+            run_with_frame(task, hp=0.65, now=100.0 + t * 0.1)
+            if task.stop_farming.call_args_list:
+                break
+        task.stop_farming.assert_called_once_with('连续喝药无效')
+
+    def test_first_drink_not_judged_ineffective(self):
+        """血掉到阈值下的第一帧就喝药,但这一帧没有可对比的基线,
+        不许记"无效"——药效还没出来,判了必误判。"""
+        task = make_task(**{'攻击模式': '定频', '走位开关': False})
+        run_with_frame(task, hp=0.60)
+        self.assertIn(call('home'), task.send_key.call_args_list)
+        self.assertEqual(task._hp_streak, 0)
 
     def test_detect_mode_attacks_when_mob_in_zone(self):
         task = make_task(**{'攻击模式': '检测'})

@@ -36,6 +36,10 @@ class TestFarmLogic(unittest.TestCase):
         self.assertTrue(fl.should_attack(10.0, 8.4, 1.5))
         self.assertFalse(fl.should_attack(10.0, 9.0, 1.5))
 
+    def test_potion_window_elapsed(self):
+        self.assertFalse(fl.potion_window_elapsed(100.5, 100.0, 1.0))
+        self.assertTrue(fl.potion_window_elapsed(101.0, 100.0, 1.0))  # 边界:恰好一个窗口 → 已过
+
     def test_should_pickup(self):
         self.assertFalse(fl.should_pickup(100.0, 0.0, 30.0, False))
         self.assertTrue(fl.should_pickup(100.0, 0.0, 30.0, True))
