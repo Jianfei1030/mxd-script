@@ -1,3 +1,4 @@
+import random
 import time
 
 from qfluentwidgets import FluentIcon
@@ -34,6 +35,7 @@ DEFAULT_CONFIG = {
     '锚点搜索区中心Y(比例)': 0.55,
     '锚点刷新间隔(秒)': 2,
     '锚点保鲜(秒)': 10,
+    '走位持续时间(秒)': 0.4,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -151,6 +153,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     @staticmethod
     def _slot_of(key_name):
         return key_name.lower()
+
+    def _do_walk(self, keys):
+        """防挂机走位:随机一侧走出去再走回来,净位移 0,不会走出站桩点或掉下平台。"""
+        hold = self.config['走位持续时间(秒)']
+        first = random.choice(('左移键', '右移键'))
+        second = '右移键' if first == '左移键' else '左移键'
+        self.send_key(keys[first], down_time=hold)
+        self.send_key(keys[second], down_time=hold)
 
     def run(self):
         # TaskExecutor 调度 trigger task 前已取帧(TaskExecutor.py:555),不要再 next_frame()
