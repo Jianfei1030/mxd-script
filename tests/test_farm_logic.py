@@ -431,5 +431,58 @@ class TestKnockbackDetected(unittest.TestCase):
                                                prev_x=None, new_x=1270, mob_xs=[800]))
 
 
+class TestFacingHalfZone(unittest.TestCase):
+    """有向攻击区 = 对称接敌区的面朝侧一半。
+
+    接收「已算好的 zone」而不是 (center, width, height):调用方本来就有 zone,
+    传它进去保证接敌区与攻击区严格同源,y 范围一定一致,不会因为两处各算一次而漂移。
+    """
+
+    ZONE = (880.0, 530.0, 1680.0, 730.0)   # 宽 800 高 200,身体在正中
+    BODY_X = 1280.0
+
+    def test_right_keeps_right_half(self):
+        self.assertEqual(fl.facing_half_zone(self.ZONE, self.BODY_X, 'RIGHT'),
+                         (1280.0, 530.0, 1680.0, 730.0))
+
+    def test_left_keeps_left_half(self):
+        self.assertEqual(fl.facing_half_zone(self.ZONE, self.BODY_X, 'LEFT'),
+                         (880.0, 530.0, 1280.0, 730.0))
+
+    def test_unknown_facing_returns_full_zone(self):
+        """朝向未知 → 整个接敌区(spec §4.3)。
+
+        不制造新的挂死风险:若改成"不知道朝向就不打",一旦转向键长期送不出去
+        (窗口失焦),_facing 会一直是 None,角色就永远不攻击。回退成对称区
+        最坏也只是保持改动前的表现。
+        """
+        self.assertEqual(fl.facing_half_zone(self.ZONE, self.BODY_X, None), self.ZONE)
+
+    def test_invalid_facing_returns_full_zone(self):
+        """非法朝向值不许抛——朝向是别处写进来的字符串,这里只做几何。"""
+        for bad in ('UP', '', 'left', 0):
+            self.assertEqual(fl.facing_half_zone(self.ZONE, self.BODY_X, bad), self.ZONE)
+
+    def test_y_range_never_changes(self):
+        for facing in ('LEFT', 'RIGHT', None, 'UP'):
+            _, y0, _, y1 = fl.facing_half_zone(self.ZONE, self.BODY_X, facing)
+            self.assertEqual((y0, y1), (530.0, 730.0))
+
+    def test_body_outside_zone_degenerates_not_raises(self):
+        """锚点外推/回退可能让 body_x 落到 zone 外。不许抛;
+        退化成空矩形(x0 >= x1)即可,point_in_zone 天然判否。"""
+        z = fl.facing_half_zone(self.ZONE, 100.0, 'LEFT')   # 身体在区左外侧
+        self.assertEqual(z[1], 530.0)
+        self.assertEqual(z[3], 730.0)
+        self.assertFalse(fl.point_in_zone((1000.0, 630.0), z))
+
+    def test_boundary_point_on_body_belongs_to_both_facings(self):
+        """正压在身上的怪(x == body_x)两个朝向都算命中:
+        这种怪的左右判定纯是噪声,与 farm_logic._on_side 的既有约定一致。"""
+        for facing in ('LEFT', 'RIGHT'):
+            z = fl.facing_half_zone(self.ZONE, self.BODY_X, facing)
+            self.assertTrue(fl.point_in_zone((self.BODY_X, 630.0), z))
+
+
 if __name__ == '__main__':
     unittest.main()

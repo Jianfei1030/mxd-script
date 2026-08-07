@@ -49,6 +49,26 @@ def attack_zone(center, width, height):
     return cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2
 
 
+def facing_half_zone(zone, body_x, facing):
+    """有向攻击区 = 对称接敌区 zone 的面朝侧一半 (x0, y0, x1, y1)。
+
+    为什么要分两个区(spec §2):对称区在同时干两件事——决定「要不要转向」
+    (必须看左右两侧,不看背后就不知道有没有值得转过去的怪)和决定「能不能打」
+    (有向技能只有面朝侧的怪打得到)。魔法箭/近战是面朝向直线技能,
+    拿对称区判「能不能打」会在「怪在背侧 + 转向被冷却挡住」时按出空技能。
+
+    朝向未知/非法 → 原样返回整个 zone,退化成改动前行为(不制造挂死风险,
+    见 spec §4.3)。y 范围任何分支下都不变——攻击区与接敌区必须严格同源。
+    body_x 落在 zone 外(锚点外推/回退)时返回退化空矩形,不抛。
+    """
+    x0, y0, x1, y1 = zone
+    if facing == 'RIGHT':
+        return max(x0, body_x), y0, x1, y1
+    if facing == 'LEFT':
+        return x0, y0, min(x1, body_x), y1
+    return zone
+
+
 def point_in_zone(point, zone):
     """判断点是否在矩形区域内。边界点算在内。"""
     x, y = point
