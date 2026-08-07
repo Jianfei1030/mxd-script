@@ -1890,6 +1890,44 @@ class TestKnockbackReset(unittest.TestCase):
                       task.send_key.call_args_list)
         self.assertEqual(task._facing, 'RIGHT')
 
+    @staticmethod
+    def _hit_lines(task):
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if c.args and str(c.args[0]).startswith('受击')]
+
+    def test_no_hit_log_by_default(self):
+        """决策日志开关默认关 → 受击不写日志(10Hz 主循环下不能默认刷屏)。"""
+        task = make_task(**{'攻击模式': '检测'})
+        run_with_frame(task, hp=0.5)
+        run_with_frame(task, hp=0.3)
+        self.assertIsNone(task._facing)          # 机制照常生效
+        self.assertEqual(self._hit_lines(task), [])
+
+    def test_hit_log_records_hp_and_facing_before_reset(self):
+        """开关打开 → 每次受击写一行,含掉血前后与「作废前」的朝向。
+
+        朝向必须是作废前的值:置 None 之后再取就永远是 '-',这行日志也就
+        回答不了"这次受击把哪个朝向打没了",实机排查时等于没写。
+        """
+        task = make_task(**{'攻击模式': '检测', '决策日志开关': True})
+        task._facing = 'LEFT'
+        run_with_frame(task, hp=0.5)   # 基线拍,不算受击
+        self.assertEqual(self._hit_lines(task), [])
+        run_with_frame(task, hp=0.3)
+        lines = self._hit_lines(task)
+        self.assertEqual(len(lines), 1)
+        self.assertIn('50.0%', lines[0])
+        self.assertIn('30.0%', lines[0])
+        self.assertIn('LEFT', lines[0])   # 作废前的朝向,不是 '-'
+
+    def test_no_hit_log_when_drop_below_threshold(self):
+        """微小掉血不算受击 → 不写日志(否则读数噪声会把日志刷满)。"""
+        task = make_task(**{'攻击模式': '检测', '决策日志开关': True})
+        task._facing = 'LEFT'
+        run_with_frame(task, hp=0.50)
+        run_with_frame(task, hp=0.49)
+        self.assertEqual(self._hit_lines(task), [])
+
 
 if __name__ == '__main__':
     unittest.main()
