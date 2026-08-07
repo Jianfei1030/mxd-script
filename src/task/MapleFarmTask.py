@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     '经验停滞上限(分钟)': 10,
     '攻击模式': '检测',
     '角色名': '',
+    '攻击区形状': '单体(面朝)',
     '攻击区宽(像素)': 600,
     '攻击区高(像素)': 200,
     '名字牌到身体偏移(像素)': 90,
@@ -98,11 +99,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self.icon = FluentIcon.GAME
         self.trigger_interval = 0.1  # ~10Hz 轮询,保命响应足够快
         self.default_config.update(DEFAULT_CONFIG)
-        self.config_type['攻击模式'] = {'type': 'drop_down', 'options': ['定频', '检测']}
-        self.config_type['朝向'] = {'type': 'drop_down', 'options': ['自动', '左', '右']}
+        self._register_config_types()
         self.config_description.update({
             '攻击间隔(秒)': '攻击按键节奏,两种模式都按它轻点(检测模式同时用作完整检测拍「锚点OCR+YOLO」的节流)。2026-08-07 从长按连挥改回轻点:长按期间游戏收不到新的按下边沿,被怪击退打断施法后不会重新起手',
             '角色名': '检测模式用它 OCR 定位角色(名字牌)。留空则攻击区锚在画面中心',
+            '攻击区形状': '单体(面朝):只打面朝侧半区,射程 = 攻击区宽的一半。魔法箭/近战这类面朝向技能选它——对称区会在「怪在背侧且转向还在冷却」时按出空技能。群体(对称):打整个攻击区,行为等同于此功能上线前,作为安全退路保留',
             '攻击区宽(像素)': '2560x1440 下标定。用 scripts/calibrate_attack_zone.py 看图调',
             '名字牌到身体偏移(像素)': '名字牌在角色脚下,该值是牌子中心到身体中心的距离',
             '喝药判定间隔(秒)': 'HP 低于阈值时,两次喝药/判效的最小间隔。药水起效需要时间,间隔太短会误判"喝药无效"',
@@ -126,6 +127,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
         self._reset_state()
+
+    def _register_config_types(self):
+        """GUI 控件类型注册。抽成方法是为了能离线断言注册内容——
+        这几个键写成自由文本框的话,用户手打错一个字会静默退回默认分支。"""
+        self.config_type['攻击模式'] = {'type': 'drop_down', 'options': ['定频', '检测']}
+        self.config_type['朝向'] = {'type': 'drop_down', 'options': ['自动', '左', '右']}
+        self.config_type['攻击区形状'] = {'type': 'drop_down',
+                                          'options': ['单体(面朝)', '群体(对称)']}
 
     def _reset_state(self):
         """全部可变运行时状态。__init__ 与测试共用,新增状态只改这里。"""

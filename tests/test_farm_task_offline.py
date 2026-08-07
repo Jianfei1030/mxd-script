@@ -1929,5 +1929,21 @@ class TestKnockbackReset(unittest.TestCase):
         self.assertEqual(self._hit_lines(task), [])
 
 
+class TestAttackZoneShapeConfig(unittest.TestCase):
+    """攻击区形状配置项。群体(对称)是安全退路,必须逐键等同于改动前行为。"""
+
+    def test_default_is_directional(self):
+        """默认单体:用户技能是魔法箭(面朝向直线),对称区从建模上就错。"""
+        self.assertEqual(DEFAULT_CONFIG['攻击区形状'], '单体(面朝)')
+
+    def test_registered_as_drop_down(self):
+        """GUI 里必须是下拉,不能是自由文本框——手打错一个字就静默退回对称区。"""
+        task = make_task()
+        task.config_type = {}
+        MapleFarmTask._register_config_types(task)
+        self.assertEqual(task.config_type['攻击区形状'],
+                         {'type': 'drop_down', 'options': ['单体(面朝)', '群体(对称)']})
+
+
 if __name__ == '__main__':
     unittest.main()
