@@ -163,6 +163,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_walk = 0.0
         self._last_mob_present = None
         self._last_mob_seen = None    # 上次攻击区内真检测到怪的时刻;None=从未见过(去抖用)
+        self._last_attack_present = None  # 有向攻击区内有没有怪(去抖后);只有 _do_attack 读它
+        self._last_attack_seen = None     # 上次有向攻击区内真检测到怪的时刻;None=从未见过(去抖用)
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
         self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
@@ -419,10 +421,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         """一个检测拍:锚点 → 找怪 → 区内有怪则转向接战,否则确定寻怪方向。
 
         完整检测拍与寻怪快速刷新拍共用。攻击键本身不在这里按——由 _do_attack
-        按"_last_mob_present"以 攻击间隔 轻点。"""
+        按"_last_attack_present"以 攻击间隔 轻点。"""
         anchor_hit, source = self._resolve_anchor(frame, now, cfg)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
         zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
+        # 有向攻击区 = 接敌区的面朝侧一半(spec §4)。zone 从此是「接敌区」:
+        # 管转向/寻怪/坐椅/走位;attack_area 管「能不能打」,只喂 _do_attack。
+        # 用的是本拍转向「之前」的 self._facing——此处 facing_before 还没赋值,
+        # 但同值。拿转向后的新朝向立刻判定等于又一次相信盲写信念(spec §5.1)。
+        attack_area = (zone if cfg.get('攻击区形状') == '群体(对称)'
+                       else farm_logic.facing_half_zone(zone, body[0], self._facing))
         try:
             mobs = self.find_mobs(frame)
         except Exception as e:
@@ -440,6 +448,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         mob_present = farm_logic.mob_present_debounced(
             raw_present, now, self._last_mob_seen, cfg['丢怪保持(秒)'])
         self._last_mob_present = mob_present
+        raw_attack = farm_logic.mob_in_zone(centres, attack_area)
+        if raw_attack:
+            self._last_attack_seen = now
+        self._last_attack_present = farm_logic.mob_present_debounced(
+            raw_attack, now, self._last_attack_seen, cfg['丢怪保持(秒)'])
         if self._boxes_enabled():
             self._draw_debug(cfg, body=body, zone=zone, mobs=mobs, mob_present=mob_present)
         else:
@@ -551,7 +564,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._sitting = False
 
     def _do_attack(self, cfg, keys, now):
-        """攻击:检测模式且最近一次检测区内有怪 → 按 攻击间隔 轻点攻击键。
+        """攻击:检测模式且最近一次检测拍「有向攻击区」内有怪 → 按 攻击间隔 轻点攻击键。
 
         2026-08-07 从长按改回轻点(df9b020 曾改成"长按连挥",这里退回)。长按只是
         每拍重复 keyDown,游戏侧收不到新的"按下"边沿——角色被怪击退打断施法后
@@ -563,7 +576,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         """
         if cfg['攻击模式'] != '检测':
             return
-        if self._last_mob_present and farm_logic.should_attack(
+        if self._last_attack_present and farm_logic.should_attack(
                 now, self._last_attack, cfg['攻击间隔(秒)']):
             self.send_key(keys['攻击键'])
             self._last_attack = now

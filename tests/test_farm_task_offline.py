@@ -262,7 +262,8 @@ class TestFarmTaskOffline(unittest.TestCase):
 
     def test_detect_mode_turns_then_attacks_when_mob_behind(self):
         """怪在面朝反侧 → 先轻点方向键转向再攻击,并更新 _facing。"""
-        task = make_task(**{'攻击模式': '检测'})
+        # 显式群体(对称):该用例测改动前的接敌语义(转向+当拍攻击),不测有向攻击区
+        task = make_task(**{'攻击模式': '检测', '攻击区形状': '群体(对称)'})
         task._facing = 'LEFT'
         # 固定锚点:名字牌 (1280, 800) → 身体中心 (1280, 710),默认攻击区 x∈[980,1580]
         with patch('src.detect.anchor.find_in_region',
@@ -303,7 +304,8 @@ class TestFarmTaskOffline(unittest.TestCase):
 
     def test_detect_mode_turns_left_when_mob_on_left(self):
         """怪在左侧 → 按左转向再攻击。"""
-        task = make_task(**{'攻击模式': '检测'})
+        # 显式群体(对称):该用例测改动前的接敌语义(转向+当拍攻击),不测有向攻击区
+        task = make_task(**{'攻击模式': '检测', '攻击区形状': '群体(对称)'})
         task._facing = 'RIGHT'
         with patch('src.detect.anchor.find_in_region',
                    return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')):
@@ -836,14 +838,14 @@ class TestAttackTap(unittest.TestCase):
 
     def test_taps_attack_key_when_mob_in_zone(self):
         task = make_task(**{'攻击模式': '检测'})
-        task._last_mob_present = True
+        task._last_attack_present = True
         task._do_attack(task.config, KEYS, now=100.0)
         self.assertEqual(task.send_key.call_args_list, [call('shift')])
 
     def test_never_holds_attack_key(self):
         """核心回归:攻击键不许再走 send_key_down 长按。"""
         task = make_task(**{'攻击模式': '检测'})
-        task._last_mob_present = True
+        task._last_attack_present = True
         for i in range(5):
             task._do_attack(task.config, KEYS, now=100.0 + i * 2.0)
         task.send_key_down.assert_not_called()
@@ -852,41 +854,41 @@ class TestAttackTap(unittest.TestCase):
     def test_respects_attack_interval(self):
         """同一个 攻击间隔 内只点一次,不被 10Hz 主循环连点。"""
         task = make_task(**{'攻击模式': '检测', '攻击间隔(秒)': 1.5})
-        task._last_mob_present = True
+        task._last_attack_present = True
         task._do_attack(task.config, KEYS, now=100.0)
         task._do_attack(task.config, KEYS, now=101.0)   # 未满 1.5s
         self.assertEqual(task.send_key.call_args_list, [call('shift')])
 
     def test_taps_again_after_interval(self):
         task = make_task(**{'攻击模式': '检测', '攻击间隔(秒)': 1.5})
-        task._last_mob_present = True
+        task._last_attack_present = True
         task._do_attack(task.config, KEYS, now=100.0)
         task._do_attack(task.config, KEYS, now=101.5)
         self.assertEqual(task.send_key.call_args_list, [call('shift'), call('shift')])
 
     def test_no_tap_before_first_detection(self):
-        """启动后还没检测过(_last_mob_present 初始 None)→ 不按攻击键。"""
+        """启动后还没检测过(_last_attack_present 初始 None)→ 不按攻击键。"""
         task = make_task(**{'攻击模式': '检测'})
         task._do_attack(task.config, KEYS, now=100.0)
         task.send_key.assert_not_called()
 
     def test_no_tap_when_mob_gone(self):
         task = make_task(**{'攻击模式': '检测'})
-        task._last_mob_present = False
+        task._last_attack_present = False
         task._do_attack(task.config, KEYS, now=100.0)
         task.send_key.assert_not_called()
 
     def test_fixed_mode_not_handled_here(self):
         """定频模式的定时轻点在 run() 里,本方法不重复按。"""
         task = make_task(**{'攻击模式': '定频'})
-        task._last_mob_present = True
+        task._last_attack_present = True
         task._do_attack(task.config, KEYS, now=100.0)
         task.send_key.assert_not_called()
 
     def test_pause_and_disable_do_not_touch_attack_key(self):
         """不再长按后,暂停/停任务无需松攻击键(方向键的松开另有用例覆盖)。"""
         task = make_task(**{'攻击模式': '检测'})
-        task._last_mob_present = True
+        task._last_attack_present = True
         task._do_attack(task.config, KEYS, now=100.0)
         task._on_executor_paused(True)
         self.assertNotIn(call('shift'), task.send_key_up.call_args_list)
@@ -1408,8 +1410,9 @@ class TestTurnAfterSeek(unittest.TestCase):
 
     def test_turn_after_seek_releases_direction_key_before_tap(self):
         """怪从背后进区:松寻怪键必须发生在转向轻点之前,攻击键按下时不再残留方向键。"""
+        # 显式群体(对称):该用例测改动前的接敌语义(当拍转向+当拍攻击),不测有向攻击区
         task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', '走位开关': False,
-                            '攻击区宽(像素)': 1200})
+                            '攻击区宽(像素)': 1200, '攻击区形状': '群体(对称)'})
         task._anchor = (1400.0, 800.0)
         task._anchor_time = 100.0
         task._facing = 'RIGHT'
@@ -1943,6 +1946,118 @@ class TestAttackZoneShapeConfig(unittest.TestCase):
         MapleFarmTask._register_config_types(task)
         self.assertEqual(task.config_type['攻击区形状'],
                          {'type': 'drop_down', 'options': ['单体(面朝)', '群体(对称)']})
+
+
+class TestDirectionalAttackZone(unittest.TestCase):
+    """有向攻击区:「能不能打到」与「要不要转向」分开判(spec §4)。
+
+    几何:角色名为空 → 锚点回退画面中心 (1280, 720) → 身体 (1280, 630);
+    默认 攻击区宽=600 高=200 → 接敌区 x∈[980,1580] y∈[530,730]。
+    面朝右的攻击区 = x∈[1280,1580];面朝左 = x∈[980,1280]。
+    怪框 (x, y, w, h) 的中心 = (x + w/2, y + h/2)。
+    """
+
+    LEFT_MOB = dict(x=1020, y=605, width=60, height=50)    # 中心 (1050, 630) 在左半区
+    RIGHT_MOB = dict(x=1450, y=605, width=60, height=50)   # 中心 (1480, 630) 在右半区
+
+    @staticmethod
+    def _attacked(task, keys):
+        return call(keys['攻击键']) in task.send_key.call_args_list
+
+    def _run(self, task, mob):
+        task.find_mobs = MagicMock(return_value=[MagicMock(**mob)])
+        run_with_frame(task)
+
+    def test_directional_attacks_mob_on_facing_side(self):
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        self._run(task, self.RIGHT_MOB)
+        self.assertTrue(task._last_attack_present)
+        self.assertTrue(self._attacked(task, KEYS))
+
+    def test_directional_does_not_attack_mob_behind_while_turn_on_cooldown(self):
+        """核心回归(spec §1):面朝右、怪只在左、转向冷却未过 → 一定不按攻击键。
+
+        改动前:mob_present 来自对称区 → True → _do_attack 照按 → 面朝右打左边的怪。
+        转向冷却 1.5s 比攻击间隔还长,这个窗口一点都不罕见。
+        """
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        task._last_turn = 99.9          # run_with_frame 默认 now=100.0,即 0.1s 前刚转过向
+        self._run(task, self.LEFT_MOB)
+        self.assertTrue(task._last_mob_present)      # 接敌区有怪:不寻怪、不坐椅
+        self.assertFalse(task._last_attack_present)  # 攻击区没怪
+        self.assertFalse(self._attacked(task, KEYS))
+
+    def test_turn_this_tick_still_no_attack_until_next_tick(self):
+        """冷却已过 → 本拍转向,但本拍仍不攻击;下一拍朝向已对才攻击。
+
+        攻击区用的是本拍转向「之前」的朝向——用转向后的新 _facing 立刻判定,
+        等于又一次相信"我按了键所以已经转过去了"这个盲写信念,而那正是
+        这一系列 bug 的来源(spec §5.1)。
+        """
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        task._last_turn = 0.0           # 哨兵:冷却天然放行
+        self._run(task, self.LEFT_MOB)
+        self.assertIn(call(KEYS['左移键'], down_time=TURN_TAP_SECONDS),
+                      task.send_key.call_args_list)
+        self.assertFalse(self._attacked(task, KEYS))
+        self.assertEqual(task._facing, 'LEFT')
+
+        task.send_key.reset_mock()
+        task._last_attack = 0.0         # 放行攻击间隔
+        task._last_detect = 0.0         # 放行检测拍
+        self._run(task, self.LEFT_MOB)
+        self.assertTrue(self._attacked(task, KEYS))
+
+    def test_unknown_facing_falls_back_to_symmetric(self):
+        """朝向未知 → 攻击区 = 整个接敌区(spec §4.3),不制造挂死风险。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = None
+        self._run(task, self.LEFT_MOB)
+        self.assertTrue(task._last_attack_present)
+
+    def test_aoe_shape_is_key_for_key_identical_to_symmetric(self):
+        """群体(对称)必须逐键等同于改动前:安全退路。"""
+        task = make_task(**{'攻击模式': '检测', '攻击区形状': '群体(对称)'})
+        task._facing = 'RIGHT'
+        task._last_turn = 99.9
+        self._run(task, self.LEFT_MOB)
+        self.assertTrue(task._last_attack_present)
+        self.assertTrue(self._attacked(task, KEYS))
+
+    def test_mob_behind_does_not_trigger_seek(self):
+        """怪在背侧走「转向」分支而不是「寻怪」分支——接敌区仍然有怪。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        task._last_turn = 99.9
+        self._run(task, self.LEFT_MOB)
+        self.assertIsNone(task._seek_dir)
+
+    def test_sit_still_driven_by_engage_zone(self):
+        """坐椅/走位/忙判定问的是「附近有没有怪」,不是「打不打得到」——
+        怪在背侧(打不到但就在旁边)时不许坐下。直接把 _last_mob_present
+        换成有向的会一起改坏这三者,本例守住其中最容易观察的坐椅。"""
+        task = make_task(**{'攻击模式': '检测', '坐椅开关': True, '坐椅延迟(秒)': 0.0})
+        task._facing = 'RIGHT'
+        task._last_turn = 99.9
+        self._run(task, self.LEFT_MOB)
+        self.assertFalse(task._last_attack_present)   # 确实打不到
+        self.assertNotIn(call(KEYS['椅子键(可留空)']), task.send_key.call_args_list)
+        self.assertTrue(task._last_busy > 0)          # 但算「忙」,走位倒计时重算
+
+    def test_attack_debounce_is_independent(self):
+        """攻击区自己一路去抖:漏检一拍,丢怪保持 内仍算能打
+        (YOLO 单帧 recall 0.886,且角色自己的攻击特效会遮挡目标)。"""
+        task = make_task(**{'攻击模式': '检测', '丢怪保持(秒)': 1.0})
+        task._facing = 'RIGHT'
+        self._run(task, self.RIGHT_MOB)
+        self.assertTrue(task._last_attack_present)
+        task.find_mobs = MagicMock(return_value=[])      # 这一拍漏检
+        task._last_detect = 0.0
+        run_with_frame(task, now=100.5)                  # 0.5s 后,仍在 1.0s 保持内
+        self.assertTrue(task._last_attack_present)
 
 
 if __name__ == '__main__':
