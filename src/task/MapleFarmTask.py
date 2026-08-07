@@ -372,8 +372,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self.log_error(f'调试 overlay 清除失败: {e!r}')
         self._debug_drawn = False
 
-    def _draw_debug(self, cfg, body, zone, mobs, mob_present):
-        """画玩家框(绿)/攻击区框(蓝=无怪,红=有怪)/怪物框(黄)+脚底点(青)。
+    def _draw_debug(self, cfg, body, zone, attack_area, mobs, mob_present, attack_present):
+        """画玩家框(绿)/接敌区框(细,蓝=无怪红=有怪)/攻击区框(粗,同色)/怪物框(黄)+脚底点(青)。
         画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
         用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
         overlay = self.get_overlay_view()
@@ -382,6 +382,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         pw, ph = cfg['玩家宽(像素)'], cfg['玩家高(像素)']
         zx0, zy0, zx1, zy1 = zone
         zone_color = ZONE_HOT_COLOR if mob_present else ZONE_IDLE_COLOR
+        ax0, ay0, ax1, ay1 = attack_area
+        attack_color = ZONE_HOT_COLOR if attack_present else ZONE_IDLE_COLOR
 
         def paint(painter, widget):
             ratio = widget.frame_ratio()
@@ -393,9 +395,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             painter.drawRect(rect(body[0] - pw / 2, body[1] - ph / 2, pw, ph))
             painter.drawText(rect(body[0] - pw / 2, body[1] - ph / 2 - 20, 100, 20), '玩家')
 
-            painter.setPen(QPen(zone_color, 3))
+            # 接敌区:细线,管转向/寻怪。攻击区:粗线,管按不按攻击键——
+            # 单体模式下它只占接敌区的面朝侧一半,视觉验收就看这个(判据 D)
+            painter.setPen(QPen(zone_color, 1))
             painter.drawRect(rect(zx0, zy0, zx1 - zx0, zy1 - zy0))
-            painter.drawText(rect(zx0, zy0 - 20, 100, 20), '攻击区')
+            painter.drawText(rect(zx0, zy0 - 20, 100, 20), '接敌区')
+
+            painter.setPen(QPen(attack_color, 4))
+            painter.drawRect(rect(ax0, ay0, ax1 - ax0, ay1 - ay0))
+            painter.drawText(rect(ax0, ay1 + 4, 100, 20), '攻击区')
 
             for mob in mobs:
                 painter.setPen(QPen(MOB_COLOR, 2))
@@ -454,7 +462,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_attack_present = farm_logic.mob_present_debounced(
             raw_attack, now, self._last_attack_seen, cfg['丢怪保持(秒)'])
         if self._boxes_enabled():
-            self._draw_debug(cfg, body=body, zone=zone, mobs=mobs, mob_present=mob_present)
+            self._draw_debug(cfg, body=body, zone=zone, attack_area=attack_area,
+                             mobs=mobs, mob_present=mob_present,
+                             attack_present=self._last_attack_present)
         else:
             self._clear_debug()
         facing_before, turn = self._facing, None
@@ -496,11 +506,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     self._last_walk = now
                     self._last_seek_refresh = now
         if cfg.get('决策日志开关'):
-            self._log_decision(source, anchor_hit, body, zone, centres,
-                               raw_present, mob_present, facing_before, turn)
+            self._log_decision(source, anchor_hit, body, zone, attack_area, centres,
+                               raw_present, mob_present, self._last_attack_present,
+                               facing_before, turn)
 
-    def _log_decision(self, source, anchor_hit, body, zone, centres,
-                      raw_present, mob_present, facing_before, turn):
+    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres,
+                      raw_present, mob_present, attack_present, facing_before, turn):
         """逐拍决策留痕(默认关,见配置 决策日志开关)。
 
         排"左右转向不攻击"时必须知道:锚点是哪条通道给的(fallback/cached 说明角色
@@ -509,10 +520,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         直接看序列。"""
         in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
         left = sum(1 for x in in_zone if x < body[0])
+        attack_in = [x for x, y in centres
+                     if farm_logic.point_in_zone((x, y), attack_area)]
         self.log_debug(
             f'决策 src={source} body_x={body[0]:.0f} anchor_y={anchor_hit.y:.0f} '
             f'怪={len(centres)} 区内={len(in_zone)}(左{left}/右{len(in_zone) - left}) '
             f'实测有怪={raw_present} 有怪={mob_present} '
+            f'可打区内={len(attack_in)} 可打={attack_present} '
             f'朝向={facing_before or "-"}→{self._facing or "-"} '
             f'转向={turn or "-"} 寻怪={self._seek_dir or "-"} '
             f'可发键={self._key_sendable()}')

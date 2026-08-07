@@ -1,3 +1,4 @@
+import re
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -1528,7 +1529,8 @@ class TestDebugOverlay(unittest.TestCase):
         overlay = MagicMock()
         task.get_overlay_view = MagicMock(return_value=overlay)
         task._draw_debug(task.config, body=(1280, 700), zone=(1000, 600, 1500, 800),
-                         mobs=[], mob_present=False)
+                         attack_area=(1000, 600, 1500, 800), mobs=[], mob_present=False,
+                         attack_present=False)
         overlay.draw.assert_called_once()
         args, _ = overlay.draw.call_args
         self.assertEqual(args[0], 'maple_farm_debug')
@@ -1567,7 +1569,8 @@ class TestDebugOverlay(unittest.TestCase):
         overlay = MagicMock()
         task.get_overlay_view = MagicMock(return_value=overlay)
         task._draw_debug(task.config, body=(1280, 700), zone=(1000, 600, 1500, 800),
-                         mobs=[mob], mob_present=True)
+                         attack_area=(1000, 600, 1500, 800), mobs=[mob], mob_present=True,
+                         attack_present=True)
         callback = overlay.draw.call_args.args[1]
 
         img = QImage(2560, 1440, QImage.Format_RGB32)
@@ -1583,7 +1586,8 @@ class TestDebugOverlay(unittest.TestCase):
         task = make_task()
         task.get_overlay_view = MagicMock(return_value=None)
         task._draw_debug(task.config, body=(1280, 700), zone=(1000, 600, 1500, 800),
-                         mobs=[], mob_present=False)
+                         attack_area=(1000, 600, 1500, 800), mobs=[], mob_present=False,
+                         attack_present=False)
         self.assertFalse(task._debug_drawn)
 
     def test_switch_to_fixed_rate_clears_previous_overlay(self):
@@ -2058,6 +2062,45 @@ class TestDirectionalAttackZone(unittest.TestCase):
         task._last_detect = 0.0
         run_with_frame(task, now=100.5)                  # 0.5s 后,仍在 1.0s 保持内
         self.assertTrue(task._last_attack_present)
+
+
+class TestDirectionalDecisionLog(unittest.TestCase):
+    """决策日志要能回答「有向区到底生效没有」——这是实弹判据 A 的唯一数据源。"""
+
+    @staticmethod
+    def _lines(task):
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if c.args and str(c.args[0]).startswith('决策')]
+
+    def test_logs_attack_zone_count_and_flag(self):
+        task = make_task(**{'攻击模式': '检测', '决策日志开关': True})
+        task._facing = 'RIGHT'
+        task._last_turn = 99.9
+        task.find_mobs = MagicMock(return_value=[
+            MagicMock(x=1020, y=605, width=60, height=50),   # 中心 1050,接敌区内、攻击区外
+            MagicMock(x=1450, y=605, width=60, height=50),   # 中心 1480,两个区都在内
+        ])
+        run_with_frame(task)
+        line = self._lines(task)[0]
+        self.assertIn('区内=2', line)
+        self.assertIn('可打区内=1', line)
+        self.assertIn('可打=True', line)
+
+    def test_attack_count_never_exceeds_engage_count(self):
+        """单体模式下 可打区内 <= 区内 必须恒成立(判据 A 的几何自洽检查)。"""
+        task = make_task(**{'攻击模式': '检测', '决策日志开关': True})
+        for facing in ('LEFT', 'RIGHT', None):
+            task._facing = facing
+            task._last_detect = 0.0
+            task.find_mobs = MagicMock(return_value=[
+                MagicMock(x=1020, y=605, width=60, height=50),
+                MagicMock(x=1450, y=605, width=60, height=50),
+            ])
+            run_with_frame(task)
+        for line in self._lines(task):
+            engage = int(re.search(r'区内=(\d+)', line).group(1))
+            attack = int(re.search(r'可打区内=(\d+)', line).group(1))
+            self.assertLessEqual(attack, engage, line)
 
 
 if __name__ == '__main__':
