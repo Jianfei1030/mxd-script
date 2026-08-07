@@ -2063,6 +2063,21 @@ class TestDirectionalAttackZone(unittest.TestCase):
         run_with_frame(task, now=100.5)                  # 0.5s 后,仍在 1.0s 保持内
         self.assertTrue(task._last_attack_present)
 
+    def test_mob_crosses_behind_clears_attack_immediately(self):
+        """怪从面朝侧绕到背侧:即使在 丢怪保持 窗口内,攻击信号必须立刻清。
+        去抖保持是为 YOLO 漏检(整拍无怪)设计的,不是为"确定性换边"设计的——
+        保持会把 §1 的空按从"无限"降级成"每次换边 ≤1 秒"的有界残余。"""
+        task = make_task(**{'攻击模式': '检测', '丢怪保持(秒)': 1.0})
+        task._facing = 'RIGHT'
+        self._run(task, self.RIGHT_MOB)      # 第一拍:怪在面朝侧,进入攻击态
+        self.assertTrue(task._last_attack_present)
+        task.send_key.reset_mock()           # 清掉第一拍的攻击轻点,只断言换边拍的按键
+        task._last_detect = 0.0
+        task._last_turn = 99.9               # 转向冷却未过,挡住转向
+        self._run(task, self.LEFT_MOB)       # 第二拍:怪已绕到背侧,仍在保持窗口内
+        self.assertFalse(task._last_attack_present)   # 修复前此断言失败(保持吞掉换边)
+        self.assertFalse(self._attacked(task, KEYS))
+
 
 class TestDirectionalDecisionLog(unittest.TestCase):
     """决策日志要能回答「有向区到底生效没有」——这是实弹判据 A 的唯一数据源。"""

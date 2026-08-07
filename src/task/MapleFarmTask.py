@@ -124,7 +124,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
             '转向冷却(秒)': '两次转向之间的最小间隔。攻击区里常常只有一只怪,而它反复在身体左右两侧之间换,不加冷却角色就原地左右扭(实测转向 17 次里 12 次是反向)。要大于一次施法时间才压得住;设太大则怪真绕到背后时反应慢。设 0 = 关掉',
-            '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
+            '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、可打区内怪数、可打、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
         self._reset_state()
 
@@ -163,7 +163,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_walk = 0.0
         self._last_mob_present = None
         self._last_mob_seen = None    # 上次攻击区内真检测到怪的时刻;None=从未见过(去抖用)
-        self._last_attack_present = None  # 有向攻击区内有没有怪(去抖后);只有 _do_attack 读它
+        self._last_attack_present = None  # 有向攻击区内有没有怪(去抖后);行为上只有 _do_attack 读它(另有 overlay/日志读)
         self._last_attack_seen = None     # 上次有向攻击区内真检测到怪的时刻;None=从未见过(去抖用)
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
@@ -459,8 +459,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         raw_attack = farm_logic.mob_in_zone(centres, attack_area)
         if raw_attack:
             self._last_attack_seen = now
+        # 保持只为 YOLO 漏检服务:怪确在接敌区但不在攻击区(raw_present and not raw_attack)
+        # 是「确定性换边」的证据,必须立刻清掉攻击信号,不许被保持窗口吞掉——
+        # 否则每次换边后仍有 ≤ 丢怪保持(秒) 的空按(§1 bug 的有界残余)。
+        # 群体(对称)模式下 raw_attack == raw_present,此条件恒为 False,惰性。
         self._last_attack_present = farm_logic.mob_present_debounced(
-            raw_attack, now, self._last_attack_seen, cfg['丢怪保持(秒)'])
+            raw_attack, now, self._last_attack_seen, cfg['丢怪保持(秒)']) \
+            and not (raw_present and not raw_attack)
         if self._boxes_enabled():
             self._draw_debug(cfg, body=body, zone=zone, attack_area=attack_area,
                              mobs=mobs, mob_present=mob_present,
