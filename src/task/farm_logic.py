@@ -143,6 +143,27 @@ def is_dead(hp_percent, threshold=0.02):
     return hp_percent < threshold
 
 
+def knockback_detected(hp, prev_hp, hp_drop=0.02,
+                       prev_x=None, new_x=None, mob_xs=None, x_jump=40.0):
+    """受击(被怪打)检测:HP 下降超阈值,或锚点 x 突变且方向远离最近怪。
+
+    HP 是主信号:被打必掉血,且 bars.read_hp 每拍都在读(10Hz),1-2 帧内就能捕获;
+    2% 阈值滤掉血条按列填充的读数噪声(2560 宽下 1 列 ≈0.5%)。
+    位移是辅助信号(锚点更新拍才有):|dx| > x_jump 且位移方向远离最近怪
+    = 被击退(怪在左人被推右,或反之)。主动寻怪是朝怪走,方向相反,天然排除。
+    prev_hp=None(第一拍/重新启用)不判,避免把初始值当掉血。
+    """
+    if prev_hp is not None and hp < prev_hp - hp_drop:
+        return True
+    if prev_x is None or new_x is None or not mob_xs:
+        return False
+    dx = new_x - prev_x
+    if abs(dx) < x_jump:
+        return False
+    nearest = min(mob_xs, key=lambda x: abs(x - prev_x))
+    return (nearest < prev_x and dx > 0) or (nearest > prev_x and dx < 0)
+
+
 def mob_feet(mob):
     """怪物脚底点 = bbox 底部中心。横版地面距离以脚底为准,不用框中心。"""
     return mob.x + mob.width / 2, mob.y + mob.height

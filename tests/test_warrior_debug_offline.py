@@ -121,16 +121,36 @@ class TestWarriorDebugOffline(unittest.TestCase):
                 self.assertFalse(kwargs['in_zone'])
 
     def test_facing_auto_follows_anchor_movement(self):
-        """自动朝向:锚点右移 → RIGHT;左移 → LEFT。"""
+        """自动朝向:连续两拍同向位移才翻转(两拍确认);单拍位移/噪声不翻。"""
         task = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '朝向': '自动'})
         task._anchor = Anchor(1280, 700, 130)
         task._facing = 'LEFT'
-        # 右移 30px → 翻转 RIGHT
-        self.assertEqual(task._auto_facing(Anchor(1310, 700, 130)), 'RIGHT')
-        # 左移 30px → 翻转 LEFT
-        self.assertEqual(task._auto_facing(Anchor(1250, 700, 130)), 'LEFT')
-        # 小位移(噪声)→ 保持
-        self.assertEqual(task._auto_facing(Anchor(1283, 700, 130)), 'LEFT')
+        # 单拍右移 30px → 不够两拍,保持 LEFT
+        self.assertEqual(task._auto_facing(Anchor(1310, 700, 130)), 'LEFT')
+        # 第二拍继续右移 → 翻转 RIGHT
+        self.assertEqual(task._auto_facing(Anchor(1340, 700, 130)), 'RIGHT')
+        # 小位移(噪声)→ 不参与计数,保持 RIGHT
+        self.assertEqual(task._auto_facing(Anchor(1343, 700, 130)), 'RIGHT')
+
+    def test_facing_auto_interrupted_trend_does_not_flip(self):
+        """同向位移被打断(反向/静止)→ 计数清零,需重新积累两拍才翻。"""
+        task = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '朝向': '自动'})
+        task._anchor = Anchor(1280, 700, 130)
+        task._facing = 'LEFT'
+        self.assertEqual(task._auto_facing(Anchor(1310, 700, 130)), 'LEFT')  # 右移 1 拍
+        self.assertEqual(task._auto_facing(Anchor(1283, 700, 130)), 'LEFT')  # 小位移噪声,清零
+        self.assertEqual(task._auto_facing(Anchor(1310, 700, 130)), 'LEFT')  # 又右移,重新计数(1 拍)
+        self.assertEqual(task._auto_facing(Anchor(1340, 700, 130)), 'RIGHT')  # 第二拍 → 才翻转
+        self.assertEqual(task._facing, 'LEFT')  # _auto_facing 只返回推断,不改状态
+
+    def test_facing_auto_left_direction(self):
+        """向左连续两拍 → 翻转 LEFT。"""
+        task = make_task(**{'调试开关': True, '角色名': 'Yufeng咕咕', '朝向': '自动'})
+        task._anchor = Anchor(1280, 700, 130)
+        task._facing = 'RIGHT'
+        self.assertEqual(task._auto_facing(Anchor(1250, 700, 130)), 'RIGHT')  # 左移 1 拍
+        self.assertEqual(task._auto_facing(Anchor(1220, 700, 130)), 'LEFT')   # 第二拍 → 翻转
+        self.assertEqual(task._auto_facing(Anchor(1190, 700, 130)), 'LEFT')   # 继续左移 → 保持 LEFT
 
     def test_manual_facing_overrides_auto(self):
         """手动 左/右 优先于自动移动推断(spec §3.3 优先级 ①)。"""

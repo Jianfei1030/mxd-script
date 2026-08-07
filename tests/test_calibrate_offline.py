@@ -80,19 +80,21 @@ class TestCalibrateOffline(unittest.TestCase):
         self.assertTrue((left_side[:, :, 2] == 255).any(), 'LEFT 朝向攻击框应在左侧')
 
     def test_write_config_creates_and_updates(self):
+        """write_config 写 WarriorDebugTask.json 顶层键(GUI Config(name) 加载一致,
+        见 AGENTS.md §8.2——旧版写 task_configs['战士调试'] 是错的,GUI 读不到)。"""
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, 'config.json')
             write_config(path, {'攻击距离': 140, '调试开关': True})
             with open(path, encoding='utf-8') as f:
                 cfg = json.load(f)
-            self.assertEqual(cfg['task_configs']['战士调试']['攻击距离'], 140)
-            # 再次写入合并
+            self.assertEqual(cfg['攻击距离'], 140)
+            self.assertTrue(cfg['调试开关'])
+            # 再次写入合并(顶层键)
             write_config(path, {'玩家宽': 80})
             with open(path, encoding='utf-8') as f:
                 cfg = json.load(f)
-            task_cfg = cfg['task_configs']['战士调试']
-            self.assertEqual(task_cfg['攻击距离'], 140)
-            self.assertEqual(task_cfg['玩家宽'], 80)
+            self.assertEqual(cfg['攻击距离'], 140)
+            self.assertEqual(cfg['玩家宽'], 80)
 
 
 if __name__ == '__main__':

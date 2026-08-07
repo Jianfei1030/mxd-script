@@ -5,6 +5,7 @@
 
 操作:
     鼠标左键拖拽  = 添加一个 mob 框
+    鼠标右键点击  = 删除点到的框（任意位置，含预标）
     r / d          = 删除最后一个框
     n / 空格       = 保存当前图标注并进入下一张（0 个框会存空 txt，作为负样本）
     p / Backspace  = 返回上一张（自动保存当前图）
@@ -68,6 +69,7 @@ def label_folder(folder):
                     parts = line.strip().split()
                     if len(parts) == 5:
                         boxes.append(list(map(float, parts[1:])))
+        redraw()
 
     def redraw():
         nonlocal img
@@ -113,6 +115,20 @@ def label_folder(folder):
                 bh = (y2 - y1) / h
                 boxes.append([cx, cy, bw, bh])
                 redraw()
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            # 右键删除包含点击点的框（可删预标/中间任意框）
+            px, py = x / w, y / h
+            hit = None
+            for i, (cx, cy, bw, bh) in enumerate(boxes):
+                if abs(px - cx) <= bw / 2 and abs(py - cy) <= bh / 2:
+                    hit = i
+                    break
+            if hit is not None:
+                removed = boxes.pop(hit)
+                print(f'removed box #{hit} at ({removed[0]:.3f},{removed[1]:.3f})')
+                redraw()
+            else:
+                print('未命中任何框（右键点击框内部以删除）')
 
     print_usage()
     cv2.namedWindow('label')

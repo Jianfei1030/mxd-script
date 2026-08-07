@@ -29,10 +29,14 @@ class TestBarsSynthetic(unittest.TestCase):
 
 
 class TestBarsRealFrame(unittest.TestCase):
+    """依赖存档帧的实测用例。帧缺失(其他机器/CI,gitignore 的截图未入库)时
+    skip 而非 error——测试标准:环境缺失必须显式 skip,不允许整类报错。"""
+
     @classmethod
     def setUpClass(cls):
         cls.frame = cv2.imread(FRAME)
-        assert cls.frame is not None, f'存档帧缺失: {FRAME}'
+        if cls.frame is None:
+            raise unittest.SkipTest(f'存档帧缺失: {FRAME}')
 
     def test_hp_full(self):
         self.assertGreaterEqual(bars.read_hp(self.frame), 0.95)

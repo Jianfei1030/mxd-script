@@ -25,8 +25,10 @@ DEFAULT_CONFIG = {
     '攻击区高': 200,
 }
 
-# 玩家朝向推断:名字牌 x 位移超过该阈值才翻转朝向(OCR 噪声约 ±5px)
-MOVE_X_THRESHOLD = 10
+# 玩家朝向推断:名字牌 x 位移超过该阈值才计入朝向位移(OCR 噪声约 ±5px,留 3 倍余量)
+MOVE_X_THRESHOLD = 15
+# 连续同向位移 ≥ 此帧数才翻转朝向(两拍确认:单拍位移/噪声不翻,压住 OCR 抖动)
+FACING_CONFIRM_FRAMES = 2
 # 快通道小窗半宽/半高(±240x±80,与 attack-zone spec §4.2 一致)
 WINDOW_HALF_W = 240
 WINDOW_HALF_H = 80
@@ -53,6 +55,8 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
     def _reset_state(self):
         self._anchor = None        # 上一可信锚点(名字牌中心)
         self._facing = 'RIGHT'     # 无历史默认 RIGHT(spec §3.4)
+        self._facing_dx_sign = 0   # 上拍位移符号(1 右/-1 左/0 静止),朝向滞回用
+        self._facing_dx_frames = 0  # 连续同向位移帧数
         self._last_draw = 0.0
 
     def enable(self):
@@ -122,13 +126,20 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         return self._auto_facing(hit)
 
     def _auto_facing(self, hit):
-        """朝向自动推断:名字牌 x 位移 > 阈值 → 翻转;否则保持。"""
-        if self._anchor is not None:
-            dx = hit.x - self._anchor.x
-            if dx > MOVE_X_THRESHOLD:
-                return 'RIGHT'
-            if dx < -MOVE_X_THRESHOLD:
-                return 'LEFT'
+        """朝向自动推断:连续两拍同向位移(>阈值)才翻转,单拍位移/噪声不翻(两拍确认)。
+        被击退后的朝向翻转由生产链路(MapleFarmTask 受击检测)处理,这里只负责
+        走位朝向的稳健跟踪,不追求对击退事件的即时响应。"""
+        if self._anchor is None:
+            return self._facing
+        dx = hit.x - self._anchor.x
+        sign = 1 if dx > MOVE_X_THRESHOLD else (-1 if dx < -MOVE_X_THRESHOLD else 0)
+        if sign != 0 and sign == self._facing_dx_sign:
+            self._facing_dx_frames += 1
+        else:
+            self._facing_dx_sign = sign
+            self._facing_dx_frames = 1 if sign != 0 else 0
+        if self._facing_dx_frames >= FACING_CONFIRM_FRAMES:
+            return 'RIGHT' if self._facing_dx_sign > 0 else 'LEFT'
         return self._facing
 
     def _debug_text(self, text):
@@ -143,6 +154,14 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         painter.drawText(QRectF(10, 10, 800, 40), text)
 
     def _draw_debug(self, frame, cfg, facing, in_zone, mobs):
+        from ok import og
+        ok_config = getattr(og.app, 'ok_config', None)
+        if ok_config is not None and not ok_config.get('use_overlay', False):
+            # 关闭「启用标记框」时不绘制,并清掉上次残留,避免关闭后仍显示旧框
+            overlay = self.get_overlay_view()
+            if overlay is not None:
+                overlay.clear_draw('warrior_debug')
+            return
         overlay = self.get_overlay_view()
         if overlay is None:
             return

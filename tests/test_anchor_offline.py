@@ -2,6 +2,9 @@
 
 判据来自 spec §7.2,基线为 2026-08-06 实测(40 帧):
 干净锚点 22/40、y ∈ [738, 888]、扫描中位 118ms / 最大 235ms。
+
+测试标准:数据依赖回归必须验证数据可用性——帧缺失或角色名不在数据中
+(数据集已演进为 patrol_ground 巡逻帧时)都显式 skip,不允许假失败。
 """
 import glob
 import os
@@ -29,6 +32,16 @@ class TestAnchorOnRealFrames(unittest.TestCase):
     def setUpClass(cls):
         # 模型惰性加载是秒级的,不先预热的话第一帧的计时会把加载算进去,判据 D 必挂
         ocr_engine.prewarm()
+        # 数据可用性前置检查:角色名必须出现在数据里,否则这批数据与回归不匹配
+        # (训练集从"锚点专用帧"演进为 patrol_ground 巡逻帧后,角色名/位置已不符,
+        # 硬跑只会 0/40 假失败;匹配数据用 OK_MXD_CHAR_NAME 环境变量指定)
+        from src.detect.ocr_engine import read_texts
+        probe = cv2.imread(frame_files()[0])
+        names = {t.text.strip() for t in read_texts(probe)}
+        if NAME not in names:
+            raise unittest.SkipTest(
+                f'角色名 {NAME} 不在 {DATASET} 数据中(当前含: {sorted(names)[:6]}...),'
+                f'锚点回归需匹配数据,用 OK_MXD_CHAR_NAME 指定')
         cls.results = []
         for path in frame_files():
             frame = cv2.imread(path)
