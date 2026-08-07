@@ -1,5 +1,7 @@
+import os
 import time
 
+import numpy as np
 from qfluentwidgets import FluentIcon
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QPen
@@ -53,6 +55,11 @@ DEFAULT_CONFIG = {
     '寻怪外推速度(像素/秒)': 250,
     '玩家宽(像素)': 60,
     '玩家高(像素)': 120,
+    '模板分片匹配开关': True,
+    '模板匹配阈值': 0.2,
+    '丢怪保持(秒)': 1.0,
+    '转向冷却(秒)': 1.5,
+    '决策日志开关': False,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -64,6 +71,9 @@ ANCHOR_VX_MAX_AGE = 2.0           # 实测速度在此窗口内可信,超时退�
 ANCHOR_VX_MAX_SPEED = 600         # 实测速度上限(像素/秒):跳变 = 回退/误检,不学
 ANCHOR_VX_PLATFORM_DY = 30        # 名字牌 y 位移超此值视为换平台,不学速度
 ANCHOR_DEFAULT_SPEED = 250        # 无实测速度时的水平外推速度(像素/秒)
+NAMETAG_TEMPLATE_DIR = 'screenshots/nametag_templates'  # 名字牌模板持久化目录(白字二值化)
+NAMETAG_TEMPLATE_HALF_H = 18   # 模板裁剪半高:名字牌文字高 ~26px
+NAMETAG_TEMPLATE_PAD = 12      # 模板裁剪两侧边距(文字框外留白)
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
 DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
 TURN_TAP_SECONDS = 0.05  # 转向轻点:方向键按 50ms 即翻转朝向,位移可忽略(约几像素,方向随怪侧轮换不累积)
@@ -91,7 +101,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self.config_type['攻击模式'] = {'type': 'drop_down', 'options': ['定频', '检测']}
         self.config_type['朝向'] = {'type': 'drop_down', 'options': ['自动', '左', '右']}
         self.config_description.update({
-            '攻击间隔(秒)': '定频模式:攻击按键节奏。检测模式:完整检测拍(锚点OCR+YOLO)的节流——攻击本身长按持续,不再受此限制',
+            '攻击间隔(秒)': '攻击按键节奏,两种模式都按它轻点(检测模式同时用作完整检测拍「锚点OCR+YOLO」的节流)。2026-08-07 从长按连挥改回轻点:长按期间游戏收不到新的按下边沿,被怪击退打断施法后不会重新起手',
             '角色名': '检测模式用它 OCR 定位角色(名字牌)。留空则攻击区锚在画面中心',
             '攻击区宽(像素)': '2560x1440 下标定。用 scripts/calibrate_attack_zone.py 看图调',
             '名字牌到身体偏移(像素)': '名字牌在角色脚下,该值是牌子中心到身体中心的距离',
@@ -108,6 +118,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '寻怪外推速度(像素/秒)': '寻怪中名字牌被怪遮挡、OCR 连续失败时,攻击区按此速度跟随走动中的角色(水平外推),怪进区即可接战;名字牌一露头快通道立刻重新咬住。无实测速度时用此值,实测行走速度约 250',
             '玩家宽(像素)': '仅用于调试可视化画框(勾选 GUI「启用标记框」时显示),不影响攻击判定',
             '玩家高(像素)': '同「玩家宽(像素)」,仅调试画框用',
+            '模板分片匹配开关': '名字牌模板快通道:OCR 完整命中时自动把名字牌裁成白字二值化模板(存 screenshots/nametag_templates/),之后每帧先用模板竖切分片匹配定位角色——怪/宠的名字牌盖住一半也照样命中,且不跑 OCR;匹配失败自动落回 OCR。怪堆里"一直寻怪不攻击"(名字牌被盖 → OCR 失败 → 锚点冻结)的主要解法',
+            '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
+            '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
+            '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
+            '转向冷却(秒)': '两次转向之间的最小间隔。攻击区里常常只有一只怪,而它反复在身体左右两侧之间换,不加冷却角色就原地左右扭(实测转向 17 次里 12 次是反向)。要大于一次施法时间才压得住;设太大则怪真绕到背后时反应慢。设 0 = 关掉',
+            '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、朝向变化、转向、寻怪方向、按键能否送出)。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
         self._reset_state()
 
@@ -136,6 +152,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_detect_error_log = 0.0
         self._last_walk = 0.0
         self._last_mob_present = None
+        self._last_mob_seen = None    # 上次攻击区内真检测到怪的时刻;None=从未见过(去抖用)
+        self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
+        self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
         self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
         self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
         self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
@@ -143,6 +162,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._attack_held = False     # 攻击键是否长按中(检测模式,区内有怪时按住连续挥砍)
         self._sitting = False         # 本轮闲置是否已按过椅子键(再按一次会起身,只能按一次)
         self._last_busy = 0.0         # 最近一次"忙"(攻击/寻怪/走位)时刻,坐椅延迟按它算
+        self._nametag_template = None  # 白字二值化名字牌模板(模板分片匹配快通道用),None=尚未捕获
         self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
 
     def enable(self):
@@ -156,6 +176,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             potions.prewarm()
         if self.config.get('攻击模式') == '检测' and (self.config.get('角色名') or '').strip():
             ocr_engine.prewarm()
+            name = self.config.get('角色名').strip()
+            # 加载上次存的名字牌模板:模板分片匹配通道开箱即用,不用等第一次完整命中
+            self._nametag_template = anchor.load_template(
+                os.path.join(NAMETAG_TEMPLATE_DIR, f'{name}.png'))
 
     def _log_detect_error(self, now, context, exc):
         """检测环节(OCR/YOLO)异常限频记录,防 10Hz 主循环下刷爆日志。
@@ -199,16 +223,39 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             vx = speed if self._seek_dir == 'right' else -speed
         return max(0.0, min(CALIBRATED_SIZE[0], self._anchor[0] + vx * age))
 
-    def _resolve_anchor(self, frame, now, cfg):
-        """按四级阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
+    def _capture_nametag_template(self, frame, hit):
+        """OCR 完整命中 → 裁名字牌区域做白字二值化模板,供模板分片匹配快通道用。
 
-        快通道(上次锚点附近小窗,寻怪中超龄时小窗跟外推位置) → 慢通道(中央区分块,节流)
-        → 沿用上次(寻怪中超龄则按外推位置回) → 回退(屏幕中心 x + 最后已知层高 y)。
-        怪堆里名字牌被遮挡 OCR 连续失败时,攻击区不再冻在旧位置——角色边走路边外推,
-        怪进区就能接战(2026-08-06 实测"身边很多怪时一直寻怪不攻击"根因,spec §4.2)。
-        OCR 调用可能抛异常(模型/引擎故障等),任一通道抛出都当作"这一级没拿到锚点"处理,
-        绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的通用 except 抓住并
-        直接 disable() 整个任务,连保命/喝药都会停,违反"无怪只停手,任务继续跑"的契约。
+        部分匹配('ng咕咕')是名字牌被挡的产物,裁出来是残缺牌子,不配当模板;
+        裁出来没有白字(黑帧/OCR 误报)→ 不存。模板变了才落盘
+        (screenshots/nametag_templates/{角色名}.png),下次启动直接加载。"""
+        tmpl = anchor.capture_template(frame, hit, half_h=NAMETAG_TEMPLATE_HALF_H,
+                                       pad=NAMETAG_TEMPLATE_PAD)
+        if tmpl is None or (self._nametag_template is not None
+                            and np.array_equal(tmpl, self._nametag_template)):
+            return
+        self._nametag_template = tmpl
+        try:
+            os.makedirs(NAMETAG_TEMPLATE_DIR, exist_ok=True)
+            name = (self.config.get('角色名') or '').strip()
+            anchor.save_template(tmpl, os.path.join(NAMETAG_TEMPLATE_DIR, f'{name}.png'))
+        except Exception as e:
+            self.log_error(f'名字牌模板落盘失败(不影响本次运行,下次完整命中会再存): {e!r}')
+
+    def _resolve_anchor(self, frame, now, cfg):
+        """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
+
+        模板分片快通道(白字二值化模板竖切分片匹配,零 OCR 开销;怪的名字牌盖住一半
+        也照样命中——怪堆里"一直寻怪不攻击"的主解) → OCR 快通道(上次锚点附近小窗,
+        寻怪中超龄时小窗跟外推位置) → 慢通道(中央区分块,节流) → 沿用上次(寻怪中
+        超龄则按外推位置回) → 回退(屏幕中心 x + 最后已知层高 y)。
+        名字牌被遮挡 OCR 连续失败时,攻击区不再冻在旧位置——有模板一帧咬住真实位置,
+        没模板则边走路边外推,怪进区就能接战(2026-08-06 实测"身边很多怪时一直寻怪
+        不攻击"根因,spec §4.2)。
+        OCR/模板调用可能抛异常(模型/引擎故障等),任一通道抛出都当作"这一级没拿到
+        锚点"处理,绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的
+        通用 except 抓住并直接 disable() 整个任务,连保命/喝药都会停,违反
+        "无怪只停手,任务继续跑"的契约。
         """
         h, w = frame.shape[:2]
         centre = anchor.Anchor(w / 2.0, h / 2.0, 0)
@@ -218,14 +265,29 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         if self._anchor is not None:
             search_x = self._extrapolated_anchor_x(now, cfg)
+            center = (search_x, self._anchor[1])
+            # 模板分片快通道:每次 OCR 完整命中都会自动更新模板(见 _capture_nametag_template),
+            # 名字牌一被怪盖住左半,右半片照样命中,OCR 反而读不出东西——这条通道正是为
+            # 这个时刻准备的。模板在窗外/超阈值/没模板 → 落回 OCR 快通道,阶梯照走。
+            if self._nametag_template is not None and cfg['模板分片匹配开关']:
+                try:
+                    hit = anchor.split_match(frame, self._nametag_template, center,
+                                             FAST_HALF_W, FAST_HALF_H, cfg['模板匹配阈值'])
+                except Exception as e:
+                    hit = None
+                    self._log_detect_error(now, '模板分片匹配', e)
+                if hit is not None:
+                    self._update_anchor(hit, now)
+                    return hit, 'template'
             try:
-                hit = anchor.find_in_window(frame, name, (search_x, self._anchor[1]),
-                                            FAST_HALF_W, FAST_HALF_H)
+                hit = anchor.find_in_window(frame, name, center, FAST_HALF_W, FAST_HALF_H)
             except Exception as e:
                 hit = None
                 self._log_detect_error(now, '快通道锚点 OCR', e)
             if hit is not None:
                 self._update_anchor(hit, now)
+                if (hit.text or '').strip() == name:  # 完整命中才裁模板
+                    self._capture_nametag_template(frame, hit)
                 return hit, 'window'
 
         if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
@@ -239,6 +301,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._log_detect_error(now, '慢通道锚点 OCR', e)
             if hit is not None:
                 self._update_anchor(hit, now)
+                if (hit.text or '').strip() == name:
+                    self._capture_nametag_template(frame, hit)
                 return hit, 'region'
 
         if not farm_logic.anchor_expired(now, self._anchor_time, cfg['锚点保鲜(秒)']):
@@ -252,6 +316,21 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 名字牌 y 同平台极稳定(实测 887-888,差 1-2px),回退保留 y 才能罩住脚下这层怪;
         # 纯屏幕中心 y=720 比实测层高 ~165px,怪全在攻击区外(2026-08-06 实测"怪堆里坐下")
         return anchor.Anchor(w / 2.0, self._anchor[1] if self._anchor is not None else h / 2.0, 0), 'fallback'
+
+    def _key_sendable(self):
+        """按键此刻能否真送进游戏(窗口在前台)。
+
+        pydirect 在窗口失焦时只 log 一条 ERROR 就 return
+        (ok/device/interaction_methods/pydirect.py:34),而 BaseTask.send_key 照样
+        返回 True——任务层看不出失败。朝向是纯"盲写"状态:按键丢了却仍把 _facing
+        推进,之后 attack_turn_direction 认为朝向已对不再补转,角色会背对着怪一直
+        按攻击键,且不会自愈(日志实测有 can't click on left/right 记录)。
+        拿不到 executor/interaction(裸构造、离线测试)时按"能发"处理,不改变原行为。
+        """
+        try:
+            return self.executor.interaction.clickable()
+        except Exception:
+            return True
 
     @staticmethod
     def _slot_of(key_name):
@@ -329,8 +408,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def _detect_and_act(self, frame, now, cfg, keys):
         """一个检测拍:锚点 → 找怪 → 区内有怪则转向接战,否则确定寻怪方向。
 
-        完整检测拍与寻怪快速刷新拍共用。攻击键本身不在这里按——由 _do_attack_hold
-        按"_last_mob_present"长按接管(每拍都重按保持,游戏按动画速度连续挥砍)。"""
+        完整检测拍与寻怪快速刷新拍共用。攻击键本身不在这里按——由 _do_attack
+        按"_last_mob_present"以 攻击间隔 轻点。"""
         anchor_hit, source = self._resolve_anchor(frame, now, cfg)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
         zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
@@ -340,23 +419,41 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             mobs = []
             self._log_detect_error(now, 'YOLO 找怪', e)
         centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
-        mob_present = farm_logic.mob_in_zone(centres, zone)
+        # 屏幕上有没有怪(不限攻击区):经验停滞守卫据此判断"是真没收益"还是"本来就没得打"
+        self._last_any_mob = len(mobs) > 0
+        # 去抖:漏检一拍不退出攻击态(见 farm_logic.mob_present_debounced)。
+        # 必须在 mob_present 这一层去抖而不是只包住攻击键——它同时门控寻怪与坐椅,
+        # 只抖攻击键会出现"一边追一边挥"的错乱状态
+        raw_present = farm_logic.mob_in_zone(centres, zone)
+        if raw_present:
+            self._last_mob_seen = now
+        mob_present = farm_logic.mob_present_debounced(
+            raw_present, now, self._last_mob_seen, cfg['丢怪保持(秒)'])
         self._last_mob_present = mob_present
         if self._boxes_enabled():
             self._draw_debug(cfg, body=body, zone=zone, mobs=mobs, mob_present=mob_present)
         else:
             self._clear_debug()
+        facing_before, turn = self._facing, None
         if mob_present:
             self._seek_dir = None  # 怪进攻击区了,停追,原地攻击
-            # 面向怪再攻击:怪在面朝反侧(或朝向未知)时先轻点方向键转向。
-            # 战士只能打面朝方向,朝向错攻击必然打空;转向后 _facing 随怪侧更新,
-            # 之后的走位与攻击都按此朝向保持(方案 2,spec §4.4 HUNTING 前置)。
-            # 攻击键本身由 _do_attack_hold 长按接管,不在这里轻点
-            turn = farm_logic.turn_direction(self._facing, body[0],
-                                             farm_logic.nearest_mob_x(centres, zone, body[0]))
-            if turn is not None:
+            # 先松开寻怪长按的方向键:长按没松的话,下面的转向轻点会被"还在走"吞掉,
+            # 攻击长按时面朝还对着反方向 → 打空(_release_seek_key 自带 None 守卫)
+            self._release_seek_key()
+            # 面向怪再攻击:面朝侧攻击区内已经没怪了才转向(目标侧锁定,
+            # 见 farm_logic.attack_turn_direction)。旧版每拍重选最近怪再判边,
+            # 区内左右都有怪时最近的那只一换边就转一次,实测换边率 38%,
+            # 角色光转向打不出输出——这是"左右转向不攻击"的主因。
+            # 转向键送不出去(窗口失焦)时整块跳过:_facing 不许盲写推进,
+            # 否则之后认为朝向已对不再补转,角色背对怪一直挥空且无法自愈。
+            # 攻击键本身由 _do_attack 按 攻击间隔 轻点,不在这里按
+            turn = farm_logic.attack_turn_direction(self._facing, body[0], centres, zone)
+            if (turn is not None
+                    and farm_logic.turn_allowed(now, self._last_turn, cfg['转向冷却(秒)'])
+                    and self._key_sendable()):
                 key = '左移键' if turn == 'left' else '右移键'
                 self.send_key(keys[key], down_time=TURN_TAP_SECONDS)
+                self._last_turn = now
                 self._facing = 'LEFT' if turn == 'left' else 'RIGHT'
                 # 转向本身就是"活动":走位倒计时从头算,不紧跟着又走位
                 # (刚转完向立刻两段走位会显得很怪;且正在打怪就不是挂机闲逛)
@@ -364,16 +461,38 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         else:
             # 自动寻怪:区内没怪 → 在同层(脚底高度容差内)找最近的怪,记下要朝它走的方向。
             # 只追同层:跨平台的怪走不过去,追了只会撞墙/掉台子。
+            prev_seek = self._seek_dir   # 方向锁定要用上一拍的方向,先存下来再清
             self._seek_dir = None
             if cfg['寻怪开关']:
                 entries = [(m.x + m.width / 2, m.y + m.height) for m in mobs]
                 self._seek_dir = farm_logic.seek_direction(entries, body[0], anchor_hit.y,
-                                                           cfg['寻怪同层容差(像素)'])
+                                                           cfg['寻怪同层容差(像素)'], prev_seek)
                 if self._seek_dir is not None:
                     # 寻怪本身就在移动=活动中,防挂机走位倒计时顺延;
                     # 刷新节流也从这一拍起算,避免启动后第一拍立即重复刷新
                     self._last_walk = now
                     self._last_seek_refresh = now
+        if cfg.get('决策日志开关'):
+            self._log_decision(source, anchor_hit, body, zone, centres,
+                               raw_present, mob_present, facing_before, turn)
+
+    def _log_decision(self, source, anchor_hit, body, zone, centres,
+                      raw_present, mob_present, facing_before, turn):
+        """逐拍决策留痕(默认关,见配置 决策日志开关)。
+
+        排"左右转向不攻击"时必须知道:锚点是哪条通道给的(fallback/cached 说明角色
+        位置本身不可信)、区内怪的左右分布(两侧都有才可能来回换目标)、朝向有没有变、
+        按键能不能送出去。少任何一项都只能靠猜。字段一行写完,方便 grep 「决策」后
+        直接看序列。"""
+        in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
+        left = sum(1 for x in in_zone if x < body[0])
+        self.log_debug(
+            f'决策 src={source} body_x={body[0]:.0f} anchor_y={anchor_hit.y:.0f} '
+            f'怪={len(centres)} 区内={len(in_zone)}(左{left}/右{len(in_zone) - left}) '
+            f'实测有怪={raw_present} 有怪={mob_present} '
+            f'朝向={facing_before or "-"}→{self._facing or "-"} '
+            f'转向={turn or "-"} 寻怪={self._seek_dir or "-"} '
+            f'可发键={self._key_sendable()}')
 
     def _do_walk(self, keys):
         """防挂机走位:两段方向由朝向决定(先反方向出、朝原方向回),结束时朝向不翻转
@@ -421,16 +540,23 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_busy = now
         self._sitting = False
 
-    def _do_attack_hold(self, cfg, keys):
-        """攻击:检测模式且最近一次检测区内有怪 → 长按攻击键,游戏按动画速度
-        连续挥砍,不再等 攻击间隔 的拍点(每次打完不再"愣一下";接战刷新拍也
-        立即接管,不留节流空档)。每拍重按补发漏键。无怪/切到定频 → 松开。
-        定频模式不在这里管,仍按 攻击间隔 定时轻点。"""
-        if cfg['攻击模式'] == '检测' and self._last_mob_present:
-            self.send_key_down(keys['攻击键'])
-            self._attack_held = True
-        elif self._attack_held:
-            self._release_attack_key()
+    def _do_attack(self, cfg, keys, now):
+        """攻击:检测模式且最近一次检测区内有怪 → 按 攻击间隔 轻点攻击键。
+
+        2026-08-07 从长按改回轻点(df9b020 曾改成"长按连挥",这里退回)。长按只是
+        每拍重复 keyDown,游戏侧收不到新的"按下"边沿——角色被怪击退打断施法后
+        不会重新起手。实测(02:07-02:12 逐拍日志)最长一次按住 27 秒中间没松过键,
+        期间区内一直有怪却打不出输出;且挥砍中 body_x 跳变 >80px 的拍占 19%
+        (其余状态仅 5%),说明挥砍时被击退非常频繁。轻点每次都有新的按下边沿,
+        被击退后下一拍就能重新起手。
+        定频模式不在这里管,由 run() 按 攻击间隔 定时轻点。
+        """
+        if cfg['攻击模式'] != '检测':
+            return
+        if self._last_mob_present and farm_logic.should_attack(
+                now, self._last_attack, cfg['攻击间隔(秒)']):
+            self.send_key(keys['攻击键'])
+            self._last_attack = now
 
     def _do_seek_move(self, cfg, keys):
         """寻怪移动:长按方向键向怪连续走(每拍重按一次、从不松开,直到
@@ -443,7 +569,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self.send_key_up(keys[self._seek_key])  # 换向:先松旧键
             self.send_key_down(keys[key])
             self._seek_key = key
-            self._facing = 'LEFT' if self._seek_dir == 'left' else 'RIGHT'
+            # 方向键没真送进游戏时不推进朝向信念(同 _key_sendable 的说明):
+            # 每拍都会重按,下一拍窗口回到前台自然补上
+            if self._key_sendable():
+                self._facing = 'LEFT' if self._seek_dir == 'left' else 'RIGHT'
         elif self._seek_key is not None:
             self._release_seek_key()
 
@@ -598,7 +727,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._detect_and_act(frame, now, cfg, keys)
             # 攻击/寻怪移动:区内有怪 → 长按攻击键连续挥砍;寻怪 → 长按方向键。
             # 各自在条件不成立时松键(无怪/接战/无同层怪/开关关/切模式)
-            self._do_attack_hold(cfg, keys)
+            self._do_attack(cfg, keys, now)
             self._do_seek_move(cfg, keys)
             # 在打/在追 = 忙:坐椅延迟从头算;长按的攻击/方向键已带角色起身,清坐椅标记
             if self._last_mob_present or self._seek_dir is not None:
@@ -645,6 +774,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 升级后 EXP 条归零:exp 大幅下降同样视为"有收益",复位计时器,否则旧高位卡死计时器必然误停
         if self._last_exp is None or exp > self._last_exp + 0.001 or exp < self._last_exp - 0.05:
             self._last_exp = exp
+            self._last_exp_gain_time = now
+        elif self._last_any_mob is False:
+            # 屏幕上一只怪都没有:空图/刷新间隙没收益是正常的,停滞计时暂停,
+            # 免得把"没得打"误判成"无效挂机"。定频模式不跑找怪(_last_any_mob 恒为
+            # None),保持旧行为照常计时。
+            # 注意 2026-08-07 03:45 那次真实停机不属于此列:8 分钟 698 拍里怪=0 的
+            # 拍数是 0(最少一拍也有 5 只、多数 9-11 只),满地是怪却零收益,正是该抓的
             self._last_exp_gain_time = now
         elif now - self._last_exp_gain_time > cfg['经验停滞上限(分钟)'] * 60:
             self.stop_farming('经验长时间不涨(无效挂机)')
