@@ -45,7 +45,7 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         super().__init__(*args, **kwargs)
         self.name = "战士调试"
         self.description = "只读可视化:玩家/攻击范围/怪物 bbox,怪进范围攻击框变色"
-        self.icon = FluentIcon.EYE
+        self.icon = FluentIcon.VIEW
         self.trigger_interval = 0.1  # 10Hz 轮询,节流在 run 内做
         self.default_config.update(DEFAULT_CONFIG)
         self._reset_state()

@@ -61,6 +61,34 @@ def mob_in_zone(mob_centers, zone):
     return any(point_in_zone(c, zone) for c in mob_centers)
 
 
+def mob_present_debounced(raw_present, now, last_seen, grace):
+    """区内有怪的去抖:真检测到 → True;检测不到但距上次见到还在 grace 内 → 仍按有怪。
+
+    2026-08-07 逐拍日志(363 拍)实测:区内怪数为 0 的拍占 76%,进入"可攻击"状态
+    28 次却中位只维持 1.07 秒、14 段不到 1 秒,攻击键被反复松开重按 31 次。
+    法师一次施法约 1 秒,技能基本放不出来就被打断——这是"不攻击"的直接成因。
+    YOLO 单帧 recall 0.886,且角色自己的攻击特效会遮挡目标(mob-3-3 训练时的已知
+    难例),一拍漏检就退出攻击态是过度敏感。
+
+    grace=0 → 退回旧的"一拍空立刻退出"行为。last_seen=None 表示从没见过怪。
+    """
+    if raw_present:
+        return True
+    if last_seen is None:
+        return False
+    return now - last_seen <= grace
+
+
+def turn_allowed(now, last_turn_time, cooldown):
+    """距上次转向是否够久。
+
+    同一份日志实测:转向 17 次里 12 次是反向翻转(71%),序列 LLLLRLRLRLRLRLLRL,
+    相邻反向间隔约 1.4-1.5 秒,比一次施法还短——角色在原地左右扭而打不出输出。
+    冷却要长于一次施法才能打断这种交替。哨兵 0.0(从未转向)天然放行。
+    """
+    return now - last_turn_time >= cooldown
+
+
 def anchor_expired(now, anchor_time, ttl):
     """锚点是否过期。从没拿到过锚点(None)同样算过期。"""
     return anchor_time is None or now - anchor_time > ttl
@@ -190,10 +218,47 @@ def nearest_mob_x(centres, zone, body_x):
 
 def turn_direction(facing, body_x, mob_x):
     """打怪前需要的转向:怪在面朝反侧(或朝向未知)时,返回要按的方向键
-    'left'/'right';已经面朝怪所在侧 → 返回 None。mob_x 为最近怪的中心 x。"""
+    'left'/'right';已经面朝怪所在侧 → 返回 None。mob_x 为最近怪的中心 x。
+
+    注意:站桩打怪请用 attack_turn_direction,它带目标侧锁定。本函数按单个
+    目标判边,每拍换目标就会换边(见 attack_turn_direction 的实测数据)。
+    """
     side = 'left' if mob_x < body_x else 'right'
     need = 'LEFT' if side == 'left' else 'RIGHT'
     return side if facing != need else None
+
+
+def _on_side(x, body_x, side):
+    """怪是否算在指定侧。正压在身上(x == body_x)时两侧都算:
+    这种怪的左右判定纯是噪声,不该让角色翻来翻去。"""
+    if x == body_x:
+        return True
+    return x < body_x if side == 'left' else x > body_x
+
+
+def attack_turn_direction(facing, body_x, centres, zone):
+    """站桩打怪时该往哪边转:面朝侧攻击区内还有怪 → None(不转,继续打)。
+
+    取代"每拍 nearest_mob_x 重选最近怪再 turn_direction 判边"的旧规则。
+    旧规则下区内左右都有怪时,最近的那只一换边就转向一次:219 帧真实录制帧
+    重放实测,相邻采样的最近怪换边率 38%,角色把时间花在左右转向上打不出输出。
+    且换边率与攻击区宽无关(1200→800 实测 39%→38%),缩小攻击区治不了——
+    翻转来自选目标的规则本身。
+
+    锁定规则:面朝侧还有目标就不动,只有那一侧真空了才换边。
+    朝向未知(首次接战)仍按最近怪定向。
+    """
+    in_zone = [x for x, y in centres if point_in_zone((x, y), zone)]
+    if not in_zone:
+        return None
+    if facing in ('LEFT', 'RIGHT'):
+        keep = 'left' if facing == 'LEFT' else 'right'
+        if any(_on_side(x, body_x, keep) for x in in_zone):
+            return None
+        other = 'right' if keep == 'left' else 'left'
+        return other if any(_on_side(x, body_x, other) for x in in_zone) else None
+    nearest = min(in_zone, key=lambda x: abs(x - body_x))
+    return 'left' if nearest < body_x else 'right'
 
 
 def same_floor(mob_feet_y, player_feet_y, tolerance):
@@ -202,13 +267,22 @@ def same_floor(mob_feet_y, player_feet_y, tolerance):
     return abs(mob_feet_y - player_feet_y) <= tolerance
 
 
-def seek_direction(mob_entries, body_x, player_feet_y, tolerance):
+def seek_direction(mob_entries, body_x, player_feet_y, tolerance, current_dir=None):
     """自动寻怪要按的方向:同层怪中离身体水平距离最近的一个,
     在左 → 'left',在右 → 'right';没有同层怪 → None。
     mob_entries: [(中心x, 脚底y), ...] 全部怪。调用方保证当前攻击区内无怪
-    (区内的早已被攻击分支原地处理,本函数只服务"区外寻怪")。"""
+    (区内的早已被攻击分支原地处理,本函数只服务"区外寻怪")。
+
+    current_dir = 上一拍的寻怪方向时带方向锁定:那一侧还有同层怪就继续追,
+    不因为对侧刷出更近的怪而掉头。寻怪刷新间隔可低至 0.1s,没有锁定时
+    追怪途中会被对侧目标反复拽回来,原地左右横跳且全程不攻击
+    (219 帧重放实测该分支方向翻转 8/28)。None = 未在寻怪,按最近怪定向。
+    """
     same_floor_xs = [cx for cx, fy in mob_entries if same_floor(fy, player_feet_y, tolerance)]
     if not same_floor_xs:
         return None
+    if current_dir in ('left', 'right') and any(
+            _on_side(cx, body_x, current_dir) for cx in same_floor_xs):
+        return current_dir
     nearest = min(same_floor_xs, key=lambda cx: abs(cx - body_x))
     return 'left' if nearest < body_x else 'right'
