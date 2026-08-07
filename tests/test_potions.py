@@ -24,15 +24,21 @@ class TestParseCount(unittest.TestCase):
 
 class TestSlotRoi(unittest.TestCase):
 
-    def test_insert_right_of_shift(self):
+    def _frame(self):
         frame = cv2.imread(FRAME)
+        if frame is None:
+            raise unittest.SkipTest(f'存档帧缺失: {FRAME}')
+        return frame
+
+    def test_insert_right_of_shift(self):
+        frame = self._frame()
         xs, ys, ws, hs = potions.slot_roi(frame, 'shift')
         xi, yi, wi, hi = potions.slot_roi(frame, 'insert')
         self.assertGreater(xi, xs)
         self.assertEqual(yi, ys)
 
     def test_ctrl_below_shift(self):
-        frame = cv2.imread(FRAME)
+        frame = self._frame()
         xs, ys, _, _ = potions.slot_roi(frame, 'shift')
         xc, yc, _, _ = potions.slot_roi(frame, 'ctrl')
         self.assertEqual(xc, xs)
@@ -40,7 +46,7 @@ class TestSlotRoi(unittest.TestCase):
 
     def test_unknown_slot_returns_none(self):
         """用户把药水配到非快捷栏键(如 f1)时不许崩,返回 None(=未知,不判耗尽)。"""
-        frame = cv2.imread(FRAME)
+        frame = self._frame()
         self.assertIsNone(potions.slot_roi(frame, 'f1'))
         self.assertIsNone(potions.read_slot_count(frame, 'f1'))
 

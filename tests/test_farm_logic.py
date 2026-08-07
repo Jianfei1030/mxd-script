@@ -374,5 +374,62 @@ class TestTurnCooldown(unittest.TestCase):
         self.assertTrue(fl.turn_allowed(100.0, 100.0, 0))
 
 
+class TestKnockbackDetected(unittest.TestCase):
+    """受击检测:HP 下降超阈值,或锚点 x 突变且方向远离最近怪。
+
+    2026-08-07 实测结论:冒险岛被怪碰到会往远离怪物的方向击退并翻转朝向来面对
+    怪物——朝向信念(_facing)是盲写的,击退是唯一破坏源,必须用受击事件把它
+    置为未知,下一检测拍按最近怪定向重建。
+    """
+
+    def test_hp_drop_over_threshold(self):
+        self.assertTrue(fl.knockback_detected(0.50, 0.70))
+
+    def test_hp_drop_exactly_at_threshold_not_counted(self):
+        # 严格"超阈值"才判受击:恰好掉 2% 不触发(浮点下精确相等罕见,语义保守)
+        self.assertFalse(fl.knockback_detected(0.68, 0.70))
+
+    def test_hp_drop_just_over_threshold_counts(self):
+        # 略超 2%(血条 1 列 ≈0.5%,2% 已是 4 列,不是噪声)→ 受击
+        self.assertTrue(fl.knockback_detected(0.679, 0.70))
+
+    def test_small_hp_drop_ignored(self):
+        self.assertFalse(fl.knockback_detected(0.69, 0.70))
+
+    def test_no_prev_hp_ignored(self):
+        # 第一拍/重新启用:prev_hp=None,不能把初始值当掉血
+        self.assertFalse(fl.knockback_detected(0.50, None))
+
+    def test_hp_rise_ignored(self):
+        # 喝药/自然回血:HP 上升不算受击
+        self.assertFalse(fl.knockback_detected(0.80, 0.70))
+
+    def test_hp_equal_ignored(self):
+        self.assertFalse(fl.knockback_detected(0.70, 0.70))
+
+    def test_x_jump_away_from_mob_detects(self):
+        # 怪在左(800),人被推右(1200→1270)→ 击退
+        self.assertTrue(fl.knockback_detected(0.70, 0.70,
+                                              prev_x=1200, new_x=1270, mob_xs=[800]))
+
+    def test_x_jump_toward_mob_is_walk_not_knockback(self):
+        # 怪在右(1600),人朝怪走(1200→1270)→ 主动寻怪,不是受击
+        self.assertFalse(fl.knockback_detected(0.70, 0.70,
+                                               prev_x=1200, new_x=1270, mob_xs=[1600]))
+
+    def test_small_x_jump_ignored(self):
+        self.assertFalse(fl.knockback_detected(0.70, 0.70,
+                                               prev_x=1200, new_x=1230, mob_xs=[800]))
+
+    def test_x_jump_without_mob_ignored(self):
+        # 无怪可判方向:位移可能是任何原因(换地图/相机),不算受击
+        self.assertFalse(fl.knockback_detected(0.70, 0.70,
+                                               prev_x=1200, new_x=1270, mob_xs=[]))
+
+    def test_x_jump_without_anchor_ignored(self):
+        self.assertFalse(fl.knockback_detected(0.70, 0.70,
+                                               prev_x=None, new_x=1270, mob_xs=[800]))
+
+
 if __name__ == '__main__':
     unittest.main()

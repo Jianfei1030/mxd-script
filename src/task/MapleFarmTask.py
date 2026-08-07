@@ -138,6 +138,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._dead_frames = 0
         self._bad_size_frames = 0
         self._last_potion_check = 0.0
+        self._prev_hp = None          # 上一拍 HP(受击检测用);None=第一拍
         self._last_sig = None
         self._last_change_time = 0.0
         self._last_exp = None
@@ -666,6 +667,17 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self.log_warning(f'HP {hp:.0%} 触保命血线,未配置回城卷', notify=True)
             self.stop_farming('低血保命')
             return
+
+        # 1.5 受击检测(检测模式):HP 下降或锚点突变 → 被怪打 → 朝向信念失效。
+        # 置 None + 重置转向冷却,下一检测拍 attack_turn_direction(None,...) 按最近怪
+        # 定向补转向(farm_logic.py 未知朝向 fallback:朝最近怪定向)。0.0 哨兵天然放行
+        # 冷却(turn_allowed:now-0 >= cooldown 恒真)——冷却是压"原地左右扭"的,
+        # 不该压真正的击退纠正。对"击退翻不翻朝向"两种机制同时正确:
+        # 翻了你补 tap 是纠错;没翻,朝怪 tap 50ms 是 no-op(已面朝该侧按方向键零代价)。
+        if cfg['攻击模式'] == '检测' and farm_logic.knockback_detected(hp, self._prev_hp):
+            self._facing = None
+            self._last_turn = 0.0
+        self._prev_hp = hp
 
         # 2-3.5. 喝血/喝蓝/药水耗尽保护。喝药开关关闭时整段跳过:
         # 不按血/蓝药键、不 OCR 快捷栏,「连续喝药无效」检测也不跑。

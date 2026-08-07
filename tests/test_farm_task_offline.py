@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
+import os
 
 import cv2
 import numpy as np
@@ -78,7 +79,14 @@ def _frame_with_nametag(x, y, tmpl, occlude_left=False):
 
 def run_with_frame(task, hp=None, mp=None, exp=None, now=100.0):
     """以存档帧驱动一次 run();hp/mp/exp 不为 None 时替换对应读数。
-    now 可推进模拟时间(默认 100.0,与旧调用兼容)。"""
+    now 可推进模拟时间(默认 100.0,与旧调用兼容)。
+
+    帧缺失(存档截图未入库,合成黑帧)时,未显式指定的 hp/mp 兜底为满血:
+    黑帧读数 0.0 会误触发死亡判定提前 return,截断"攻击/转向/寻怪/走位"
+    等行为测试(测试标准:环境缺失兜底,不允许假失败)。有真实帧时用真实读数。"""
+    if not os.path.exists(FRAME):
+        hp = 1.0 if hp is None else hp
+        mp = 1.0 if mp is None else mp
     frame_p = patch.object(MapleFarmTask, 'frame',
                            new=property(lambda self: _load_frame()))
     patches = [frame_p, patch('time.time', return_value=now)]
@@ -1825,6 +1833,61 @@ class TestFacingWriteGuard(unittest.TestCase):
         task = make_task(**{'攻击模式': '检测'})
         task._facing = 'LEFT'
         self._run_with_mob_on_right(task)
+        self.assertEqual(task._facing, 'RIGHT')
+
+
+class TestKnockbackReset(unittest.TestCase):
+    """受击(被怪打)后朝向信念失效处理。
+
+    2026-08-07 实测:冒险岛被怪碰到会往远离怪物的方向击退并翻转朝向来面对怪物。
+    _facing 是盲写信念,击退是唯一破坏源——受击后置 None + 重置转向冷却,
+    下一检测拍 attack_turn_direction(None,...) 按最近怪定向重建朝向。
+    对"击退翻不翻朝向"两种机制同时正确:翻了你补 tap 是纠错;没翻,朝怪 tap
+    50ms 是 no-op(已面朝该侧按方向键零代价)。
+    """
+
+    def test_hp_drop_resets_facing_and_turn_cooldown(self):
+        """掉血超阈值 → 朝向置 None + 转向冷却重置(0.0 哨兵天然放行)。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'LEFT'
+        task._last_turn = 99.9  # 0.1s 前刚转过向,1.5s 冷却未过
+        run_with_frame(task, hp=0.5)   # 第一拍:只记基线,不触发
+        self.assertEqual(task._prev_hp, 0.5)
+        self.assertEqual(task._facing, 'LEFT')  # 没受击,朝向不动
+        run_with_frame(task, hp=0.3)   # 掉血 20% → 受击
+        self.assertIsNone(task._facing)          # 朝向失效
+        self.assertEqual(task._last_turn, 0.0)   # 冷却重置,下拍可立即补转向
+
+    def test_small_hp_drop_keeps_facing(self):
+        """微小掉血(≤2%,读数噪声)→ 不算受击,朝向不动。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        run_with_frame(task, hp=0.5)
+        run_with_frame(task, hp=0.49)
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_hp_rise_keeps_facing(self):
+        """回血(喝药/自然恢复)→ 不算受击。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'RIGHT'
+        run_with_frame(task, hp=0.3)
+        run_with_frame(task, hp=0.6)
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_facing_unknown_next_detect_turns_to_nearest_mob(self):
+        """受击后朝向未知 → 下一检测拍按最近怪定向补转向(闭环自愈)。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._facing = 'LEFT'
+        run_with_frame(task, hp=0.5)   # 基线
+        task._facing = None            # 模拟受击置未知(上例已验证触发路径)
+        task._last_turn = 0.0
+        task._last_detect = 0.0        # 放行检测拍
+        task.find_mobs = MagicMock(
+            return_value=[MagicMock(x=1500, y=700, width=60, height=50)])
+        run_with_frame(task, hp=0.5)
+        # fallback 锚点 → 身体 (1280, 630);怪中心 (1530, 725) 在区内右侧
+        self.assertIn(call('right', down_time=TURN_TAP_SECONDS),
+                      task.send_key.call_args_list)
         self.assertEqual(task._facing, 'RIGHT')
 
 
