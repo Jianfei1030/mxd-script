@@ -57,17 +57,18 @@ def draw_zone_png(frame, body_center, facing, attack_distance, out_path, zone_h=
 
 
 def write_config(config_path, values):
-    """把标定值写进现有配置文件(JSON 中的全局配置项)。"""
+    """把标定值写进现有配置文件(JSON 中的全局配置项)。
+
+    ok 框架的 Config(name) 读 configs/<name>.json,任务名为类名(WarriorDebugTask),
+    直接更新该 JSON 顶层键即可被 GUI 加载。
+    """
+    task_name = 'WarriorDebugTask'
     if not os.path.exists(config_path):
         with open(config_path, 'w', encoding='utf-8') as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
     with open(config_path, encoding='utf-8') as f:
         config = json.load(f)
-    # ok 框架配置结构:task_configs[任务名]['配置项']
-    task_name = '战士调试'
-    task_configs = config.setdefault('task_configs', {})
-    task_cfg = task_configs.setdefault(task_name, {})
-    task_cfg.update(values)
+    config.update(values)
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
     print(f'已写入 {config_path}: {values}')
@@ -77,8 +78,8 @@ def main():
     parser = argparse.ArgumentParser(description='攻击距离/玩家尺寸标定(Phase 1)')
     parser.add_argument('frame', help='游戏截图 PNG 路径(2560x1440,名字牌可见)')
     parser.add_argument('--name', default='', help='角色名(名字牌文本)')
-    parser.add_argument('--json', dest='config_path', default='configs/config.json',
-                        help='写配置的 JSON 路径(默认 configs/config.json)')
+    parser.add_argument('--json', dest='config_path', default='configs/WarriorDebugTask.json',
+                        help='写配置的 JSON 路径(默认 configs/WarriorDebugTask.json,与 GUI 加载一致)')
     parser.add_argument('--facing', choices=['LEFT', 'RIGHT'], default='RIGHT',
                         help='标定时的朝向(默认 RIGHT)')
     args = parser.parse_args()

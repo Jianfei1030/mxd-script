@@ -143,6 +143,14 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         painter.drawText(QRectF(10, 10, 800, 40), text)
 
     def _draw_debug(self, frame, cfg, facing, in_zone, mobs):
+        from ok import og
+        ok_config = getattr(og.app, 'ok_config', None)
+        if ok_config is not None and not ok_config.get('use_overlay', False):
+            # 关闭「启用标记框」时不绘制,并清掉上次残留,避免关闭后仍显示旧框
+            overlay = self.get_overlay_view()
+            if overlay is not None:
+                overlay.clear_draw('warrior_debug')
+            return
         overlay = self.get_overlay_view()
         if overlay is None:
             return

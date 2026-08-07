@@ -71,20 +71,44 @@ def copy_map_frames(map_name, frames, images_dst, labels_dst):
     print(f'Copied {frames} frames of {map_name} → {images_dst}')
 
 
+def copy_map_all(map_name, images_dst, labels_dst):
+    """复制地图全部帧（train 用）。"""
+    src_dir = os.path.join(RAW_DIR, map_name)
+    if not os.path.isdir(src_dir):
+        raise FileNotFoundError(f'Source map folder not found: {src_dir}')
+    frames = sorted(f for f in os.listdir(src_dir) if f.lower().endswith('.png'))
+    if not frames:
+        raise FileNotFoundError(f'No PNG frames in {src_dir}')
+
+    for fname in frames:
+        src_img = os.path.join(src_dir, fname)
+        dst_fname = f'{map_name}_{fname}'
+        shutil.copy2(src_img, os.path.join(images_dst, dst_fname))
+
+        src_txt = os.path.join(src_dir, fname.replace('.png', '.txt'))
+        dst_txt = os.path.join(labels_dst, dst_fname.replace('.png', '.txt'))
+        if os.path.exists(src_txt):
+            shutil.copy2(src_txt, dst_txt)
+        else:
+            open(dst_txt, 'w', encoding='utf-8').close()
+
+    print(f'Copied {len(frames)} frames of {map_name} → {images_dst}')
+
+
 def main():
     parser = argparse.ArgumentParser(description='Final split (全量 train/val)')
     parser.add_argument('--train', nargs='+', default=DEFAULT_TRAIN_MAPS,
-                        help='训练集地图名, 默认 %(default)s')
+                        help='训练集地图名(取全部帧), 默认 %(default)s')
     parser.add_argument('--val', nargs='+', default=DEFAULT_VAL_MAPS,
                         help='验证集地图名, 默认 %(default)s')
     parser.add_argument('--frames', type=int, default=DEFAULT_FRAMES,
-                        help='每地图取前 N 帧, 默认 %(default)s')
+                        help='每 val 地图取前 N 帧, 默认 %(default)s')
     args = parser.parse_args()
 
     ensure_dirs()
     clear_dirs()
     for m in args.train:
-        copy_map_frames(m, args.frames, IMAGES_TRAIN, LABELS_TRAIN)
+        copy_map_all(m, IMAGES_TRAIN, LABELS_TRAIN)
     for m in args.val:
         copy_map_frames(m, args.frames, IMAGES_VAL, LABELS_VAL)
     print('Final split complete.')

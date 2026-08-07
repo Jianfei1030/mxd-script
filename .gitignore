@@ -6,7 +6,15 @@ screenshots/
 dataset/raw/
 dataset/images/
 dataset/labels/
+dataset/preview/
 dataset/runs/
 runs/
 yolov8n.pt
 *.pt
+.venv-warrior/
+/dataset
+train_log.txt
+run_train.ps1
+docs/plans/
+*.onnx.bak_*
+assets/mob_model/mob.onnx
