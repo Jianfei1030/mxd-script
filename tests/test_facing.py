@@ -101,5 +101,39 @@ class TestFacingRoi(unittest.TestCase):
                          (None, 0.0, 0.0))
 
 
+class TestFacingCapture(unittest.TestCase):
+
+    def test_capture_shape(self):
+        frame = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        a = anchor.Anchor(1280.0, 880.0, 130)
+        tmpl = facing.capture(frame, a)
+        self.assertEqual(tmpl.shape, (facing.TEMPLATE_H, facing.TEMPLATE_W))
+
+    def test_capture_none_at_edge(self):
+        frame = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        self.assertIsNone(facing.capture(frame, anchor.Anchor(20.0, 880.0, 130)))
+
+    def test_capture_subbox_fits_in_roi(self):
+        """标定出来的偏移必须让 58x66 完整落在 180x140 里,否则裁出来会缺角。"""
+        self.assertLessEqual(facing.TEMPLATE_DX + facing.TEMPLATE_W, 2 * facing.ROI_HALF_W)
+        self.assertLessEqual(facing.TEMPLATE_DY + facing.TEMPLATE_H,
+                             facing.ROI_TOP_DY - facing.ROI_BOTTOM_DY)
+
+    def test_captured_template_matches_its_own_roi(self):
+        """自洽:从某帧采的模板,拿回同一帧匹配必须高分且明显胜过镜像。"""
+        frame = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        a = anchor.Anchor(1280.0, 880.0, 130)
+        x0, y0, _, _ = facing.roi_box(frame.shape, a)
+        # 在子框位置画不对称图案
+        px = x0 + facing.TEMPLATE_DX
+        py = y0 + facing.TEMPLATE_DY
+        frame[py + 10:py + 50, px + 5:px + 15] = 255
+        frame[py + 10:py + 20, px + 5:px + 45] = 255
+        tmpl = facing.capture(frame, a)
+        got, s, s_flip = facing.observe(frame, a, tmpl, 'RIGHT')
+        self.assertEqual(got, 'RIGHT')
+        self.assertGreater(s, 0.9)
+
+
 if __name__ == '__main__':
     unittest.main()

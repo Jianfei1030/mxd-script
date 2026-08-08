@@ -92,3 +92,26 @@ def observe(frame, anchor_obj, template, template_facing):
         return None, 0.0, 0.0
     s, s_flip = scores(roi, template)
     return decide(s, s_flip, template_facing), s, s_flip
+
+
+TEMPLATE_W = 58   # 头+肩模板宽(附录 A.1)
+TEMPLATE_H = 66   # 头+肩模板高(附录 A.1)
+# 子框在 ROI 内的左上角偏移。附录 A 只记了 58x66 没记坐标,这两个数是
+# 2026-08-08 用 scripts/calibrate_facing_template.py 在真帧上目视标定的
+# (放大 4x + 10px 网格,对准头顶与肩线)。换角色/换分辨率必须重标。
+TEMPLATE_DX = 61
+TEMPLATE_DY = 15
+
+
+def capture(frame, anchor_obj):
+    """从本帧裁出头+肩模板(灰度 58x66);ROI 越界 → None。
+
+    只取头+肩是附录 A.3 的实测结论:拿盾、挥杖等不同动画姿态照样 0.82-0.89
+    命中 —— 头部在各动画帧间足够稳定,不需要一整套姿态模板库。
+    调用方必须保证这一拍是 OCR 完整命中(见 spec §3.3 的采集四道门)。
+    """
+    roi = crop_roi(frame, anchor_obj)
+    if roi is None:
+        return None
+    return roi[TEMPLATE_DY:TEMPLATE_DY + TEMPLATE_H,
+               TEMPLATE_DX:TEMPLATE_DX + TEMPLATE_W].copy()
