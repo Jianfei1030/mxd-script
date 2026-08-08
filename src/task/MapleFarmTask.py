@@ -85,6 +85,42 @@ FACING_TEMPLATE_DIR = 'screenshots/facing_templates'  # 朝向模板持久化目
 _FACING_SHORT = {'LEFT': 'L', 'RIGHT': 'R'}   # 决策行里 实测= 字段的短写
 FACING_CAPTURE_MIN_DX = 40   # 采朝向模板要求的最小确认位移(像素):角色真走了这么远,朝向才是观测出来的而不是猜的
 
+
+def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
+                      raw_present, mob_present, attack_in, attack_present,
+                      facing_before, facing_now, turn, seek_dir, key_sendable,
+                      observed, obs_s, obs_flip):
+    """决策日志行(不含时间戳前缀)—— 格式的唯一事实源。
+
+    scripts/analyze_facing.py 的正则按它解析,tests/test_analyze_facing.py 也调它
+    构造样本行:改这里任何字段,绑定测试立刻红。2026-08-08 评审坐实过假绑定 ——
+    当时测试里手抄了一份格式,把 `实测=` 改名后 15 个「绑定」测试全过。
+    """
+    return (f'决策 src={source} body_x={body_x:.0f} anchor_y={anchor_y:.0f} '
+            f'怪={len(centres)} 区内={len(in_zone)}(左{left}/右{len(in_zone) - left}) '
+            f'实测有怪={raw_present} 有怪={mob_present} '
+            f'可打区内={len(attack_in)} 可打={attack_present} '
+            f'朝向={facing_before or "-"}→{facing_now or "-"} '
+            f'转向={turn or "-"} 寻怪={seek_dir or "-"} '
+            f'可发键={key_sendable} '
+            f'实测={_FACING_SHORT.get(observed, "?")} '
+            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}')
+
+
+def divergence_log_line(facing_before, observed, obs_s, obs_flip,
+                        dt_attack, dt_hit, dt_turn):
+    """朝向分歧日志行 —— 格式唯一事实源(同上)。判据 D 按 距上次攻击 分桶。"""
+    return (f'朝向分歧 信念={facing_before} 实测={observed} '
+            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f} '
+            f'距上次攻击={dt_attack:.2f}s 距上次受击={dt_hit:.2f}s '
+            f'距上次转向={dt_turn:.2f}s')
+
+
+def template_captured_line(direction, min_dx):
+    """朝向模板已采集日志行 —— 判据 A 的分母从它之后开始算。"""
+    return f'朝向模板已采集 方向={direction} (寻怪走动确认 ≥{min_dx}px)'
+
+
 DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
 PLAYER_COLOR = QColor(0, 255, 0)
 ZONE_IDLE_COLOR = QColor(0, 128, 255)
@@ -294,8 +330,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             return
         self._facing_template = tmpl
         self._facing_template_dir = 'LEFT' if self._seek_dir == 'left' else 'RIGHT'
-        self.log_info(f'朝向模板已采集 方向={self._facing_template_dir} '
-                      f'(寻怪走动确认 ≥{FACING_CAPTURE_MIN_DX}px)')
+        self.log_info(template_captured_line(self._facing_template_dir,
+                                             FACING_CAPTURE_MIN_DX))
         try:
             os.makedirs(FACING_TEMPLATE_DIR, exist_ok=True)
             suffix = 'L' if self._facing_template_dir == 'LEFT' else 'R'
@@ -607,25 +643,18 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         left = sum(1 for x in in_zone if x < body[0])
         attack_in = [x for x, y in centres
                      if farm_logic.point_in_zone((x, y), attack_area)]
-        self.log_debug(
-            f'决策 src={source} body_x={body[0]:.0f} anchor_y={anchor_hit.y:.0f} '
-            f'怪={len(centres)} 区内={len(in_zone)}(左{left}/右{len(in_zone) - left}) '
-            f'实测有怪={raw_present} 有怪={mob_present} '
-            f'可打区内={len(attack_in)} 可打={attack_present} '
-            f'朝向={facing_before or "-"}→{self._facing or "-"} '
-            f'转向={turn or "-"} 寻怪={self._seek_dir or "-"} '
-            f'可发键={self._key_sendable()} '
-            f'实测={_FACING_SHORT.get(observed, "?")} '
-            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}')
+        self.log_debug(decision_log_line(
+            source, body[0], anchor_hit.y, centres, in_zone, left,
+            raw_present, mob_present, attack_in, attack_present,
+            facing_before, self._facing, turn, self._seek_dir,
+            self._key_sendable(), observed, obs_s, obs_flip))
         if observed is not None and facing_before in ('LEFT', 'RIGHT') \
                 and observed != facing_before:
             now = time.time()
-            self.log_debug(
-                f'朝向分歧 信念={facing_before} 实测={observed} '
-                f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f} '
-                f'距上次攻击={now - self._last_attack:.2f}s '
-                f'距上次受击={now - self._last_hit:.2f}s '
-                f'距上次转向={now - self._last_turn:.2f}s')
+            self.log_debug(divergence_log_line(
+                facing_before, observed, obs_s, obs_flip,
+                now - self._last_attack, now - self._last_hit,
+                now - self._last_turn))
 
     def _do_walk(self, keys):
         """防挂机走位:两段方向由朝向决定(先反方向出、朝原方向回),结束时朝向不翻转
