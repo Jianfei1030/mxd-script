@@ -64,6 +64,20 @@ class TestFarmLogic(unittest.TestCase):
         self.assertFalse(fl.is_dead(0.02))
         self.assertFalse(fl.is_dead(0.5))
 
+    def test_walk_confirmed(self):
+        # 按右键且真的往右走够了 → 确认朝右
+        self.assertTrue(fl.walk_confirmed('right', 1000.0, 1045.0, 40))
+        # 位移不够 → 不确认(可能只是锚点抖动)
+        self.assertFalse(fl.walk_confirmed('right', 1000.0, 1030.0, 40))
+        # 按右键却往左动 = 撞墙/锚点跳变,绝不能据此标定
+        self.assertFalse(fl.walk_confirmed('right', 1000.0, 955.0, 40))
+        # 按左键且真的往左走够了
+        self.assertTrue(fl.walk_confirmed('left', 1000.0, 955.0, 40))
+        self.assertFalse(fl.walk_confirmed('left', 1000.0, 1045.0, 40))
+        # 没在寻怪 / 没记起点 → 一律不确认
+        self.assertFalse(fl.walk_confirmed(None, 1000.0, 1045.0, 40))
+        self.assertFalse(fl.walk_confirmed('right', None, 1045.0, 40))
+
 
 class TestAttackZone(unittest.TestCase):
 

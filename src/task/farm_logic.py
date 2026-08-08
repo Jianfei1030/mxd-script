@@ -202,6 +202,22 @@ def knockback_debounced(raw_hit, now, last_hit, debounce):
     return now - last_hit >= debounce
 
 
+def walk_confirmed(seek_dir, body_x_start, body_x_now, min_dx):
+    """走动确认:角色真的沿按键方向走了 min_dx 像素以上 → 它必定面朝那边。
+
+    这是给朝向模板采集用的**位移观测**,不是信念。用 `_facing` 去标定模板等于
+    循环论证——模板正是用来检验 `_facing` 的(见 spec §3.3)。
+
+    反向位移(按右键却往左动)一律不确认:那是撞墙、被击退、或锚点跳变,
+    据此标定会把模板朝向记反,后面所有观测全错。
+    seek_dir 为 None(没在寻怪)或 body_x_start 为 None(没记上起点)→ 不确认。
+    """
+    if seek_dir not in ('left', 'right') or body_x_start is None:
+        return False
+    dx = body_x_now - body_x_start
+    return dx >= min_dx if seek_dir == 'right' else -dx >= min_dx
+
+
 def stun_suppressed(now, last_hit, suppress_duration):
     """硬直抑制:受击后 suppress_duration 秒内不转向、不攻击。
 
