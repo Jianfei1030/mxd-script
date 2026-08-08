@@ -43,6 +43,32 @@ def should_attack(now, last_attack_time, interval):
     return now - last_attack_time >= interval
 
 
+def should_detect(now, last_detect, attacking, seeking,
+                  attack_interval, seek_interval, idle_interval):
+    """检测拍节流:三种状态各有各的节奏,取当前状态对应的间隔。
+
+    - 在打(有向攻击区里有怪)→ 攻击间隔:检测本来就是为下一刀服务的,
+      没必要更快;这一段占挂机时间 41%,保持原节奏 = 负载不回归。
+    - 在追 → 寻怪刷新间隔:目标死了/换近了要立刻改方向。
+    - 空闲(都不是)→ 空闲刷新间隔。**这是「起步寻怪」唯一的入口。**
+
+    旧实现把「起步」也绑在攻击间隔上,快通道的进入条件是
+    `_seek_dir is not None`,于是它只能刷新一个已经存在的寻怪、
+    永远发起不了新的。实测停手→起步中位 1.19s / p90 3.61s,
+    而 寻怪刷新间隔 调到 0.1s 对这一步完全无效(spec §3.1)。
+
+    「在打」优先于「在追」:攻击区里有怪就是在打,不该被寻怪间隔拉快。
+    边界与 should_attack 同口径(>= 即放行)。
+    """
+    if attacking:
+        interval = attack_interval
+    elif seeking:
+        interval = seek_interval
+    else:
+        interval = idle_interval
+    return now - last_detect >= interval
+
+
 def attack_zone(center, width, height):
     """以 center 为心的攻击区 (x0, y0, x1, y1)。左右对称,不分朝向。"""
     cx, cy = center

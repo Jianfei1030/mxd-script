@@ -37,6 +37,26 @@ class TestFarmLogic(unittest.TestCase):
         self.assertTrue(fl.should_attack(10.0, 8.4, 1.5))
         self.assertFalse(fl.should_attack(10.0, 9.0, 1.5))
 
+    def test_should_detect_three_cadences(self):
+        # 在打:按攻击间隔(慢)。检测本来就是为下一刀服务,不必更快,负载不回归
+        self.assertFalse(fl.should_detect(1000.5, 1000.0, True, False, 0.7, 0.1, 0.3))
+        self.assertTrue(fl.should_detect(1000.75, 1000.0, True, False, 0.7, 0.1, 0.3))
+        # 在追:按寻怪刷新间隔(最快)。目标死了/换近了要立刻改方向
+        self.assertFalse(fl.should_detect(1000.05, 1000.0, False, True, 0.7, 0.1, 0.3))
+        self.assertTrue(fl.should_detect(1000.15, 1000.0, False, True, 0.7, 0.1, 0.3))
+        # 空闲:按空闲刷新间隔 —— 这是「起步寻怪」唯一的入口(spec §3.1)
+        self.assertFalse(fl.should_detect(1000.2, 1000.0, False, False, 0.7, 0.1, 0.3))
+        self.assertTrue(fl.should_detect(1000.35, 1000.0, False, False, 0.7, 0.1, 0.3))
+
+    def test_should_detect_attacking_beats_seeking(self):
+        # 攻击区里有怪就是在打,不该被寻怪的快间隔拉高负载
+        self.assertFalse(fl.should_detect(1000.15, 1000.0, True, True, 0.7, 0.1, 0.3))
+        self.assertTrue(fl.should_detect(1000.75, 1000.0, True, True, 0.7, 0.1, 0.3))
+
+    def test_should_detect_boundary_is_inclusive(self):
+        # 与 should_attack 同口径:恰好到点就放行,别让浮点抖动多等一拍
+        self.assertTrue(fl.should_detect(1000.5, 1000.0, False, False, 0.7, 0.1, 0.5))
+
     def test_potion_window_elapsed(self):
         self.assertFalse(fl.potion_window_elapsed(100.5, 100.0, 1.0))
         self.assertTrue(fl.potion_window_elapsed(101.0, 100.0, 1.0))  # 边界:恰好一个窗口 → 已过
