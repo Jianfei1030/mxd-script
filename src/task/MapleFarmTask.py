@@ -88,17 +88,29 @@ FACING_CAPTURE_MIN_DX = 40   # 采朝向模板要求的最小确认位移(像素
 
 
 def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
+                      same_feet, same_center, near,
                       raw_present, mob_present, attack_in, attack_present,
                       facing_before, facing_now, turn, seek_dir, key_sendable,
                       observed, obs_s, obs_flip):
     """决策日志行(不含时间戳前缀)—— 格式的唯一事实源。
 
-    scripts/analyze_facing.py 的正则按它解析,tests/test_analyze_facing.py 也调它
-    构造样本行:改这里任何字段,绑定测试立刻红。2026-08-08 评审坐实过假绑定 ——
+    scripts/analyze_facing.py 与 scripts/analyze_seek.py 的正则按它解析,
+    tests/test_analyze_facing.py、tests/test_analyze_seek.py 也调它构造样本行:
+    改这里任何字段,绑定测试立刻红。2026-08-08 评审坐实过假绑定 ——
     当时测试里手抄了一份格式,把 `实测=` 改名后 15 个「绑定」测试全过。
+
+    同层脚 / 同层心 是两个口径的同层怪数(spec §2.3):
+    同层脚 = 怪脚底 vs 名字牌 y,容差 寻怪同层容差(旧口径,Task 6 后退休);
+    同层心 = 怪中心 y 落在接敌区纵向范围内(新口径,与 mob_in_zone 同源)。
+    两个都写出来,是为了量出「攻击区罩得到却判不同层」那条带上到底有多少怪。
+    near = 水平最近那只怪的 (dx, dy脚, dy心);屏幕无怪时 None → 三项写 '-',
+    绝不写 0(0 会被判据脚本当成真值)。
     """
+    near_s = ('近怪dx=- dy脚=- dy心=-' if near is None else
+              f'近怪dx={near[0]:+.0f} dy脚={near[1]:+.0f} dy心={near[2]:+.0f}')
     return (f'决策 src={source} body_x={body_x:.0f} anchor_y={anchor_y:.0f} '
             f'怪={len(centres)} 区内={len(in_zone)}(左{left}/右{len(in_zone) - left}) '
+            f'同层脚={same_feet} 同层心={same_center} {near_s} '
             f'实测有怪={raw_present} 有怪={mob_present} '
             f'可打区内={len(attack_in)} 可打={attack_present} '
             f'朝向={facing_before or "-"}→{facing_now or "-"} '
@@ -642,11 +654,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     self._last_walk = now
                     self._last_seek_refresh = now
         if cfg.get('决策日志开关'):
-            self._log_decision(source, anchor_hit, body, zone, attack_area, centres,
+            self._log_decision(source, anchor_hit, body, zone, attack_area, centres, mobs,
                                raw_present, mob_present, self._last_attack_present,
                                facing_before, turn, observed, obs_s, obs_flip)
 
-    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres,
+    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres, mobs,
                       raw_present, mob_present, attack_present, facing_before, turn,
                       observed, obs_s, obs_flip):
         """逐拍决策留痕(默认关,见配置 决策日志开关)。
@@ -654,13 +666,28 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         排"左右转向不攻击"时必须知道:锚点是哪条通道给的(fallback/cached 说明角色
         位置本身不可信)、区内怪的左右分布(两侧都有才可能来回换目标)、朝向有没有变、
         按键能不能送出去。少任何一项都只能靠猜。字段一行写完,方便 grep 「决策」后
-        直接看序列。"""
+        直接看序列。
+
+        同层脚/同层心/近怪 三项见 decision_log_line 的说明:它们是 Task 6
+        改同层口径之前唯一的观测手段(spec §2.3)。
+        """
         in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
         left = sum(1 for x in in_zone if x < body[0])
         attack_in = [x for x, y in centres
                      if farm_logic.point_in_zone((x, y), attack_area)]
+        tol = self.config.get('寻怪同层容差(像素)', 60)
+        same_feet = sum(1 for m in mobs
+                        if farm_logic.same_floor(m.y + m.height, anchor_hit.y, tol))
+        same_center = sum(1 for m in mobs if zone[1] <= m.y + m.height / 2 <= zone[3])
+        near = None
+        if mobs:
+            m = min(mobs, key=lambda m: abs(m.x + m.width / 2 - body[0]))
+            near = (m.x + m.width / 2 - body[0],
+                    (m.y + m.height) - anchor_hit.y,
+                    (m.y + m.height / 2) - body[1])
         self.log_debug(decision_log_line(
             source, body[0], anchor_hit.y, centres, in_zone, left,
+            same_feet, same_center, near,
             raw_present, mob_present, attack_in, attack_present,
             facing_before, self._facing, turn, self._seek_dir,
             self._key_sendable(), observed, obs_s, obs_flip))

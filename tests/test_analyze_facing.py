@@ -33,9 +33,13 @@ def dec(src, f0, f1, obs, turn='-', seek='-', ts=TS, key_sendable=True):
 
     obs 传观测朝向长写 'LEFT'/'RIGHT'/None:真实接线里 _observe_facing 返回的
     就是长写,短写 L/R 是格式函数内部换算的(手抄格式的旧测试传短写,
-    换到真实函数后这一层立即暴露)。"""
+    换到真实函数后这一层立即暴露)。
+
+    同层脚/同层心/近怪 与朝向判据无关,填中性值:analyze_facing 的正则用 .*?
+    跨过它们,这里正是要证明「加字段没打断朝向判据的解析」。"""
     return task_line(ts, decision_log_line(
         src, 1280.0, 720.0, centres=[], in_zone=[], left=0,
+        same_feet=0, same_center=0, near=None,
         raw_present=False, mob_present=False, attack_in=[], attack_present=False,
         facing_before=f0, facing_now=f1, turn=turn, seek_dir=seek,
         key_sendable=key_sendable, observed=obs, obs_s=0.86, obs_flip=0.39))

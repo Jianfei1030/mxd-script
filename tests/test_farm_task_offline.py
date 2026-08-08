@@ -2323,5 +2323,58 @@ class TestFacingCorrection(unittest.TestCase):
         self.assertEqual(task._facing, 'LEFT')
 
 
+class TestDecisionLogVerticalFields(unittest.TestCase):
+    """决策行的怪纵向字段 —— Task 6 改同层口径之前唯一的观测手段。
+
+    字段格式只有一处事实源(decision_log_line),这里断言的是它的输出,
+    不手抄格式串(见 tests/test_analyze_facing.py 顶部关于假绑定的记录)。"""
+
+    def _line(self, same_feet=0, same_center=0, near=None):
+        from src.task.MapleFarmTask import decision_log_line
+        return decision_log_line(
+            'window', 1280.0, 880.0, centres=[], in_zone=[], left=0,
+            same_feet=same_feet, same_center=same_center, near=near,
+            raw_present=False, mob_present=False, attack_in=[], attack_present=False,
+            facing_before='LEFT', facing_now='LEFT', turn=None, seek_dir=None,
+            key_sendable=True, observed=None, obs_s=0.0, obs_flip=0.0)
+
+    def test_fields_present_with_nearest_mob(self):
+        line = self._line(same_feet=1, same_center=4, near=(180.0, -24.0, -64.0))
+        self.assertIn('同层脚=1 同层心=4 近怪dx=+180 dy脚=-24 dy心=-64', line)
+
+    def test_fields_degrade_when_no_mob_on_screen(self):
+        # 屏幕上一只怪都没有:三个 dy 写 '-',不许写 0(0 会被判据脚本当成真值)
+        self.assertIn('同层脚=0 同层心=0 近怪dx=- dy脚=- dy心=-', self._line())
+
+    def test_fields_sit_between_zone_and_raw_present(self):
+        # 位置固定:analyze_seek.py 的正则按这个顺序写,挪位置立刻红
+        line = self._line(same_feet=2, same_center=2, near=(0.0, 0.0, 0.0))
+        self.assertLess(line.index('区内='), line.index('同层脚='))
+        self.assertLess(line.index('同层心='), line.index('实测有怪='))
+
+    def test_detect_and_act_feeds_real_mob_geometry(self):
+        """接线断言:字段的值真的来自 find_mobs 的框,不是常量。
+
+        几何(全部走 DEFAULT_CONFIG):角色名为空 → _resolve_anchor 直接回退
+        画面中心 (1280,720);名字牌到身体偏移 90 → body=(1280,630)
+        (anchor.body_center 是 y - offset,名字牌在脚下);
+        接敌区 600x200 → 水平 [980,1580] 纵向 [530,730];寻怪同层容差 60。
+        _detect_and_act 不读血条,直接调即可,不需要 patch bars。
+        """
+        task = make_task(**{'决策日志开关': True, '攻击模式': '检测'})
+        # 怪 A:中心 y=600 在接敌区纵向内;脚底 640,与 anchor_y=720 差 80 > 60 → 旧口径判不同层
+        mob_a = SimpleNamespace(x=1400, y=560, width=80, height=80)
+        # 怪 B:中心 y=900,接敌区纵向外,两个口径都不同层
+        mob_b = SimpleNamespace(x=1500, y=860, width=80, height=80)
+        task.find_mobs = MagicMock(return_value=[mob_a, mob_b])
+        task._detect_and_act(_synthetic_frame(), 1000.0, task.config, KEYS)
+        line = next(c.args[0] for c in task.log_debug.call_args_list
+                    if '决策 src=' in c.args[0])
+        self.assertIn('同层脚=0 同层心=1', line)     # 正是 spec §2.3 那条「罩得到却判不同层」的带
+        self.assertIn('近怪dx=+160', line)           # 怪 A 中心 1440,body_x 1280
+        self.assertIn('dy脚=-80', line)              # 640 - 720
+        self.assertIn('dy心=-30', line)              # 600 - 630
+
+
 if __name__ == '__main__':
     unittest.main()
