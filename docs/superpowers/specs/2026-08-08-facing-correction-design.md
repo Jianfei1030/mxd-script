@@ -1,7 +1,8 @@
 # 朝向纠正 —— 停止作废信念，改用观测纠正
 
 日期：2026-08-08
-状态：设计待确认
+状态：**已实现（离线全绿），实弹判据 E1–E4 未跑**
+实现：commit `8eb39ce`（功能）、`d6d897f`（守卫测试修正）
 上游：`2026-08-08-facing-observer-design.md`（只读观测器，本设计把它升级成纠正器）、`2026-08-07-directional-attack-zone-design.md`（有向攻击区）
 
 ## 1. 一句话
@@ -114,13 +115,7 @@ if 朝向纠正开关 and observed is not None and observed != self._facing:
 
 所以分歧行必须用**纠正前**的信念来判：`divergence_log_line(belief_before_obs, observed, ...)`。字段与格式函数都不动，只是传参改成纠正前的值。
 
-另加一行，纠正真正发生时写（受 `决策日志开关` 控制）：
-
-```
-朝向纠正 信念=LEFT → 实测=RIGHT 分值=0.86/0.39
-```
-
-`grep 朝向纠正` 即可数出纠正次数，这是 §5 判据 E2/E4 的数据源。
+**实现时的偏离（2026-08-08）**：设计原本还要另加一行 `朝向纠正 信念=… → 实测=…` 和一个 `correction_log_line` 格式函数，**没有实现，也不需要**——分歧行既然已经改用纠正前的信念判定，纠正发生时它必然触发，两者一一对应。`grep 朝向分歧` 数出来的就是纠正次数，判据 E2/E4 照样有数据源。多写一行只是同一事件的第二份记录。
 
 ### 3.5 配置
 
@@ -145,9 +140,10 @@ if 朝向纠正开关 and observed is not None and observed != self._facing:
 
 | 文件 | 动作 |
 |---|---|
-| `src/task/MapleFarmTask.py` | 删 `_facing = None`；改受击日志措辞；`_detect_and_act` 加纠正块与 `belief_before_obs`；`_log_decision` 分歧行改用纠正前信念；新增 `correction_log_line` 格式函数；新配置项；`_observe_facing` 的开关门改为「纠正或观测」 |
+| `src/task/MapleFarmTask.py` | 删 `_facing = None`；改受击日志措辞；`_detect_and_act` 加纠正块与 `belief_before_obs`；`_log_decision` 分歧行改用纠正前信念；新配置项；`_observe_facing` 的开关门改为「纠正或观测」 |
 | `tests/test_farm_task_offline.py` | 纠正接线用例 |
-| `tests/test_analyze_facing.py` | 新格式函数的绑定用例 |
+
+（原列了 `correction_log_line` 与配套的 `tests/test_analyze_facing.py` 绑定用例，实现时判定为冗余，见 §3.4 的偏离说明。日志格式没有新增，`analyze_facing.py` 与其绑定测试均无需改动。）
 
 `src/detect/facing.py` **不动** —— 判定逻辑一个字不改，本设计只改"拿观测结果做什么"。
 
@@ -192,3 +188,40 @@ if 朝向纠正开关 and observed is not None and observed != self._facing:
 - **改 `facing.py` 的判定逻辑/阈值** —— 判据 A/B 刚验证过它可信，没有理由动
 - **把观测接进寻怪/走位的朝向写入** —— 那两条路径每拍重按方向键、本来就自我重申（`2026-08-07-facing-reassert-on-hit-design.md` §3.2），缺口只在站桩攻击
 - **换发型自动重采模板** —— 表现为弃权率上升，判据 A 看得见就够
+
+## 7. 实现记录（2026-08-08）
+
+commit `8eb39ce`（功能）、`d6d897f`（守卫测试修正）。`python -m unittest discover -s tests`：**383 passed, 4 skipped**。
+
+落地与设计一致，六处改动：`朝向纠正开关` 配置项与说明、`_observe_facing` 的门改为「纠正或观测」、`_detect_and_act` 里的 `belief_before_obs` 与纠正块、`facing_before` 取纠正前的值、删受击清空并改日志措辞。`src/detect/facing.py` 一个字未动。
+
+### 7.1 三条守卫的变异验证
+
+单测全绿不等于守得住，逐条做了变异：
+
+| 变异 | 结果 |
+|---|---|
+| 分歧行改用纠正后的信念（§3.4 的尺子失明） | FAILED |
+| 整块纠正删掉 | FAILED |
+| 把 `self._facing = None` 加回受击块 | FAILED |
+
+### 7.2 两个旧用例绑定了被删掉的行为，已更新
+
+不是删除，是按实际改动改断言（memory 记着「功能上线没回头看断言被绑死的老用例」这个坑）：
+
+- `TestKnockbackReset.test_hp_drop_resets_facing_and_turn_cooldown` → 改名 `..._keeps_facing_...`，断言「受击保留朝向 + 冷却仍重置」
+- `TestFacingObserver.test_observation_never_writes_facing` → 加 `朝向纠正开关=False`，改为守「关掉就退回只读」这条退路
+
+### 7.3 一个自己写的守卫原本是空转且 flaky 的
+
+`test_hit_does_not_clear_facing` 最初没关 `走位开关`。`_last_walk` 初值 0.0、`now=200` 早过了 120s 走位间隔 → 无怪时防挂机走位触发 → **首次走位在「自动」朝向下随机选边并写回 `_facing`** → 受击清空之后又被随机填上，断言有一半概率靠运气蒙对。
+
+变异验证抓出来的：把清空加回去，它照样通过。关掉走位开关后守住了，连跑 5 次稳定。
+
+**教训：凡是断言 `_facing` 终值的离线用例，都要先关掉其它会写它的路径（走位、寻怪），否则守卫是假的。**
+
+## 8. 待办
+
+- **实弹判据 E1–E4 未跑**（§5.2）。离线单测只证明接线对了，不证明实机有效
+- **判据 A/B 需复算**：纠正上线后仪器本身仍须可信，否则 E2 的数字没有意义
+- 跑实弹前需**完全重启 GUI**：本轮只改了 `MapleFarmTask.py`（可热重载），但**新配置项要重启才会出现在面板上**
