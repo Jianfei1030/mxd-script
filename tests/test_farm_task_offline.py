@@ -1659,11 +1659,15 @@ class TestAttackDebounceAndTurnCooldown(unittest.TestCase):
         self.assertNotIn(call('shift'), task.send_key.call_args_list)
 
     def test_no_seek_during_grace(self):
-        """保持窗内不许改去寻怪:刚打的目标只是漏检一拍,走开就更打不到了。"""
-        task = self._task(**{'丢怪保持(秒)': 1.0})
+        """保持窗内不许改去寻怪:刚打的目标只是漏检一拍,走开就更打不到了。
+
+        2026-08-08 起「保持窗」改用 寻怪起步宽限(0.3s) 而非 丢怪保持(1.0s):
+        单帧漏检(节拍 0.1s)仍在窗内被挡住,不会一拍漏检就迈腿;
+        0.3s 之后即允许起步(spec §3.2)。"""
+        task = self._task(**{'丢怪保持(秒)': 1.0, '寻怪起步宽限(秒)': 0.3})
         self._tick(task, [self.RIGHT_MOB], now=100.0)
         # 区外同层远怪(中心 2030,705;脚底 730 与锚点 720 同层)
-        self._tick(task, [dict(x=2000, y=680, width=60, height=50)], now=100.5)
+        self._tick(task, [dict(x=2000, y=680, width=60, height=50)], now=100.2)
         self.assertIsNone(task._seek_dir)
 
     def test_grace_zero_stops_immediately(self):
@@ -2428,6 +2432,69 @@ class TestDetectCadence(unittest.TestCase):
 
     def test_idle_interval_has_a_default(self):
         self.assertEqual(DEFAULT_CONFIG['空闲刷新间隔(秒)'], 0.3)
+
+
+class TestSeekNotBlockedByAttackGrace(unittest.TestCase):
+    """寻怪起步与攻击去抖分家(spec §3.2)。
+
+    几何(全部走 DEFAULT_CONFIG):角色名为空 → 锚点画面中心 (1280,720),
+    名字牌到身体偏移 90 → body=(1280,630);接敌区 600x200 →
+    水平 [980,1580] 纵向 [530,730]。怪放在中心 (2200, 632):
+    水平出区(不该打)、纵向同层、脚底 672 与 anchor_y 720 差 48 ≤ 容差 60
+    (本任务还没改同层口径,旧口径也判同层)→ 该追。
+    """
+
+    def _task(self, **cfg):
+        return make_task(**{'攻击模式': '检测', '寻怪开关': True,
+                            '丢怪保持(秒)': 1.0, '寻怪起步宽限(秒)': 0.3, **cfg})
+
+    @staticmethod
+    def _far_mob():
+        return SimpleNamespace(x=2160, y=592, width=80, height=80)
+
+    def test_seek_starts_once_short_grace_elapsed(self):
+        """区里最后一只怪没了 0.3s 后就能起步,不用等满 1.0s 的丢怪保持。"""
+        task = self._task()
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._last_mob_seen = 1000.0          # 区内最后一次真见到怪
+        task._detect_and_act(_synthetic_frame(), 1000.35, task.config, KEYS)
+        self.assertEqual(task._seek_dir, 'right')
+
+    def test_seek_still_blocked_inside_short_grace(self):
+        """0.3s 之内不起步:一拍 YOLO 漏检不该让角色立刻迈腿。"""
+        task = self._task()
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._last_mob_seen = 1000.0
+        task._detect_and_act(_synthetic_frame(), 1000.2, task.config, KEYS)
+        self.assertIsNone(task._seek_dir)
+
+    def test_starting_seek_drops_the_stale_attack_signal(self):
+        """起步即停手:不许出现「一边追一边挥」。
+
+        _last_attack_present 还被 丢怪保持 撑着 True,寻怪一旦定向就作废它,
+        否则 _do_attack 会继续朝空气轻点攻击键
+        (MapleFarmTask.py 去抖注释里担心过的错乱状态)。"""
+        task = self._task()
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._last_mob_seen = 1000.0
+        task._last_attack_seen = 1000.0
+        task._detect_and_act(_synthetic_frame(), 1000.35, task.config, KEYS)
+        self.assertEqual(task._seek_dir, 'right')
+        self.assertFalse(task._last_attack_present)
+
+    def test_sit_chair_and_walk_still_use_the_long_grace(self):
+        """_last_mob_present 仍按 丢怪保持(1.0s) 算:
+        坐椅/防挂机走位不该在怪刚消失 0.3s 就触发。"""
+        task = self._task()
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._last_mob_seen = 1000.0
+        task._detect_and_act(_synthetic_frame(), 1000.35, task.config, KEYS)
+        self.assertTrue(task._last_mob_present)
+
+    def test_short_grace_has_a_default_below_the_long_one(self):
+        self.assertEqual(DEFAULT_CONFIG['寻怪起步宽限(秒)'], 0.3)
+        self.assertLess(DEFAULT_CONFIG['寻怪起步宽限(秒)'],
+                        DEFAULT_CONFIG['丢怪保持(秒)'])
 
 
 if __name__ == '__main__':

@@ -60,6 +60,7 @@ DEFAULT_CONFIG = {
     '模板分片匹配开关': True,
     '模板匹配阈值': 0.2,
     '丢怪保持(秒)': 1.0,
+    '寻怪起步宽限(秒)': 0.3,
     '转向冷却(秒)': 1.5,
     '受击防抖(秒)': 1.0,
     '硬直抑制窗(秒)': 0.0,
@@ -180,6 +181,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
+            '寻怪起步宽限(秒)': '区内检测不到怪之后,还要再等多久才允许起步去追。**必须小于「丢怪保持(秒)」**,取等 = 退回修复前行为。为什么要分成两个值:丢怪保持是为 YOLO 漏检兜底的(单帧 recall 0.886,一拍漏检就松开攻击键,法师一次施法都放不出来),那个理由只对攻击键成立——多挥一刀空的代价,远小于多站一秒不动。2026-08-08 实测有 11.5% 的拍卡在丢怪保持窗里,其中 3310 拍屏幕上明明有怪却结构性禁止寻怪。攻击键本身不受此项影响(它由「有向攻击区内有没有怪」单独去抖)。寻怪方向一旦定下来,还被丢怪保持撑着的攻击信号会立刻作废,不会出现「一边追一边挥」',
             '转向冷却(秒)': '两次转向之间的最小间隔。攻击区里常常只有一只怪,而它反复在身体左右两侧之间换,不加冷却角色就原地左右扭(实测转向 17 次里 12 次是反向)。要大于一次施法时间才压得住;设太大则怪真绕到背后时反应慢。设 0 = 关掉',
             '受击防抖(秒)': '受击(HP 掉 2%+)事件的最小间隔。游戏受击后约 1 秒无敌,1 秒内不可能有新的真实掉血,但血条渐变动画会把一次掉血拆成多拍读数、每拍都触发受击——每次受击都会作废朝向并重置转向冷却,重复触发让冷却形同虚设,怪穿过时左右扭+打空。取 1 秒 = 游戏无敌时长,不会漏真受击。设 0 = 关掉防抖',
             '硬直抑制窗(秒)': '受击后多久内不按转向/攻击键。**默认 0 = 关闭,实测有害,别开**。原意是躲开击退硬直(硬直中按键被游戏吞掉,但转向代码照常盲写朝向 → 信念分叉打空),但 2026-08-08 逐拍实测证明它把问题放大了:受击会把 _facing 清成 None,而 facing_half_zone 在 None 时退化成整个对称区,于是抑制窗禁止转向的这段时间里,有向攻击区失效、照常朝背后的怪开火。设 0.8 时「朝向未知」占挂机时间 23.3%、受击到下次成功转向中位 1.55s;设 0 后回落到 8.1% / 0.70s(四条事先写死的判据全过)。真正的解法是「只在角色可操作的时刻发键」,见 docs/superpowers/specs/2026-08-08-facing-observer-design.md §6。保留此项只为复现当时的对照实验',
@@ -593,6 +595,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         mob_present = farm_logic.mob_present_debounced(
             raw_present, now, self._last_mob_seen, cfg['丢怪保持(秒)'])
         self._last_mob_present = mob_present
+        # 接战/寻怪的分支门用一个更短的宽限:丢怪保持(1.0s)是为攻击键兜 YOLO
+        # 漏检的,那个理由不适用于寻怪 —— 它把「起步走路」也禁掉了整整一秒
+        # (实测 11.5% 的拍卡在这个窗里,其中 3310 拍屏幕上有怪,spec §3.2)。
+        # _last_mob_present 仍用长宽限:坐椅/防挂机走位不该在怪刚消失 0.3s 就触发。
+        seek_hold = farm_logic.mob_present_debounced(
+            raw_present, now, self._last_mob_seen, cfg['寻怪起步宽限(秒)'])
         raw_attack = farm_logic.mob_in_zone(centres, attack_area)
         if raw_attack:
             self._last_attack_seen = now
@@ -612,7 +620,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种
         # 变化(A=纠正前、B=本拍结束),分歧行也据它判(spec §3.4)。
         facing_before, turn = belief_before_obs, None
-        if mob_present:
+        if seek_hold:
             self._seek_dir = None  # 怪进攻击区了,停追,原地攻击
             # 先松开寻怪长按的方向键:长按没松的话,下面的转向轻点会被"还在走"吞掉,
             # 攻击长按时面朝还对着反方向 → 打空(_release_seek_key 自带 None 守卫)
@@ -652,6 +660,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 if self._seek_dir is not None:
                     # 寻怪本身就在移动=活动中,防挂机走位倒计时顺延
                     self._last_walk = now
+                    # 起步即停手:_last_attack_present 可能还被 丢怪保持 撑着 True,
+                    # 不作废的话 _do_attack 会一边追一边朝空气轻点攻击键
+                    self._last_attack_present = False
         if cfg.get('决策日志开关'):
             self._log_decision(source, anchor_hit, body, zone, attack_area, centres, mobs,
                                raw_present, mob_present, self._last_attack_present,
