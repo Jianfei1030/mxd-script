@@ -431,6 +431,64 @@ class TestKnockbackDetected(unittest.TestCase):
                                                prev_x=None, new_x=1270, mob_xs=[800]))
 
 
+class TestKnockbackDebounced(unittest.TestCase):
+    """受击防抖:一次真实掉血只算一次受击。
+
+    2026-08-08 日志实测:一次掉 6.6% 被血条渐变动画拆成 0.7s 内多拍
+    ≥2% 的读数,每拍都触发受击(0.2s 内连报 3 次)——每次受击都会
+    作废朝向 + 重置转向冷却,冷却形同虚设。游戏受击后约 1s 无敌,
+    1s 内不可能有新的真实掉血,防抖取 1s 不会漏真受击。
+    """
+
+    def test_raw_hit_false_never_counts(self):
+        self.assertFalse(fl.knockback_debounced(False, 10.0, 9.0, 1.0))
+
+    def test_first_hit_always_counts(self):
+        # last_hit=None(从未受击)天然放行;last_hit=0.0 哨兵同样放行(now 必远大于 1)
+        self.assertTrue(fl.knockback_debounced(True, 10.0, None, 1.0))
+        self.assertTrue(fl.knockback_debounced(True, 10.0, 0.0, 1.0))
+
+    def test_hit_within_debounce_window_suppressed(self):
+        # 同一掉血的渐变尾巴:0.2s 内再来 → 不算新受击
+        self.assertFalse(fl.knockback_debounced(True, 10.2, 10.0, 1.0))
+
+    def test_hit_after_debounce_window_counts(self):
+        # 1s 无敌已过,再掉血 = 新的真实受击
+        self.assertTrue(fl.knockback_debounced(True, 11.0, 10.0, 1.0))
+        self.assertTrue(fl.knockback_debounced(True, 11.2, 10.0, 1.0))
+
+    def test_debounce_zero_disables(self):
+        # 设 0 = 关掉防抖,每拍掉血都算受击(旧行为)
+        self.assertTrue(fl.knockback_debounced(True, 10.2, 10.0, 0.0))
+
+
+class TestStunSuppressed(unittest.TestCase):
+    """硬直抑制窗:受击后 0.5s 内不转向、不攻击。
+
+    2026-08-08 日志实测:受击后 0.3s/0.5s 的转向 tap 落在击退硬直里被
+    游戏吞掉,但转向代码照常盲写朝向 → 信念分叉 → 打空。抑制窗从源头
+    掐掉「键被吞、信念照写」:硬直期间根本不按转向/攻击键。
+    """
+
+    def test_suppress_zero_disables(self):
+        # 设 0 = 关掉抑制,恒放行
+        self.assertFalse(fl.stun_suppressed(10.2, 10.0, 0.0))
+
+    def test_never_hit_always_passes(self):
+        # 0.0 哨兵 = 从未受击,不受抑制
+        self.assertFalse(fl.stun_suppressed(10.5, 0.0, 0.5))
+
+    def test_within_window_suppressed(self):
+        # 受击后 0.2s:硬直中,不许转向/攻击
+        self.assertTrue(fl.stun_suppressed(10.2, 10.0, 0.5))
+        self.assertTrue(fl.stun_suppressed(10.49, 10.0, 0.5))
+
+    def test_after_window_passes(self):
+        # 硬直已过:放行
+        self.assertFalse(fl.stun_suppressed(10.5, 10.0, 0.5))
+        self.assertFalse(fl.stun_suppressed(11.0, 10.0, 0.5))
+
+
 class TestFacingHalfZone(unittest.TestCase):
     """有向攻击区 = 对称接敌区的面朝侧一半。
 

@@ -60,6 +60,8 @@ DEFAULT_CONFIG = {
     '模板匹配阈值': 0.2,
     '丢怪保持(秒)': 1.0,
     '转向冷却(秒)': 1.5,
+    '受击防抖(秒)': 1.0,
+    '硬直抑制窗(秒)': 0.0,
     '决策日志开关': False,
 }
 
@@ -124,6 +126,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
             '转向冷却(秒)': '两次转向之间的最小间隔。攻击区里常常只有一只怪,而它反复在身体左右两侧之间换,不加冷却角色就原地左右扭(实测转向 17 次里 12 次是反向)。要大于一次施法时间才压得住;设太大则怪真绕到背后时反应慢。设 0 = 关掉',
+            '受击防抖(秒)': '受击(HP 掉 2%+)事件的最小间隔。游戏受击后约 1 秒无敌,1 秒内不可能有新的真实掉血,但血条渐变动画会把一次掉血拆成多拍读数、每拍都触发受击——每次受击都会作废朝向并重置转向冷却,重复触发让冷却形同虚设,怪穿过时左右扭+打空。取 1 秒 = 游戏无敌时长,不会漏真受击。设 0 = 关掉防抖',
+            '硬直抑制窗(秒)': '受击后多久内不按转向/攻击键。**默认 0 = 关闭,实测有害,别开**。原意是躲开击退硬直(硬直中按键被游戏吞掉,但转向代码照常盲写朝向 → 信念分叉打空),但 2026-08-08 逐拍实测证明它把问题放大了:受击会把 _facing 清成 None,而 facing_half_zone 在 None 时退化成整个对称区,于是抑制窗禁止转向的这段时间里,有向攻击区失效、照常朝背后的怪开火。设 0.8 时「朝向未知」占挂机时间 23.3%、受击到下次成功转向中位 1.55s;设 0 后回落到 8.1% / 0.70s(四条事先写死的判据全过)。真正的解法是「只在角色可操作的时刻发键」,见 docs/superpowers/specs/2026-08-08-facing-observer-design.md §6。保留此项只为复现当时的对照实验',
             '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、可打区内怪数、可打、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
         self._reset_state()
@@ -167,6 +171,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_attack_seen = None     # 上次有向攻击区内真检测到怪的时刻;None=从未见过(去抖用)
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
+        self._last_hit = 0.0          # 上次受击(作废朝向)时刻;受击防抖用,0.0 哨兵=从未受击
         self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
         self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
         self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
@@ -486,8 +491,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 否则之后认为朝向已对不再补转,角色背对怪一直挥空且无法自愈。
             # 攻击键本身由 _do_attack 按 攻击间隔 轻点,不在这里按
             turn = farm_logic.attack_turn_direction(self._facing, body[0], centres, zone)
+            # 硬直抑制:受击后 硬直抑制窗(秒) 内不按转向键——击退硬直中 tap 会被
+            # 游戏吞掉,但下面的盲写 _facing 照常执行,键没生效信念却已翻转 → 打空。
+            # 抑制窗把转向与盲写整块跳过,等硬直过了再补转(见 farm_logic.stun_suppressed)。
             if (turn is not None
                     and farm_logic.turn_allowed(now, self._last_turn, cfg['转向冷却(秒)'])
+                    and not farm_logic.stun_suppressed(
+                        now, self._last_hit, cfg['硬直抑制窗(秒)'])
                     and self._key_sendable()):
                 key = '左移键' if turn == 'left' else '右移键'
                 self.send_key(keys[key], down_time=TURN_TAP_SECONDS)
@@ -595,8 +605,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         """
         if cfg['攻击模式'] != '检测':
             return
-        if self._last_attack_present and farm_logic.should_attack(
-                now, self._last_attack, cfg['攻击间隔(秒)']):
+        if (self._last_attack_present
+                and farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
+                and not farm_logic.stun_suppressed(
+                    now, self._last_hit, cfg['硬直抑制窗(秒)'])):
             self.send_key(keys['攻击键'])
             self._last_attack = now
 
@@ -715,7 +727,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 冷却(turn_allowed:now-0 >= cooldown 恒真)——冷却是压"原地左右扭"的,
         # 不该压真正的击退纠正。对"击退翻不翻朝向"两种机制同时正确:
         # 翻了你补 tap 是纠错;没翻,朝怪 tap 50ms 是 no-op(已面朝该侧按方向键零代价)。
-        if cfg['攻击模式'] == '检测' and farm_logic.knockback_detected(hp, self._prev_hp):
+        if cfg['攻击模式'] == '检测' and farm_logic.knockback_debounced(
+                farm_logic.knockback_detected(hp, self._prev_hp), now,
+                self._last_hit, cfg['受击防抖(秒)']):
             if cfg.get('决策日志开关'):
                 # 受击本身不写日志的话,「这次挂机到底被打了几次、每次朝向作废前是什么」
                 # 全靠猜——决策行里没有这两项,事后无法判断本机制有没有生效。
@@ -726,6 +740,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                                f'朝向={self._facing or "-"}→- 信念作废,转向冷却重置')
             self._facing = None
             self._last_turn = 0.0
+            self._last_hit = now
         self._prev_hp = hp
 
         # 2-3.5. 喝血/喝蓝/药水耗尽保护。喝药开关关闭时整段跳过:
@@ -795,7 +810,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._mark_busy(now)
         else:
             self._clear_debug()  # 定频模式没有锚点/攻击区,之前检测模式画过的框清掉
-            if farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)']):
+            # 硬直抑制同样作用于定频:受击(检测模式留下的 _last_hit)后 0.5s 内
+            # 不按攻击键——硬直中按了浪费一个 攻击间隔 节拍
+            if (farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
+                    and not farm_logic.stun_suppressed(
+                        now, self._last_hit, cfg['硬直抑制窗(秒)'])):
                 self.send_key(keys['攻击键'])
                 self._last_attack = now
 

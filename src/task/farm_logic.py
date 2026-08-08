@@ -184,6 +184,46 @@ def knockback_detected(hp, prev_hp, hp_drop=0.02,
     return (nearest < prev_x and dx > 0) or (nearest > prev_x and dx < 0)
 
 
+def knockback_debounced(raw_hit, now, last_hit, debounce):
+    """受击防抖:一次真实掉血只算一次受击,防抖窗口内重复掉血读数不算。
+
+    游戏受击后约 1 秒无敌,1 秒内不可能有新的真实掉血——但血条是渐变
+    动画,一次掉 6.6% 会被 10Hz 读数拆成 0.7 秒内多拍 ≥2% 的下降,
+    每拍都触发受击(2026-08-08 日志实测 0.2s 内连报 3 次受击)。
+    每次受击都会作废朝向信念 + 重置转向冷却,重复触发让冷却形同虚设,
+    怪穿过时角色左右扭 + 转向 tap 被硬直吞掉 → 打空。debounce 取
+    游戏无敌时长(默认 1s)不会漏真受击:1s 内再掉血必是同一次掉血的
+    渐变尾巴。last_hit=None 表示从未受击,天然放行。
+    """
+    if not raw_hit:
+        return False
+    if last_hit is None:
+        return True
+    return now - last_hit >= debounce
+
+
+def stun_suppressed(now, last_hit, suppress_duration):
+    """硬直抑制:受击后 suppress_duration 秒内不转向、不攻击。
+
+    击退硬直动画约 0.3-0.5 秒,期间方向键 tap 会被游戏吞掉(2026-08-08
+    日志实测:受击 44,465 后 0.3s 的转向 tap、45,207 后 0.5s 的转向 tap
+    均未生效)。但转向代码按完键后照常盲写 _facing——键没生效、信念却
+    已翻转,攻击区随后按错朝向算,怪在区内却朝反方向打空,直到下次受击
+    才作废重来。抑制窗 = 硬直期间根本不按转向/攻击键,从源头掐掉
+    「键被吞、信念照写」的分叉(受击防抖只解决了"重复作废",没解决
+    "作废后立即补转的 tap 落在硬直里")。
+
+    suppress_duration <= 0 → 关掉抑制,恒放行。last_hit == 0.0 哨兵
+    (从未受击)→ 放行。窗口边界 now - last_hit >= suppress_duration
+    不算抑制(取"至少经过这么久")。
+    """
+    if suppress_duration <= 0:
+        return False
+    if last_hit == 0.0:
+        return False
+    return now - last_hit < suppress_duration
+
+
 def mob_feet(mob):
     """怪物脚底点 = bbox 底部中心。横版地面距离以脚底为准,不用框中心。"""
     return mob.x + mob.width / 2, mob.y + mob.height
