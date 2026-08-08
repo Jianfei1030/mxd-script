@@ -2376,5 +2376,59 @@ class TestDecisionLogVerticalFields(unittest.TestCase):
         self.assertIn('dy心=-30', line)              # 600 - 630
 
 
+class TestDetectCadence(unittest.TestCase):
+    """检测拍三态节流的接线(spec §3.1)。
+
+    几何:DEFAULT_CONFIG['角色名'] 为空 → 锚点恒为画面中心,不依赖存档帧。
+    """
+
+    def _task(self, **cfg):
+        """run() 全程走 mock:_detect_and_act 换成计数器,只验节流。
+        走位/坐椅/喝药全关,免得它们各自的计时器干扰 send_key 断言。"""
+        task = make_task(**{'攻击模式': '检测', '喝药开关': False,
+                            '走位开关': False, '坐椅开关': False,
+                            '攻击间隔(秒)': 0.7, '空闲刷新间隔(秒)': 0.3,
+                            '寻怪刷新间隔(秒)': 0.1, **cfg})
+        task._detect_and_act = MagicMock()
+        return task
+
+    def test_idle_detects_at_idle_interval_not_attack_interval(self):
+        """空闲时按 空闲刷新间隔(0.3) 检测,不再等 攻击间隔(0.7)。
+
+        这是本次修复的核心:起步寻怪只能在检测拍里发生,旧实现里
+        空闲期的检测拍是 0.7s 一次(spec §3.1)。"""
+        task = self._task()
+        task._last_detect = 1000.0
+        run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.2)
+        self.assertEqual(task._detect_and_act.call_count, 0)
+        run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.35)
+        self.assertEqual(task._detect_and_act.call_count, 1)
+
+    def test_attacking_keeps_attack_interval(self):
+        """在打时仍按 攻击间隔,负载不回归。"""
+        task = self._task()
+        task._last_detect = 1000.0
+        task._last_attack_present = True
+        run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.35)
+        self.assertEqual(task._detect_and_act.call_count, 0)
+        run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.75)
+        self.assertEqual(task._detect_and_act.call_count, 1)
+
+    def test_seeking_uses_seek_refresh_interval(self):
+        task = self._task()
+        task._last_detect = 1000.0
+        task._seek_dir = 'right'
+        run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.15)
+        self.assertEqual(task._detect_and_act.call_count, 1)
+
+    def test_last_seek_refresh_state_is_gone(self):
+        """_last_seek_refresh 随 elif 分支一起退休,不留死状态。"""
+        task = self._task()
+        self.assertFalse(hasattr(task, '_last_seek_refresh'))
+
+    def test_idle_interval_has_a_default(self):
+        self.assertEqual(DEFAULT_CONFIG['空闲刷新间隔(秒)'], 0.3)
+
+
 if __name__ == '__main__':
     unittest.main()

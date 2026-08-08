@@ -54,6 +54,7 @@ DEFAULT_CONFIG = {
     '寻怪同层容差(像素)': 60,
     '寻怪刷新间隔(秒)': 0.4,
     '寻怪外推速度(像素/秒)': 250,
+    '空闲刷新间隔(秒)': 0.3,
     '玩家宽(像素)': 60,
     '玩家高(像素)': 120,
     '模板分片匹配开关': True,
@@ -171,6 +172,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '寻怪开关': '同层有怪但都在攻击区外时,自动朝最近的怪走近并攻击(仅检测模式)',
             '寻怪同层容差(像素)': '判定"同一层"的高度容差:怪脚底与角色名字牌高度差在此范围内才走近,避免追到别的平台',
             '寻怪刷新间隔(秒)': '寻怪中刷新目标方向的最小间隔:越小追怪换目标/接战越快,但 YOLO 跑得越勤;空闲与原地攻击时不受影响',
+            '空闲刷新间隔(秒)': '既不在打也不在追时,多久跑一次检测拍。**「起步寻怪」只能在检测拍里发生,所以这个值直接决定「停手到迈腿」有多快。**旧实现里这一步被绑在 攻击间隔 上(0.7s),而 寻怪刷新间隔 只能刷新一个已经存在的寻怪、发起不了新的,所以把它调小对起步毫无作用——2026-08-08 实测停手→起步中位 1.19s、p90 3.61s,屏幕上有怪却既不打也不追的时间占 25.2%。默认 0.3:一个完整检测拍(模板/OCR+YOLO+朝向观测)实测耗时中位 0.178s、p90 0.286s,10Hz 主循环实际只跑得到 5.6Hz,取 0.1 只会把 CPU 打满而并不会更快。调回 0.7 = 旧行为',
             '寻怪外推速度(像素/秒)': '寻怪中名字牌被怪遮挡、OCR 连续失败时,攻击区按此速度跟随走动中的角色(水平外推),怪进区即可接战;名字牌一露头快通道立刻重新咬住。无实测速度时用此值,实测行走速度约 250',
             '玩家宽(像素)': '仅用于调试可视化画框(勾选 GUI「启用标记框」时显示),不影响攻击判定',
             '玩家高(像素)': '同「玩家宽(像素)」,仅调试画框用',
@@ -229,7 +231,6 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_hit = 0.0          # 上次受击(作废朝向)时刻;受击防抖用,0.0 哨兵=从未受击
         self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
         self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
-        self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
         self._seek_key = None         # 寻怪长按中按下的方向键名('左移键'/'右移键');None=未按住
         self._seek_start_body_x = None    # 本次寻怪长按起点的 body_x,走动确认用
         self._last_body_x = None          # 上一检测拍的身体中心 x,走动确认起算用
@@ -649,10 +650,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._seek_dir = farm_logic.seek_direction(entries, body[0], anchor_hit.y,
                                                            cfg['寻怪同层容差(像素)'], prev_seek)
                 if self._seek_dir is not None:
-                    # 寻怪本身就在移动=活动中,防挂机走位倒计时顺延;
-                    # 刷新节流也从这一拍起算,避免启动后第一拍立即重复刷新
+                    # 寻怪本身就在移动=活动中,防挂机走位倒计时顺延
                     self._last_walk = now
-                    self._last_seek_refresh = now
         if cfg.get('决策日志开关'):
             self._log_decision(source, anchor_hit, body, zone, attack_area, centres, mobs,
                                raw_present, mob_present, self._last_attack_present,
@@ -952,16 +951,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         # 4. 攻击
         if cfg['攻击模式'] == '检测':
-            # 完整检测拍(OCR 锚点 + YOLO)按攻击间隔节流;寻怪激活时另用更快的
-            # 刷新间隔(默认 0.4s)重算方向/接战——目标死了/换近了不用等满攻击间隔
-            if farm_logic.should_attack(now, self._last_detect, cfg['攻击间隔(秒)']):
+            # 检测拍三态节流:在打→攻击间隔;在追→寻怪刷新间隔;空闲→空闲刷新间隔。
+            # 空闲那一档是「起步寻怪」唯一的入口 —— 旧实现把它绑在攻击间隔上,
+            # 而快通道要求 _seek_dir 已经不是 None,只能刷新已有寻怪、
+            # 发起不了新的(spec §3.1)
+            if farm_logic.should_detect(
+                    now, self._last_detect,
+                    bool(self._last_attack_present), self._seek_dir is not None,
+                    cfg['攻击间隔(秒)'], cfg['寻怪刷新间隔(秒)'],
+                    cfg['空闲刷新间隔(秒)']):
                 self._last_detect = now
-                self._detect_and_act(frame, now, cfg, keys)
-            elif cfg['寻怪开关'] and self._seek_dir is not None and farm_logic.should_attack(
-                    now, self._last_seek_refresh, cfg['寻怪刷新间隔(秒)']):
-                # 寻怪中快速刷新:只重跑找怪(锚点走缓存/快通道),方向立即更新;
-                # 怪进攻击区立即停追接战,攻击长按同步接管,不留空档
-                self._last_seek_refresh = now
                 self._detect_and_act(frame, now, cfg, keys)
             # 攻击/寻怪移动:区内有怪 → 长按攻击键连续挥砍;寻怪 → 长按方向键。
             # 各自在条件不成立时松键(无怪/接战/无同层怪/开关关/切模式)
