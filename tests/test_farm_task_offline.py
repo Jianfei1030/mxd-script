@@ -2176,8 +2176,11 @@ class TestFacingObserver(unittest.TestCase):
         task._seek_dir = 'right'
         task._seek_start_body_x = 1000.0
         with patch('src.detect.facing.capture') as m:
+            # 必须带 text 的 AnchorHit:裸 Anchor 没有 text 字段,会先死在 OCR
+            # 完整命中那道门,根本走不到 walk_confirmed —— 守卫就白写了
+            # (2026-08-08 评审发现,变异验证:删掉守卫后此测试必须失败)。
             task._maybe_capture_facing_template(_synthetic_frame(),
-                                                anchor.Anchor(1010.0, 720.0, 130),
+                                                anchor.AnchorHit(1010.0, 720.0, 130, 'Yufeng咕咕'),
                                                 'window', 'Yufeng咕咕')
         m.assert_not_called()      # 只走了 10px < 40
 
