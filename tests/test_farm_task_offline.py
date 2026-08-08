@@ -2118,5 +2118,95 @@ class TestDirectionalDecisionLog(unittest.TestCase):
             self.assertLessEqual(attack, engage, line)
 
 
+class TestFacingObserver(unittest.TestCase):
+    """朝向观测器是只读的:它绝不能改变任何决策。"""
+
+    def test_observer_off_by_default(self):
+        task = make_task()
+        self.assertFalse(task.config['朝向观测开关'])
+
+    def test_no_observation_when_switch_off(self):
+        task = make_task()
+        task.config['朝向观测开关'] = False
+        with patch('src.detect.facing.observe') as m:
+            task._detect_and_act(_synthetic_frame(), 100.0, task.config, KEYS)
+        m.assert_not_called()
+
+    def test_no_observation_on_cached_anchor(self):
+        """cached/fallback 的锚点会让 ROI 整体错位(附录 A.3),不许观测。"""
+        task = make_task()
+        task.config['朝向观测开关'] = True
+        task._facing_template = np.zeros((66, 58), dtype=np.uint8)
+        task._facing_template_dir = 'RIGHT'
+        with patch.object(task, '_resolve_anchor',
+                          return_value=(anchor.Anchor(1280.0, 720.0, 130), 'cached')), \
+             patch('src.detect.facing.observe') as m:
+            task._detect_and_act(_synthetic_frame(), 100.0, task.config, KEYS)
+        m.assert_not_called()
+
+    def test_observation_never_writes_facing(self):
+        """本设计的核心约束:观测结果只进日志,永不写回 _facing。"""
+        task = make_task()
+        task.config['朝向观测开关'] = True
+        task._facing = 'LEFT'
+        task._facing_template = np.zeros((66, 58), dtype=np.uint8)
+        task._facing_template_dir = 'RIGHT'
+        with patch.object(task, '_resolve_anchor',
+                          return_value=(anchor.Anchor(1280.0, 720.0, 130), 'window')), \
+             patch('src.detect.facing.observe', return_value=('RIGHT', 0.88, 0.47)):
+            task._detect_and_act(_synthetic_frame(), 100.0, task.config, KEYS)
+        self.assertEqual(task._facing, 'LEFT')   # 观测说 RIGHT,信念不许被改
+
+    def test_observation_exception_does_not_propagate(self):
+        """观测器不能把挂机搞崩(与 YOLO/模板匹配同样处理)。"""
+        task = make_task()
+        task.config['朝向观测开关'] = True
+        task._facing_template = np.zeros((66, 58), dtype=np.uint8)
+        task._facing_template_dir = 'RIGHT'
+        with patch.object(task, '_resolve_anchor',
+                          return_value=(anchor.Anchor(1280.0, 720.0, 130), 'window')), \
+             patch('src.detect.facing.observe', side_effect=RuntimeError('boom')):
+            task._detect_and_act(_synthetic_frame(), 100.0, task.config, KEYS)   # 不抛即通过
+
+    def test_template_captured_only_after_confirmed_walk(self):
+        """位移没确认之前不许采模板 —— 采错方向后面所有观测全错。"""
+        task = make_task()
+        task.config['朝向观测开关'] = True
+        task._seek_key = '右移键'
+        task._seek_dir = 'right'
+        task._seek_start_body_x = 1000.0
+        with patch('src.detect.facing.capture') as m:
+            task._maybe_capture_facing_template(_synthetic_frame(),
+                                                anchor.Anchor(1010.0, 720.0, 130),
+                                                'window', 'Yufeng咕咕')
+        m.assert_not_called()      # 只走了 10px < 40
+
+    def test_template_captured_records_direction(self):
+        task = make_task()
+        task.config['朝向观测开关'] = True
+        task._seek_key = '右移键'
+        task._seek_dir = 'right'
+        task._seek_start_body_x = 1000.0
+        hit = anchor.AnchorHit(1100.0, 720.0, 130, 'Yufeng咕咕')
+        with patch('src.detect.facing.capture',
+                   return_value=np.ones((66, 58), dtype=np.uint8)), \
+             patch.object(anchor, 'save_template'):
+            task._maybe_capture_facing_template(_synthetic_frame(), hit, 'window', 'Yufeng咕咕')
+        self.assertEqual(task._facing_template_dir, 'RIGHT')
+        self.assertIsNotNone(task._facing_template)
+
+    def test_template_not_captured_on_partial_ocr(self):
+        """部分匹配 'ng咕咕' 的框中心系统性右偏(附录 A.3),裁出来是草地和宠物脸。"""
+        task = make_task()
+        task.config['朝向观测开关'] = True
+        task._seek_key = '右移键'
+        task._seek_dir = 'right'
+        task._seek_start_body_x = 1000.0
+        hit = anchor.AnchorHit(1100.0, 720.0, 130, 'ng咕咕')
+        with patch('src.detect.facing.capture') as m:
+            task._maybe_capture_facing_template(_synthetic_frame(), hit, 'window', 'Yufeng咕咕')
+        m.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

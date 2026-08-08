@@ -8,7 +8,7 @@ from PySide6.QtGui import QColor, QPen
 
 from ok import Logger, TriggerTask
 from ok.gui.Communicate import communicate
-from src.detect import anchor, bars, guards, ocr_engine, potions
+from src.detect import anchor, bars, facing, guards, ocr_engine, potions
 from src.task import farm_logic
 from src.task.BaseMapleTask import BaseMapleTask
 
@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
     '转向冷却(秒)': 1.5,
     '受击防抖(秒)': 1.0,
     '硬直抑制窗(秒)': 0.0,
+    '朝向观测开关': False,
     '决策日志开关': False,
 }
 
@@ -80,6 +81,9 @@ NAMETAG_TEMPLATE_PAD = 12      # 模板裁剪两侧边距(文字框外留白)
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
 DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
 TURN_TAP_SECONDS = 0.05  # 转向轻点:方向键按 50ms 即翻转朝向,位移可忽略(约几像素,方向随怪侧轮换不累积)
+FACING_TEMPLATE_DIR = 'screenshots/facing_templates'  # 朝向模板持久化目录(灰度头+肩)
+_FACING_SHORT = {'LEFT': 'L', 'RIGHT': 'R'}   # 决策行里 实测= 字段的短写
+FACING_CAPTURE_MIN_DX = 40   # 采朝向模板要求的最小确认位移(像素):角色真走了这么远,朝向才是观测出来的而不是猜的
 
 DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
 PLAYER_COLOR = QColor(0, 255, 0)
@@ -128,6 +132,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '转向冷却(秒)': '两次转向之间的最小间隔。攻击区里常常只有一只怪,而它反复在身体左右两侧之间换,不加冷却角色就原地左右扭(实测转向 17 次里 12 次是反向)。要大于一次施法时间才压得住;设太大则怪真绕到背后时反应慢。设 0 = 关掉',
             '受击防抖(秒)': '受击(HP 掉 2%+)事件的最小间隔。游戏受击后约 1 秒无敌,1 秒内不可能有新的真实掉血,但血条渐变动画会把一次掉血拆成多拍读数、每拍都触发受击——每次受击都会作废朝向并重置转向冷却,重复触发让冷却形同虚设,怪穿过时左右扭+打空。取 1 秒 = 游戏无敌时长,不会漏真受击。设 0 = 关掉防抖',
             '硬直抑制窗(秒)': '受击后多久内不按转向/攻击键。**默认 0 = 关闭,实测有害,别开**。原意是躲开击退硬直(硬直中按键被游戏吞掉,但转向代码照常盲写朝向 → 信念分叉打空),但 2026-08-08 逐拍实测证明它把问题放大了:受击会把 _facing 清成 None,而 facing_half_zone 在 None 时退化成整个对称区,于是抑制窗禁止转向的这段时间里,有向攻击区失效、照常朝背后的怪开火。设 0.8 时「朝向未知」占挂机时间 23.3%、受击到下次成功转向中位 1.55s;设 0 后回落到 8.1% / 0.70s(四条事先写死的判据全过)。真正的解法是「只在角色可操作的时刻发键」,见 docs/superpowers/specs/2026-08-08-facing-observer-design.md §6。保留此项只为复现当时的对照实验',
+            '朝向观测开关': '只读排查用:每个锚点真命中的检测拍,用模板匹配读出角色**真实**朝向,与信念朝向一起写进决策日志(字段 实测= / 分值=),不一致时另写一行「朝向分歧」。它不改变任何决策,纯粹是尺子——_facing 是纯信念,项目在它上面改过四轮却一直没有直接证据。开着会在没模板时先等一次寻怪走动来采模板(要求沿按键方向真走够 40px,避免用信念标定模板)。需要同时开 决策日志开关。排完记得关',
             '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、可打区内怪数、可打、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
         self._reset_state()
@@ -176,10 +181,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
         self._last_seek_refresh = 0.0  # 寻怪中快速刷新目标方向的节流时刻
         self._seek_key = None         # 寻怪长按中按下的方向键名('左移键'/'右移键');None=未按住
+        self._seek_start_body_x = None    # 本次寻怪长按起点的 body_x,走动确认用
+        self._last_body_x = None          # 上一检测拍的身体中心 x,走动确认起算用
         self._attack_held = False     # 攻击键是否长按中(检测模式,区内有怪时按住连续挥砍)
         self._sitting = False         # 本轮闲置是否已按过椅子键(再按一次会起身,只能按一次)
         self._last_busy = 0.0         # 最近一次"忙"(攻击/寻怪/走位)时刻,坐椅延迟按它算
         self._nametag_template = None  # 白字二值化名字牌模板(模板分片匹配快通道用),None=尚未捕获
+        self._facing_template = None      # 朝向模板(灰度 58x66);None=还没采到
+        self._facing_template_dir = None  # 模板自身朝向 'LEFT'/'RIGHT';None=未知
         self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
 
     def enable(self):
@@ -258,6 +267,61 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             anchor.save_template(tmpl, os.path.join(NAMETAG_TEMPLATE_DIR, f'{name}.png'))
         except Exception as e:
             self.log_error(f'名字牌模板落盘失败(不影响本次运行,下次完整命中会再存): {e!r}')
+
+    def _maybe_capture_facing_template(self, frame, hit, source, name):
+        """采朝向模板:只在「寻怪长按 + 位移已确认 + OCR 完整命中 + 还没模板」时采。
+
+        模板自带朝向,而 `s > s_flip` 只说明「与模板同向」——要换算成 L/R 就必须
+        知道模板本身朝哪边。**不能用 `_facing` 标定**(那正是被检验的对象,循环论证),
+        所以改用位移观测:寻怪是长按方向键连续走,角色真的沿按键方向走了
+        FACING_CAPTURE_MIN_DX 像素,它就必定面朝那边(见 farm_logic.walk_confirmed)。
+
+        OCR 完整命中这道门与 _capture_nametag_template 同源:部分匹配 'ng咕咕' 的
+        框中心系统性右偏,裁出来的 ROI 是草地和宠物脸(附录 A.3,第一次实验因此作废)。
+        """
+        if self._facing_template is not None:
+            return
+        if source not in ('window', 'region'):
+            return
+        if (getattr(hit, 'text', '') or '').strip() != name:
+            return
+        if not farm_logic.walk_confirmed(self._seek_dir, self._seek_start_body_x,
+                                         anchor.body_center(hit, self.config['名字牌到身体偏移(像素)'])[0],
+                                         FACING_CAPTURE_MIN_DX):
+            return
+        tmpl = facing.capture(frame, hit)
+        if tmpl is None:
+            return
+        self._facing_template = tmpl
+        self._facing_template_dir = 'LEFT' if self._seek_dir == 'left' else 'RIGHT'
+        self.log_info(f'朝向模板已采集 方向={self._facing_template_dir} '
+                      f'(寻怪走动确认 ≥{FACING_CAPTURE_MIN_DX}px)')
+        try:
+            os.makedirs(FACING_TEMPLATE_DIR, exist_ok=True)
+            suffix = 'L' if self._facing_template_dir == 'LEFT' else 'R'
+            anchor.save_template(tmpl, os.path.join(
+                FACING_TEMPLATE_DIR, f'{name}_{suffix}.png'))
+        except Exception as e:
+            self.log_error(f'朝向模板落盘失败(不影响本次运行): {e!r}')
+
+    def _observe_facing(self, frame, hit, source):
+        """一次只读朝向观测 → (朝向, s, s_flip)。任何失败都返回 (None, 0.0, 0.0)。
+
+        **结果绝不写回 `_facing`、绝不参与决策**(spec §3.4)——观测器自己都还没被
+        验证过,先让它证明自己看得准。异常一律吞掉,观测器不能把挂机搞崩。
+        """
+        if not self.config.get('朝向观测开关'):
+            return None, 0.0, 0.0
+        if source not in ('window', 'region', 'template'):
+            return None, 0.0, 0.0   # cached/fallback 的锚点会让 ROI 整体错位
+        if self._facing_template is None:
+            return None, 0.0, 0.0
+        try:
+            return facing.observe(frame, hit, self._facing_template,
+                                  self._facing_template_dir)
+        except Exception as e:
+            self._log_detect_error(time.time(), '朝向观测', e)
+            return None, 0.0, 0.0
 
     def _resolve_anchor(self, frame, now, cfg):
         """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
@@ -437,6 +501,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         按"_last_attack_present"以 攻击间隔 轻点。"""
         anchor_hit, source = self._resolve_anchor(frame, now, cfg)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
+        self._last_body_x = body[0]          # 走动确认要用
+        if cfg.get('朝向观测开关'):
+            self._maybe_capture_facing_template(
+                frame, anchor_hit, source, (cfg['角色名'] or '').strip())
+        observed, obs_s, obs_flip = self._observe_facing(frame, anchor_hit, source)
         zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
         # 有向攻击区 = 接敌区的面朝侧一半(spec §4)。zone 从此是「接敌区」:
         # 管转向/寻怪/坐椅/走位;attack_area 管「能不能打」,只喂 _do_attack。
@@ -523,10 +592,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         if cfg.get('决策日志开关'):
             self._log_decision(source, anchor_hit, body, zone, attack_area, centres,
                                raw_present, mob_present, self._last_attack_present,
-                               facing_before, turn)
+                               facing_before, turn, observed, obs_s, obs_flip)
 
     def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres,
-                      raw_present, mob_present, attack_present, facing_before, turn):
+                      raw_present, mob_present, attack_present, facing_before, turn,
+                      observed, obs_s, obs_flip):
         """逐拍决策留痕(默认关,见配置 决策日志开关)。
 
         排"左右转向不攻击"时必须知道:锚点是哪条通道给的(fallback/cached 说明角色
@@ -544,7 +614,18 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             f'可打区内={len(attack_in)} 可打={attack_present} '
             f'朝向={facing_before or "-"}→{self._facing or "-"} '
             f'转向={turn or "-"} 寻怪={self._seek_dir or "-"} '
-            f'可发键={self._key_sendable()}')
+            f'可发键={self._key_sendable()} '
+            f'实测={_FACING_SHORT.get(observed, "?")} '
+            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}')
+        if observed is not None and facing_before in ('LEFT', 'RIGHT') \
+                and observed != facing_before:
+            now = time.time()
+            self.log_debug(
+                f'朝向分歧 信念={facing_before} 实测={observed} '
+                f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f} '
+                f'距上次攻击={now - self._last_attack:.2f}s '
+                f'距上次受击={now - self._last_hit:.2f}s '
+                f'距上次转向={now - self._last_turn:.2f}s')
 
     def _do_walk(self, keys):
         """防挂机走位:两段方向由朝向决定(先反方向出、朝原方向回),结束时朝向不翻转
@@ -621,6 +702,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             key = '左移键' if self._seek_dir == 'left' else '右移键'
             if self._seek_key is not None and self._seek_key != key:
                 self.send_key_up(keys[self._seek_key])  # 换向:先松旧键
+            if self._seek_key != key:
+                # 换向/首次按下:重记起点,走动确认要从这一刻起算
+                self._seek_start_body_x = self._last_body_x
             self.send_key_down(keys[key])
             self._seek_key = key
             # 方向键没真送进游戏时不推进朝向信念(同 _key_sendable 的说明):
@@ -641,6 +725,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         except Exception as e:
             self.log_error(f'松开寻怪方向键失败: {e!r}')
         self._seek_key = None
+        self._seek_start_body_x = None
 
     def _release_attack_key(self):
         """松开攻击长按(没按着就无事可做)。尽力而为:任何失败都只记日志
