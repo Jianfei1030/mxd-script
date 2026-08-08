@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
     '转向冷却(秒)': 1.5,
     '受击防抖(秒)': 1.0,
     '硬直抑制窗(秒)': 0.0,
+    '朝向纠正开关': True,
     '朝向观测开关': False,
     '决策日志开关': False,
 }
@@ -168,6 +169,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '转向冷却(秒)': '两次转向之间的最小间隔。攻击区里常常只有一只怪,而它反复在身体左右两侧之间换,不加冷却角色就原地左右扭(实测转向 17 次里 12 次是反向)。要大于一次施法时间才压得住;设太大则怪真绕到背后时反应慢。设 0 = 关掉',
             '受击防抖(秒)': '受击(HP 掉 2%+)事件的最小间隔。游戏受击后约 1 秒无敌,1 秒内不可能有新的真实掉血,但血条渐变动画会把一次掉血拆成多拍读数、每拍都触发受击——每次受击都会作废朝向并重置转向冷却,重复触发让冷却形同虚设,怪穿过时左右扭+打空。取 1 秒 = 游戏无敌时长,不会漏真受击。设 0 = 关掉防抖',
             '硬直抑制窗(秒)': '受击后多久内不按转向/攻击键。**默认 0 = 关闭,实测有害,别开**。原意是躲开击退硬直(硬直中按键被游戏吞掉,但转向代码照常盲写朝向 → 信念分叉打空),但 2026-08-08 逐拍实测证明它把问题放大了:受击会把 _facing 清成 None,而 facing_half_zone 在 None 时退化成整个对称区,于是抑制窗禁止转向的这段时间里,有向攻击区失效、照常朝背后的怪开火。设 0.8 时「朝向未知」占挂机时间 23.3%、受击到下次成功转向中位 1.55s;设 0 后回落到 8.1% / 0.70s(四条事先写死的判据全过)。真正的解法是「只在角色可操作的时刻发键」,见 docs/superpowers/specs/2026-08-08-facing-observer-design.md §6。保留此项只为复现当时的对照实验',
+            '朝向纠正开关': '观测到角色真实朝向与信念不符时,以观测为准写回。_facing 原本是纯信念(只有"我们自己按了方向键所以认为转过去了"这一种写入),键被游戏吞掉就会与现实分叉、朝空处放技能。2026-08-08 实弹 30 分钟:观测器可用率 77.3%、随机噪声 0.4%(事先写死的线是 >=50% 与 <=5%),够格当纠正依据。它同时接管了「受击作废朝向」原本顺带提供的破死锁作用,所以那行清空已经删掉。依赖朝向模板,模板要等第一次寻怪走动确认才采得到,在那之前不生效(行为同改动前)。关掉 = 观测器退回只读',
             '朝向观测开关': '只读排查用:每个锚点真命中的检测拍,用模板匹配读出角色**真实**朝向,与信念朝向一起写进决策日志(字段 实测= / 分值=),不一致时另写一行「朝向分歧」。它不改变任何决策,纯粹是尺子——_facing 是纯信念,项目在它上面改过四轮却一直没有直接证据。开着会在没模板时先等一次寻怪走动来采模板(要求沿按键方向真走够 40px,避免用信念标定模板)。需要同时开 决策日志开关。排完记得关',
             '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、可打区内怪数、可打、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
@@ -343,10 +345,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def _observe_facing(self, frame, hit, source):
         """一次只读朝向观测 → (朝向, s, s_flip)。任何失败都返回 (None, 0.0, 0.0)。
 
-        **结果绝不写回 `_facing`、绝不参与决策**(spec §3.4)——观测器自己都还没被
-        验证过,先让它证明自己看得准。异常一律吞掉,观测器不能把挂机搞崩。
+        观测的**计算**在「纠正开关 或 观测开关」任一为真时执行;`朝向观测开关`
+        此后只管**日志详略**(见配置说明)。这样纠正作为常驻功能可用,不必逼用户
+        为了用它去打开排查级日志。异常一律吞掉,观测器不能把挂机搞崩。
         """
-        if not self.config.get('朝向观测开关'):
+        if not (self.config.get('朝向纠正开关')
+                or self.config.get('朝向观测开关')):
             return None, 0.0, 0.0
         if source not in ('window', 'region', 'template'):
             return None, 0.0, 0.0   # cached/fallback 的锚点会让 ROI 整体错位
@@ -542,6 +546,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._maybe_capture_facing_template(
                 frame, anchor_hit, source, (cfg['角色名'] or '').strip())
         observed, obs_s, obs_flip = self._observe_facing(frame, anchor_hit, source)
+        # 纠正前的信念必须先存下来:它是判据 C 的尺子。纠正之后 self._facing
+        # 恒等于 observed,分歧行就永远不会触发了——修复会把测量它的仪器弄瞎,
+        # 之后没人分得清分叉率是真降了还是只是看不见了(spec §3.4)。
+        belief_before_obs = self._facing
+        # 朝向纠正:观测给出答案就以它为准。位置是关键——必须在下面
+        # facing_half_zone 取用 self._facing 之前,晚一行本拍攻击区仍按错朝向算,
+        # 白纠正一拍(spec §3.2)。判据 A=77.3%/B=0.4% 已放行写回(spec §2.1)。
+        if (cfg.get('朝向纠正开关') and observed is not None
+                and observed != self._facing):
+            self._facing = observed
         zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
         # 有向攻击区 = 接敌区的面朝侧一半(spec §4)。zone 从此是「接敌区」:
         # 管转向/寻怪/坐椅/走位;attack_area 管「能不能打」,只喂 _do_attack。
@@ -582,7 +596,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                              attack_present=self._last_attack_present)
         else:
             self._clear_debug()
-        facing_before, turn = self._facing, None
+        # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种
+        # 变化(A=纠正前、B=本拍结束),分歧行也据它判(spec §3.4)。
+        facing_before, turn = belief_before_obs, None
         if mob_present:
             self._seek_dir = None  # 怪进攻击区了,停追,原地攻击
             # 先松开寻怪长按的方向键:长按没松的话,下面的转向轻点会被"还在走"吞掉,
@@ -851,8 +867,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 # 将来把位移信号也接上后可能为 None,这里先兜住。
                 before = '?' if self._prev_hp is None else f'{self._prev_hp:.1%}'
                 self.log_debug(f'受击 hp={before}→{hp:.1%} '
-                               f'朝向={self._facing or "-"}→- 信念作废,转向冷却重置')
-            self._facing = None
+                               f'朝向={self._facing or "-"}(保留) 转向冷却重置')
+            # 这里曾有 self._facing = None(作废朝向)。删掉的理由:它的唯一前提
+            # 「受击可能让朝向失效」已被观测数据证伪——52 个分歧事件按「距上次受击」
+            # 分桶,受击后 0.5s 内一次都没有,分布随时间单调上升(spec §2.2)。
+            # 而清空的代价是确定的:facing_half_zone 在 None 时退化成整个对称区,
+            # 实测 19 拍「面朝侧一只怪都没有却照常开火」(用实测朝向反判,spec §2.3)。
+            # 它顺带提供的「打破目标侧锁定死锁」由朝向纠正正面接管(spec §3.3)。
             self._last_turn = 0.0
             self._last_hit = now
         self._prev_hp = hp

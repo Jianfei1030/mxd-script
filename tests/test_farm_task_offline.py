@@ -1853,8 +1853,15 @@ class TestKnockbackReset(unittest.TestCase):
     50ms 是 no-op(已面朝该侧按方向键零代价)。
     """
 
-    def test_hp_drop_resets_facing_and_turn_cooldown(self):
-        """掉血超阈值 → 朝向置 None + 转向冷却重置(0.0 哨兵天然放行)。"""
+    def test_hp_drop_keeps_facing_and_resets_turn_cooldown(self):
+        """掉血超阈值 → 转向冷却重置,但**朝向保留**。
+
+        2026-08-08 改:此用例原先断言 `_facing is None`(受击作废朝向)。那行清空
+        已经删掉——它的唯一前提「受击可能让朝向失效」被观测数据证伪(52 个分歧
+        事件里受击后 0.5s 内一次都没有),而清空的代价是确定的:facing_half_zone
+        在 None 时退化成整个对称区,实测 19 拍朝背后开火。见
+        docs/superpowers/specs/2026-08-08-facing-correction-design.md §2.2/§2.3。
+        `_last_turn = 0.0` 未动,仍在本用例的断言里。"""
         task = make_task(**{'攻击模式': '检测'})
         task._facing = 'LEFT'
         task._last_turn = 99.9  # 0.1s 前刚转过向,1.5s 冷却未过
@@ -1862,8 +1869,8 @@ class TestKnockbackReset(unittest.TestCase):
         self.assertEqual(task._prev_hp, 0.5)
         self.assertEqual(task._facing, 'LEFT')  # 没受击,朝向不动
         run_with_frame(task, hp=0.3)   # 掉血 20% → 受击
-        self.assertIsNone(task._facing)          # 朝向失效
-        self.assertEqual(task._last_turn, 0.0)   # 冷却重置,下拍可立即补转向
+        self.assertEqual(task._facing, 'LEFT')   # 受击不作废朝向
+        self.assertEqual(task._last_turn, 0.0)   # 冷却仍重置,下拍可立即补转向
 
     def test_small_hp_drop_keeps_facing(self):
         """微小掉血(≤2%,读数噪声)→ 不算受击,朝向不动。"""
@@ -2144,9 +2151,14 @@ class TestFacingObserver(unittest.TestCase):
             task._detect_and_act(_synthetic_frame(), 100.0, task.config, KEYS)
         m.assert_not_called()
 
-    def test_observation_never_writes_facing(self):
-        """本设计的核心约束:观测结果只进日志,永不写回 _facing。"""
-        task = make_task()
+    def test_observation_never_writes_facing_when_correction_off(self):
+        """纠正关掉时,观测器必须退回纯只读:结果只进日志,不碰 _facing。
+
+        2026-08-08 改:此用例原先不带 `朝向纠正开关=False`,断言的是「观测永不
+        写回」。观测器已按事先写死的判据(A=77.3%≥50%、B=0.4%≤5%)升级成纠正器,
+        写回是它现在的正常职责;这条改为守「关掉开关就退回只读」这个退路。
+        纠正本身的行为由 TestFacingCorrection 覆盖。"""
+        task = make_task(朝向纠正开关=False)
         task.config['朝向观测开关'] = True
         task._facing = 'LEFT'
         task._facing_template = np.zeros((66, 58), dtype=np.uint8)
@@ -2209,6 +2221,101 @@ class TestFacingObserver(unittest.TestCase):
         with patch('src.detect.facing.capture') as m:
             task._maybe_capture_facing_template(_synthetic_frame(), hit, 'window', 'Yufeng咕咕')
         m.assert_not_called()
+
+
+class TestFacingCorrection(unittest.TestCase):
+    """朝向纠正(spec 2026-08-08-facing-correction-design)。
+
+    几何前提照 memory:角色名为空串 → 锚点回退画面中心 (1280,720)、
+    身体 (1280,630)、默认接敌区 x∈[980,1580] y∈[530,730]。
+
+    隔离要点:区内有怪时,既有的转向逻辑自己就会翻 _facing,纠正与转向的
+    效果分不开。所以除「攻击区」那条外一律用**空区**(find_mobs 返回 [])——
+    mob_present=False 时整个转向分支被跳过,_facing 只可能被纠正改动。
+    """
+
+    LEFT_MOB = SimpleNamespace(x=1120, y=570, width=80, height=120)  # 中心 (1160,630),身体左侧
+
+    def _task(self, mobs=(), **cfg):
+        task = make_task(决策日志开关=True, **cfg)
+        task._facing = 'LEFT'
+        task._facing_template = np.zeros((66, 58), dtype=np.uint8)
+        task._facing_template_dir = 'RIGHT'
+        task.find_mobs = MagicMock(return_value=list(mobs))
+        return task
+
+    def _run(self, task, observed='RIGHT', source='window'):
+        with patch.object(task, '_resolve_anchor',
+                          return_value=(anchor.Anchor(1280.0, 720.0, 130), source)),              patch('src.detect.facing.observe',
+                   return_value=(observed, 0.88, 0.47)),              patch('time.time', return_value=200.0):
+            task._detect_and_act(_synthetic_frame(), 200.0, task.config, KEYS)
+
+    def test_hit_does_not_clear_facing(self):
+        """受击不再作废朝向:52 个分歧事件里受击后 0.5s 内一次都没有,
+        「受击会翻朝向」这个唯一前提已被观测数据证伪(spec §2.2)。"""
+        task = make_task()
+        task._facing = 'LEFT'
+        task._prev_hp = 0.90
+        run_with_frame(task, hp=0.80, now=200.0)
+        self.assertGreater(task._last_hit, 0.0, '前置:这一拍必须真判成受击')
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_correction_writes_observed_facing(self):
+        """空区(不会转向)下信念只可能被纠正改动。"""
+        task = self._task()
+        self._run(task)
+        self.assertEqual(task._facing, 'RIGHT')
+
+    def test_correction_applies_to_this_tick_attack_area(self):
+        """纠正必须落在 facing_half_zone 取用 _facing 之前 —— 晚一行,
+        本拍攻击区仍按错朝向算,白纠正一拍。
+
+        场景就是实测到的 A 类危害:怪在左、信念也说左(目标侧锁定 → 不转向),
+        而角色实际朝右。不纠正 → 攻击区=左半区 → 怪在区内 → 可打=True →
+        朝右边空处放技能。纠正后攻击区=右半区 → 怪不在区内 → 不开火。
+        (断言 _facing 在这里无效:纠正后转向逻辑本拍就会把它翻回来)"""
+        task = self._task(mobs=[self.LEFT_MOB])
+        self._run(task)
+        self.assertFalse(task._last_attack_present)
+
+    def test_correction_off_keeps_belief(self):
+        task = self._task(朝向纠正开关=False)
+        self._run(task)
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_divergence_line_uses_pre_correction_belief(self):
+        """纠正会让 facing_before 恒等于纠正后的值,朝向分歧行永不触发 ——
+        修复把测量它的仪器弄瞎了(spec §3.4)。分歧行必须用纠正前的信念。
+
+        变异守卫:把 divergence_log_line 的传参改成纠正后的信念,本用例必须红。
+        分歧行归「日志详略」管(spec §3.5),所以要显式开 朝向观测开关。"""
+        task = self._task(朝向观测开关=True)
+        self._run(task)
+        lines = [c.args[0] for c in task.log_debug.call_args_list if c.args]
+        div = [l for l in lines if '朝向分歧' in l]
+        self.assertEqual(len(div), 1, '纠正发生时必须仍然留下分歧记录')
+        self.assertIn('信念=LEFT', div[0])
+        self.assertIn('实测=RIGHT', div[0])
+
+    def test_abstain_leaves_belief_untouched(self):
+        task = self._task()
+        self._run(task, observed=None)
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_cached_anchor_does_not_correct(self):
+        """cached/fallback 锚点的 ROI 整体错位,不许据此纠正。"""
+        task = self._task()
+        self._run(task, source='cached')
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_no_template_does_not_correct(self):
+        """还没采到模板 → 不观测不纠正,行为与改动前一致。"""
+        task = self._task()
+        task._facing_template = None
+        with patch.object(task, '_resolve_anchor',
+                          return_value=(anchor.Anchor(1280.0, 720.0, 130), 'window')),              patch('time.time', return_value=200.0):
+            task._detect_and_act(_synthetic_frame(), 200.0, task.config, KEYS)
+        self.assertEqual(task._facing, 'LEFT')
 
 
 if __name__ == '__main__':
