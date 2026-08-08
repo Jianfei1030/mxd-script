@@ -409,3 +409,21 @@ def seek_direction(mob_entries, body_x, player_feet_y, tolerance, current_dir=No
         return current_dir
     nearest = min(same_floor_xs, key=lambda cx: abs(cx - body_x))
     return 'left' if nearest < body_x else 'right'
+
+
+def seek_persist(seek_raw, prev_seek, now, last_seen, grace):
+    """寻怪去抖:同层怪这一拍没检出,但距上次检出还在 grace 内 → 继续按上一拍方向走。
+
+    攻击侧早有 丢怪保持(mob_present_debounced),寻怪侧一直没有:2026-08-08 实测
+    344 段寻怪只有 40.4% 撑过 0.5 秒,其中 105 段(30.5%)起步与取消发生在同一拍
+    (持续中位 0.00s)——游戏里看就是原地抽搐。怪会跳、YOLO 框高每拍都在抖,
+    一拍判失就 send_key_up,角色根本走不出去(spec §2.2 / §3.3)。
+
+    grace <= 0 → 关掉去抖,退回「一拍判失立刻停」的旧行为。
+    prev_seek=None(上一拍没在追)或 last_seen=None(从没检出过同层怪)→ 不保持。
+    """
+    if seek_raw is not None:
+        return seek_raw
+    if grace <= 0 or prev_seek is None or last_seen is None:
+        return None
+    return prev_seek if now - last_seen <= grace else None

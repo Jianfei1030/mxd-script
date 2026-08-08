@@ -57,6 +57,24 @@ class TestFarmLogic(unittest.TestCase):
         # 与 should_attack 同口径:恰好到点就放行,别让浮点抖动多等一拍
         self.assertTrue(fl.should_detect(1000.5, 1000.0, False, False, 0.7, 0.1, 0.5))
 
+    def test_seek_persist_holds_through_a_missed_tick(self):
+        # 这一拍检出了 → 直接用这一拍的方向
+        self.assertEqual(fl.seek_persist('left', 'right', 100.0, 99.0, 0.5), 'left')
+        # 这一拍没检出,但距上次检出还在保持窗内 → 继续按上一拍方向走
+        self.assertEqual(fl.seek_persist(None, 'right', 100.3, 100.0, 0.5), 'right')
+        # 边界:恰好等于保持窗 → 仍然保持
+        self.assertEqual(fl.seek_persist(None, 'right', 100.5, 100.0, 0.5), 'right')
+        # 超出保持窗 → 停追
+        self.assertIsNone(fl.seek_persist(None, 'right', 100.6, 100.0, 0.5))
+
+    def test_seek_persist_degrades_safely(self):
+        # 上一拍本来就没在追 → 没什么可保持的
+        self.assertIsNone(fl.seek_persist(None, None, 100.1, 100.0, 0.5))
+        # 从没检出过同层怪
+        self.assertIsNone(fl.seek_persist(None, 'right', 100.1, None, 0.5))
+        # 保持窗 0 = 关掉去抖,退回旧行为(一拍判失立刻停)
+        self.assertIsNone(fl.seek_persist(None, 'right', 100.0, 100.0, 0.0))
+
     def test_potion_window_elapsed(self):
         self.assertFalse(fl.potion_window_elapsed(100.5, 100.0, 1.0))
         self.assertTrue(fl.potion_window_elapsed(101.0, 100.0, 1.0))  # 边界:恰好一个窗口 → 已过

@@ -2497,5 +2497,49 @@ class TestSeekNotBlockedByAttackGrace(unittest.TestCase):
                         DEFAULT_CONFIG['丢怪保持(秒)'])
 
 
+class TestSeekPersistWiring(unittest.TestCase):
+    """寻怪去抖的接线(spec §3.3)。几何同 TestSeekNotBlockedByAttackGrace。"""
+
+    def _task(self, **cfg):
+        return make_task(**{'攻击模式': '检测', '寻怪开关': True,
+                            '丢怪保持(秒)': 1.0, '寻怪起步宽限(秒)': 0.3,
+                            '寻怪保持(秒)': 0.5, **cfg})
+
+    @staticmethod
+    def _far_mob():
+        return SimpleNamespace(x=2160, y=592, width=80, height=80)
+
+    def test_keeps_walking_when_one_tick_misses_the_mob(self):
+        task = self._task()
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._detect_and_act(_synthetic_frame(), 1000.0, task.config, KEYS)
+        self.assertEqual(task._seek_dir, 'right')
+        # 下一拍 YOLO 一只都没检出 → 仍按上一拍方向走
+        task.find_mobs = MagicMock(return_value=[])
+        task._detect_and_act(_synthetic_frame(), 1000.3, task.config, KEYS)
+        self.assertEqual(task._seek_dir, 'right')
+
+    def test_gives_up_after_the_grace_expires(self):
+        task = self._task()
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._detect_and_act(_synthetic_frame(), 1000.0, task.config, KEYS)
+        task.find_mobs = MagicMock(return_value=[])
+        task._detect_and_act(_synthetic_frame(), 1000.6, task.config, KEYS)
+        self.assertIsNone(task._seek_dir)
+
+    def test_grace_zero_restores_old_behaviour(self):
+        task = self._task(**{'寻怪保持(秒)': 0.0})
+        task.find_mobs = MagicMock(return_value=[self._far_mob()])
+        task._detect_and_act(_synthetic_frame(), 1000.0, task.config, KEYS)
+        task.find_mobs = MagicMock(return_value=[])
+        task._detect_and_act(_synthetic_frame(), 1000.1, task.config, KEYS)
+        self.assertIsNone(task._seek_dir)
+
+    def test_default_is_below_the_attack_grace(self):
+        # 追错方向的代价高于挥空刀,不该保持得比丢怪保持还久
+        self.assertEqual(DEFAULT_CONFIG['寻怪保持(秒)'], 0.5)
+        self.assertLess(DEFAULT_CONFIG['寻怪保持(秒)'], DEFAULT_CONFIG['丢怪保持(秒)'])
+
+
 if __name__ == '__main__':
     unittest.main()
