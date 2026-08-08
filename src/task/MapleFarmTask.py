@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 from qfluentwidgets import FluentIcon
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPen
 
 from ok import Logger, TriggerTask
@@ -68,6 +68,12 @@ DEFAULT_CONFIG = {
     '朝向纠正开关': True,
     '朝向观测开关': False,
     '决策日志开关': False,
+    # 调试可视化开关（勾选 GUI「启用标记框」时显示）
+    '显示玩家框': True,
+    '显示攻击区': True,
+    '显示名字搜索范围': True,
+    '显示寻怪同层带': True,
+    '显示怪物框': True,
 }
 
 CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
@@ -143,6 +149,8 @@ ZONE_IDLE_COLOR = QColor(0, 128, 255)
 ZONE_HOT_COLOR = QColor(255, 0, 0)
 MOB_COLOR = QColor(255, 255, 0)
 MOB_FOOT_COLOR = QColor(0, 255, 255)
+ANCHOR_SEARCH_COLOR = QColor(0, 0, 255)   # 名字搜索范围框（蓝虚线）
+SEEK_BAND_COLOR = QColor(0, 255, 255)     # 寻怪同层高度带（青虚线）
 
 
 class MapleFarmTask(TriggerTask, BaseMapleTask):
@@ -500,7 +508,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self.log_error(f'调试 overlay 清除失败: {e!r}')
         self._debug_drawn = False
 
-    def _draw_debug(self, cfg, body, zone, attack_area, mobs, mob_present, attack_present):
+    def _draw_debug(self, cfg, body, zone, attack_area, mobs, mob_present, attack_present,
+                    search_region=None, feet_y=None, frame_w=None):
         """画玩家框(绿)/接敌区框(细,蓝=无怪红=有怪)/攻击区框(粗,同色)/怪物框(黄)+脚底点(青)。
         画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
         用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
@@ -515,31 +524,50 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         def paint(painter, widget):
             ratio = widget.frame_ratio()
+            # 每帧读最新配置（GUI 改开关后可能重建 dict 对象）
+            c = self.config
 
             def rect(x, y, w, h):
                 return QRectF(x * ratio, y * ratio, w * ratio, h * ratio)
 
-            painter.setPen(QPen(PLAYER_COLOR, 2))
-            painter.drawRect(rect(body[0] - pw / 2, body[1] - ph / 2, pw, ph))
-            painter.drawText(rect(body[0] - pw / 2, body[1] - ph / 2 - 20, 100, 20), '玩家')
+            # 名字搜索范围（蓝虚线）
+            if c.get('显示名字搜索范围', True) and search_region is not None:
+                painter.setPen(QPen(ANCHOR_SEARCH_COLOR, 2, Qt.PenStyle.DashLine))
+                painter.drawRect(rect(search_region[0], search_region[1],
+                                      search_region[2] - search_region[0],
+                                      search_region[3] - search_region[1]))
 
-            # 接敌区:细线,管转向/寻怪。攻击区:粗线,管按不按攻击键——
-            # 单体模式下它只占接敌区的面朝侧一半,视觉验收就看这个(判据 D)
-            painter.setPen(QPen(zone_color, 1))
-            painter.drawRect(rect(zx0, zy0, zx1 - zx0, zy1 - zy0))
-            painter.drawText(rect(zx0, zy0 - 20, 100, 20), '接敌区')
+            # 寻怪同层带（青虚线）
+            if c.get('显示寻怪同层带', True) and feet_y is not None and frame_w is not None:
+                tol = c.get('寻怪同层容差(像素)', 60)
+                painter.setPen(QPen(SEEK_BAND_COLOR, 2, Qt.PenStyle.DashLine))
+                painter.drawRect(rect(0, feet_y - tol, frame_w, 2 * tol))
 
-            painter.setPen(QPen(attack_color, 4))
-            painter.drawRect(rect(ax0, ay0, ax1 - ax0, ay1 - ay0))
-            painter.drawText(rect(ax0, ay1 + 4, 100, 20), '攻击区')
+            # 玩家框（绿）
+            if c.get('显示玩家框', True):
+                painter.setPen(QPen(PLAYER_COLOR, 2))
+                painter.drawRect(rect(body[0] - pw / 2, body[1] - ph / 2, pw, ph))
+                painter.drawText(rect(body[0] - pw / 2, body[1] - ph / 2 - 20, 100, 20), '玩家')
 
-            for mob in mobs:
-                painter.setPen(QPen(MOB_COLOR, 2))
-                painter.drawRect(rect(mob.x, mob.y, mob.width, mob.height))
-                painter.drawText(rect(mob.x, mob.y - 20, 100, 20), '怪物')
-                fx, fy = farm_logic.mob_feet(mob)
-                painter.setPen(QPen(MOB_FOOT_COLOR, 4))
-                painter.drawPoint(QPointF(fx * ratio, fy * ratio))
+            # 接敌区（细线）+ 攻击区（粗线）
+            if c.get('显示攻击区', True):
+                painter.setPen(QPen(zone_color, 1))
+                painter.drawRect(rect(zx0, zy0, zx1 - zx0, zy1 - zy0))
+                painter.drawText(rect(zx0, zy0 - 20, 100, 20), '接敌区')
+
+                painter.setPen(QPen(attack_color, 4))
+                painter.drawRect(rect(ax0, ay0, ax1 - ax0, ay1 - ay0))
+                painter.drawText(rect(ax0, ay1 + 4, 100, 20), '攻击区')
+
+            # 怪物框（黄）+ 脚底点（青）
+            if c.get('显示怪物框', True):
+                for mob in mobs:
+                    painter.setPen(QPen(MOB_COLOR, 2))
+                    painter.drawRect(rect(mob.x, mob.y, mob.width, mob.height))
+                    painter.drawText(rect(mob.x, mob.y - 20, 100, 20), '怪物')
+                    fx, fy = farm_logic.mob_feet(mob)
+                    painter.setPen(QPen(MOB_FOOT_COLOR, 4))
+                    painter.drawPoint(QPointF(fx * ratio, fy * ratio))
 
         overlay.draw(DEBUG_OVERLAY_KEY, paint)
         self._debug_drawn = True
@@ -625,9 +653,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._detect_attacking = farm_logic.mob_present_debounced(
             raw_attack, now, self._last_attack_seen, cfg['寻怪起步宽限(秒)'])
         if self._boxes_enabled():
+            w, h = frame.shape[1], frame.shape[0]
+            region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'],
+                                          cfg['锚点搜索区高(比例)'],
+                                          cfg['锚点搜索区中心Y(比例)'])
             self._draw_debug(cfg, body=body, zone=zone, attack_area=attack_area,
                              mobs=mobs, mob_present=mob_present,
-                             attack_present=self._last_attack_present)
+                             attack_present=self._last_attack_present,
+                             search_region=region, feet_y=anchor_hit.y, frame_w=w)
         else:
             self._clear_debug()
         # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种

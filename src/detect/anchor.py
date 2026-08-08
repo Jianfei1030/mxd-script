@@ -32,6 +32,12 @@ WHITE_LOW = 150            # 白字二值化下界:只留白字形(255),其余�
 TEMPLATE_MIN_WHITE = 10    # 模板/分片的最少白像素:全黑(黑帧/空片)没有可比的字形
 TEMPLATE_SPLITS = 2        # 竖切片数:怪的名字牌盖左半,右半片照样命中
 
+# OCR 预处理开关:名字牌是白字+黑描边+半透明底框,DB 检测器对高对比描边文字
+# 的边缘响应不稳,容易漏检小字(2026-08-08 实测:不配合模板匹配几乎找不到名字)。
+# 灰度 → CLAHE 增强局部对比 → 反转(白字变黑字、亮背景变暗),det 检测更稳。
+# 改 False 即回滚到原始彩色图直送 OCR,不依赖任何任务配置。
+OCR_PREPROCESS_ENABLED = True
+
 Anchor = namedtuple('Anchor', 'x y width')
 # 与 Anchor 同字段 + text:OCR 完整命中的文本,任务据此决定是否裁模板
 # (部分匹配 'ng咕咕' 是名字牌被挡的产物,裁出来是残缺牌子,不配当模板)
@@ -77,6 +83,23 @@ def tiles(region, tile_w=TILE_W, tile_h=TILE_H, overlap=TILE_OVERLAP):
     return out
 
 
+def _enhance_for_ocr(img):
+    """OCR 前置预处理:白字黑描边小字 → 高对比黑字白底。
+
+    名字牌是白字(255)+黑描边(0)+半透明底框,直接送 DB 检测器时描边与底框
+    会被一起当成文字边缘,小字(31px)容易漏检。处理链:
+      1. 灰度化
+      2. CLAHE 增强局部对比度(描边与文字本体对比拉满,背景亮度不均被抑制)
+      3. 反转 → 白字变黑字、深色背景变浅,贴合 DB 训练分布(黑字浅底)
+    尺寸不变,OCR 命中框坐标仍可直接换算回全帧坐标。
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    inverted = cv2.bitwise_not(enhanced)
+    return cv2.cvtColor(inverted, cv2.COLOR_GRAY2BGR)
+
+
 def _matches(text, target):
     """完全匹配,或被遮挡后只剩尾巴的部分匹配。
 
@@ -101,6 +124,8 @@ def _scan(frame, name, boxes, ocr_fn):
         crop = frame[y0:y1, x0:x1]
         if crop.size == 0:
             continue
+        if OCR_PREPROCESS_ENABLED:
+            crop = _enhance_for_ocr(crop)
         for hit in read_texts(crop, ocr_fn=ocr_fn):
             if _matches(hit.text, target):
                 return AnchorHit(x0 + hit.cx, y0 + hit.cy, hit.width, hit.text)

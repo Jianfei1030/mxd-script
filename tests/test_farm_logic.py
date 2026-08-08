@@ -374,6 +374,39 @@ class TestTargetSideLock(unittest.TestCase):
         self.assertEqual(fl.seek_direction(entries, 1280, 800, 60, current_dir=None), 'right')
 
 
+class TestNearestMobSide(unittest.TestCase):
+    """攻击前必转的方向依据:接敌区内最近怪的观测方向(不再读盲写 _facing)。
+
+    2026-08-08:信念被击退/按键丢失破坏后攻击区画错侧 → 怪不在区内 → 不攻击也无
+    修正机会,死锁。有向攻击区改为按观测怪方向画半区,怪必然落进攻击区。"""
+
+    ZONE = fl.attack_zone((1280, 630), 600, 200)   # x∈[980,1580], y∈[530,730]
+
+    def test_nearest_on_left_returns_left(self):
+        centres = [(1100, 640), (1500, 640)]
+        self.assertEqual(fl.nearest_mob_side(centres, self.ZONE, 1280), (1100, 'left'))
+
+    def test_nearest_on_right_returns_right(self):
+        centres = [(1000, 640), (1500, 640), (2000, 200)]
+        self.assertEqual(fl.nearest_mob_side(centres, self.ZONE, 1280), (1500, 'right'))
+
+    def test_mob_exactly_at_body_x_counts_as_right(self):
+        # 怪压身上:判边噪声不许引发左右横跳,固定按 right
+        self.assertEqual(fl.nearest_mob_side([(1280, 640)], self.ZONE, 1280), (1280, 'right'))
+
+    def test_mob_inside_zone_left_of_body(self):
+        # 区内近左怪 + 区外更近的怪:只按区内怪定向(区外的不参与攻击判定)
+        centres = [(1100, 640), (1000, 200)]
+        self.assertEqual(fl.nearest_mob_side(centres, self.ZONE, 1280), (1100, 'left'))
+
+    def test_no_mob_in_zone_returns_none(self):
+        self.assertEqual(fl.nearest_mob_side([(2000, 200), (100, 100)], self.ZONE, 1280),
+                         (None, None))
+
+    def test_empty_centres_returns_none(self):
+        self.assertEqual(fl.nearest_mob_side([], self.ZONE, 1280), (None, None))
+
+
 class TestMobPresentDebounce(unittest.TestCase):
     """区内有怪的去抖:一拍漏检不许立刻退出攻击态。
 

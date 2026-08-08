@@ -280,11 +280,11 @@ class StartController(QObject):
 
                 if not og.device_manager.capture_method.hwnd_window.pos_valid:
                     hwnd_window = og.device_manager.capture_method.hwnd_window
-                    if hwnd_window.hwnd and hwnd_window.window_width > 0 and hwnd_window.window_height > 0:
+                    if hwnd_window.hwnd and hwnd_window.width > 0 and hwnd_window.height > 0:
                         from ok.util.window import resize_window
                         logger.info(
-                            f"Window pos invalid, trying to center window with size {hwnd_window.window_width}x{hwnd_window.window_height}")
-                        resize_window(hwnd_window.hwnd, hwnd_window.window_width, hwnd_window.window_height)
+                            f"Window pos invalid, trying to center window with size {hwnd_window.width}x{hwnd_window.height}")
+                        resize_window(hwnd_window.hwnd, hwnd_window.width, hwnd_window.height)
                         hwnd_window.do_update_window_size()
                     if not og.device_manager.capture_method.hwnd_window.pos_valid:
                         return self.tr(

@@ -204,6 +204,9 @@ class OverlayWidget(QWidget):
         for key, callback in list(getattr(self, 'custom_painters', {}).items()):
             painter.save()
             try:
+                # paint_logs 等先执行的绘制可能留下半透明 brush(如 QColor(0,0,0,150)),
+                # 不清掉的话 custom painter 的 drawRect 会带填充——标记框只描边不填充
+                painter.setBrush(Qt.NoBrush)
                 callback(painter, self)
             except Exception as e:
                 logger.warning(f'custom overlay painter {key} failed: {e}')

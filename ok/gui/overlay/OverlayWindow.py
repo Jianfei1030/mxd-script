@@ -82,6 +82,8 @@ class OverlayWindow(OverlayWidget):
         if not enabled:
             self._boxes_active = False
             self._boxes_until = 0
+            self.custom_painters.clear()
+            self._custom_painter_until.clear()
         self.refresh_visibility()
         self.update()
 
@@ -99,8 +101,22 @@ class OverlayWindow(OverlayWidget):
         self.custom_draw_requested.emit(str(key), callback, duration)
 
     def clear_draw(self, key=None):
-        """Remove one custom painter, or all painters when key is None."""
-        self.custom_clear_requested.emit(key)
+        """Remove one custom painter, or all painters when key is None.
+
+        同步移除 custom_painters 中的 callback,不走 QueuedConnection 信号。
+        异步清会在 F9 暂停时产生竞态:paint 信号(来自上一拍 run())排在 clear
+        信号之前到达 → callback 被重新加回 → 画框 → clear 才到 → 框残留。
+        同步移除保证 callback 在 clear_draw 返回后立即消失,后续排队的 paint
+        信号到达时 custom_painters 中已无此 key → paint_custom 遍历空 dict → 不画。"""
+        if key is None:
+            self.custom_painters.clear()
+            self._custom_painter_until.clear()
+        else:
+            key = str(key)
+            self.custom_painters.pop(key, None)
+            self._custom_painter_until.pop(key, None)
+        self.refresh_visibility()
+        self.update()
 
     def _set_custom_draw(self, key, callback, duration):
         self.custom_painters[key] = callback

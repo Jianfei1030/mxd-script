@@ -82,6 +82,13 @@ def main():
                         help='写配置的 JSON 路径(默认 configs/WarriorDebugTask.json,与 GUI 加载一致)')
     parser.add_argument('--facing', choices=['LEFT', 'RIGHT'], default='RIGHT',
                         help='标定时的朝向(默认 RIGHT)')
+    parser.add_argument('--auto', action='store_true',
+                        help='非交互模式:用 --distance/--zone-h/--offset/--pw/--ph 直接画框并写配置')
+    parser.add_argument('--distance', type=int, default=120, help='攻击距离 px(--auto)')
+    parser.add_argument('--zone-h', dest='zone_h', type=int, default=ZONE_H_DEFAULT, help='攻击区高 px(--auto)')
+    parser.add_argument('--offset', type=int, default=OFFSET_DEFAULT, help='名字牌偏移 px(--auto)')
+    parser.add_argument('--pw', type=int, default=PLAYER_W_DEFAULT, help='玩家宽 px(--auto)')
+    parser.add_argument('--ph', type=int, default=PLAYER_H_DEFAULT, help='玩家高 px(--auto)')
     args = parser.parse_args()
 
     frame = cv2.imread(args.frame)
@@ -101,6 +108,23 @@ def main():
         print(f'未找到角色名 "{args.name}" 的名字牌,请检查 --name 与截图')
         sys.exit(1)
     print(f'名字牌定位成功,身体中心 = {body}')
+
+    if args.auto:
+        out_dir = 'screenshots/calibrate'
+        os.makedirs(out_dir, exist_ok=True)
+        body = locate_body(frame, args.name, args.offset)
+        if body is None:
+            print(f'重定位失败(偏移 {args.offset}),请检查角色名')
+            sys.exit(1)
+        out = os.path.join(out_dir, f'zone_{args.facing}_{args.distance}px.png')
+        draw_zone_png(frame, body, args.facing, args.distance, out, args.zone_h)
+        values = {'攻击距离': args.distance, '攻击区高': args.zone_h,
+                  '名字牌到身体偏移': args.offset, '玩家宽': args.pw, '玩家高': args.ph,
+                  '调试开关': True}
+        write_config(args.config_path, values)
+        print(f'已画攻击框: {out}')
+        print('标定完成(非交互)。')
+        sys.exit(0)
 
     distance = int(input('输入攻击距离(像素,默认 120): ').strip() or 120)
     zone_h = int(input(f'输入攻击区高度(像素,默认 {ZONE_H_DEFAULT}): ').strip() or ZONE_H_DEFAULT)

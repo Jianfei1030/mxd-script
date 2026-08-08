@@ -1,7 +1,7 @@
 import time
 
 from qfluentwidgets import FluentIcon
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPen
 
 from ok import Logger, TriggerTask
@@ -23,6 +23,13 @@ DEFAULT_CONFIG = {
     '玩家高': 120,
     '攻击距离': 120,
     '攻击区高': 200,
+    '寻怪同层容差(像素)': 150,
+    # 画框开关(默认全开,按需关闭)
+    '显示怪物框': True,
+    '显示玩家框': True,
+    '显示攻击区': True,
+    '显示名字搜索范围': True,
+    '显示寻怪同层带': True,
 }
 
 # 玩家朝向推断:名字牌 x 位移超过该阈值才计入朝向位移(OCR 噪声约 ±5px,留 3 倍余量)
@@ -39,6 +46,9 @@ MOB_FOOT_COLOR = QColor(0, 255, 255)
 PLAYER_COLOR = QColor(0, 255, 0)
 ZONE_IDLE_COLOR = QColor(0, 128, 255)
 ZONE_HOT_COLOR = QColor(255, 0, 0)
+# 名字检测范围(蓝虚线)/寻怪同层高度带(青虚线):均虚线,调试画框用
+ANCHOR_SEARCH_COLOR = QColor(0, 0, 255)
+SEEK_BAND_COLOR = QColor(0, 255, 255)
 
 
 class WarriorDebugTask(TriggerTask, BaseMapleTask):
@@ -50,6 +60,8 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
         self.icon = FluentIcon.VIEW
         self.trigger_interval = 0.1  # 10Hz 轮询,节流在 run 内做
         self.default_config.update(DEFAULT_CONFIG)
+        from ok.gui.Communicate import communicate
+        communicate.executor_paused.connect(self._on_executor_paused)
         self._reset_state()
 
     def _reset_state(self):
@@ -62,6 +74,14 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
     def enable(self):
         self._reset_state()
         super().enable()
+
+    def _on_executor_paused(self, paused):
+        """F9 全局暂停时清掉 overlay,避免暂停后调试框残留在游戏画面上。"""
+        if paused:
+            try:
+                self.get_overlay_view().clear_draw('warrior_debug')
+            except Exception as e:
+                logger.warning(f'clear_draw failed: {e}')
 
     def on_disable(self):
         """停止时清掉 overlay,避免残影。"""
@@ -89,11 +109,19 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
             return
         h, w = frame.shape[:2]
         if self._anchor is None:
-            # 首次:中央区慢扫定位(名字牌在角色脚下,搜索区取实测基线 0.30x0.30)
+            # 首次:中央区慢扫定位(名字牌在角色脚下,搜索区 0.70x0.70:
+            # 0.50 时角色站高处/海拔变化名字牌易出区,2026-08-08 实测调大)
             hit = anchor.find_in_region(
-                frame, character_name, anchor.search_region(w, h, 0.30, 0.30))
+                frame, character_name, anchor.search_region(w, h, 0.70, 0.70))
             if hit is None:
                 self._debug_text('未找到名字牌:请确认角色名与画面')
+                return
+            # 位置合理性校验:名字牌应在画面中心 ±30% 范围内,防止匹配到右侧组队列表/UI文字
+            cx, cy = w / 2.0, h * 0.55
+            dx_ratio = abs(hit.x - cx) / (w * 0.30)
+            dy_ratio = abs(hit.y - cy) / (h * 0.30)
+            if dx_ratio > 1.0 or dy_ratio > 1.0:
+                self._debug_text(f'名字牌位置异常(x={hit.x:.0f},y={hit.y:.0f}),已过滤;请确认角色名')
                 return
             self._anchor = hit
             self._last_draw = now
@@ -155,6 +183,10 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
 
     def _draw_debug(self, frame, cfg, facing, in_zone, mobs):
         from ok import og
+        if getattr(og, 'executor', None) is not None and getattr(og.executor, 'paused', False):
+            # F9 暂停瞬间 executor 线程可能仍跑最后一拍,禁止再画(否则 draw 信号排队,
+            # 在清理 clear_draw 之后到达主线程 → 残留最后一帧的框)
+            return
         ok_config = getattr(og.app, 'ok_config', None)
         if ok_config is not None and not ok_config.get('use_overlay', False):
             # 关闭「启用标记框」时不绘制,并清掉上次残留,避免关闭后仍显示旧框
@@ -170,26 +202,43 @@ class WarriorDebugTask(TriggerTask, BaseMapleTask):
             body_center, facing, cfg['攻击距离'], cfg['攻击区高'])
         pw, ph = cfg['玩家宽'], cfg['玩家高']
         zone_color = ZONE_HOT_COLOR if in_zone else ZONE_IDLE_COLOR
+        # 名字检测范围(蓝虚线):与 run() 首次慢扫同值 0.70;寻怪同层带(青虚线):
+        # 以名字牌 y 为中线 ±容差,怪脚底落带内 = 会自动走过去(与 MapleFarmTask 同语义)
+        w, h = frame.shape[1], frame.shape[0]
+        search = anchor.search_region(w, h, 0.70, 0.70)
+        tol = cfg['寻怪同层容差(像素)']
+        feet_y = self._anchor.y
 
         def paint(painter, widget):
+            if getattr(og, 'executor', None) is not None and getattr(og.executor, 'paused', False):
+                return
+            painter.setBrush(Qt.NoBrush)
             ratio = widget.frame_ratio()
+            # 每帧读最新配置(GUI 改开关后可能重建 dict 对象,闭包捕获的 cfg 会过期)
+            c = self.config
 
             def rect(x, y, w, h):
                 return QRectF(x * ratio, y * ratio, w * ratio, h * ratio)
 
-            # 玩家 bbox(绿,身体中心为锚)
-            painter.setPen(QPen(PLAYER_COLOR, 2))
-            painter.drawRect(rect(body_center[0] - pw / 2, body_center[1] - ph / 2, pw, ph))
-            # 攻击区(蓝/红,只画朝向侧半矩形)
-            painter.setPen(QPen(zone_color, 3))
-            painter.drawRect(rect(zone[0], zone[1], zone[2], zone[3]))
-            # 怪物 bbox(黄)+ 脚底点(青)
-            painter.setPen(QPen(MOB_COLOR, 2))
-            for mob in mobs:
-                painter.drawRect(rect(mob.x, mob.y, mob.width, mob.height))
-                fx, fy = farm_logic.mob_feet(mob)
-                painter.setPen(QPen(MOB_FOOT_COLOR, 4))
-                painter.drawPoint(QPointF(fx * ratio, fy * ratio))
+            if c.get('显示名字搜索范围', True):
+                painter.setPen(QPen(ANCHOR_SEARCH_COLOR, 2, Qt.PenStyle.DashLine))
+                painter.drawRect(rect(search[0], search[1], search[2] - search[0], search[3] - search[1]))
+            if c.get('显示寻怪同层带', True):
+                painter.setPen(QPen(SEEK_BAND_COLOR, 2, Qt.PenStyle.DashLine))
+                painter.drawRect(rect(0, feet_y - tol, w, 2 * tol))
+            if c.get('显示玩家框', True):
+                painter.setPen(QPen(PLAYER_COLOR, 2))
+                painter.drawRect(rect(body_center[0] - pw / 2, body_center[1] - ph / 2, pw, ph))
+            if c.get('显示攻击区', True):
+                painter.setPen(QPen(zone_color, 3))
+                painter.drawRect(rect(zone[0], zone[1], zone[2], zone[3]))
+            if c.get('显示怪物框', True):
                 painter.setPen(QPen(MOB_COLOR, 2))
+                for mob in mobs:
+                    painter.drawRect(rect(mob.x, mob.y, mob.width, mob.height))
+                    fx, fy = farm_logic.mob_feet(mob)
+                    painter.setPen(QPen(MOB_FOOT_COLOR, 4))
+                    painter.drawPoint(QPointF(fx * ratio, fy * ratio))
+                    painter.setPen(QPen(MOB_COLOR, 2))
 
         overlay.draw('warrior_debug', paint)

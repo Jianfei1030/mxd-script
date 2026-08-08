@@ -384,6 +384,22 @@ def attack_turn_direction(facing, body_x, centres, zone):
     return 'left' if nearest < body_x else 'right'
 
 
+def nearest_mob_side(centres, zone, body_x):
+    """接敌区内离身体最近的怪 (x, side);区内无怪 → (None, None)。
+
+    攻击区方向依据(2026-08-08):有向攻击区不再读盲写的 _facing 信念——
+    信念被击退/按键丢失破坏后与实际朝向脱节,攻击区画错侧 → 怪不在区内 →
+    不攻击 → 也没有修正机会,死锁。改为按"区内最近怪在哪侧"画半区(观测事实),
+    怪必然落进攻击区;攻击前的方向键轻点再物理修正真实朝向。
+    x == body_x(怪压身上)→ 'right',避免贴脸判边噪声换边。
+    """
+    in_zone = [x for x, y in centres if point_in_zone((x, y), zone)]
+    if not in_zone:
+        return None, None
+    nearest = min(in_zone, key=lambda x: abs(x - body_x))
+    return nearest, ('right' if nearest >= body_x else 'left')
+
+
 def same_floor(mob_feet_y, player_feet_y, tolerance):
     """怪脚底与角色脚底(名字牌 y)高度差在容差内 → 同一层,水平走近可达。
     容差小于平台间高度差,避免追到别的平台。"""

@@ -375,6 +375,11 @@ class App:
         self.main_window.show()
         self.main_window.bring_to_front()
 
+        # E2E 模式：启动 TCP 控制服务
+        if self.config.get('_e2e_mode'):
+            from ok.gui.E2EServer import E2EServer
+            self.e2e_server = E2EServer(self.main_window, self)
+
         logger.debug(f'show_main_window end')
 
     def exec(self):
