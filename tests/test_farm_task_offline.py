@@ -2252,8 +2252,13 @@ class TestFacingCorrection(unittest.TestCase):
 
     def test_hit_does_not_clear_facing(self):
         """受击不再作废朝向:52 个分歧事件里受击后 0.5s 内一次都没有,
-        「受击会翻朝向」这个唯一前提已被观测数据证伪(spec §2.2)。"""
-        task = make_task()
+        「受击会翻朝向」这个唯一前提已被观测数据证伪(spec §2.2)。
+
+        走位开关必须关掉:`_last_walk` 初值 0.0,now=200 早就过了 120s 间隔,
+        无怪时防挂机走位会触发,而首次走位在「自动」朝向下是**随机**选边并写回
+        `_facing` —— 不关它,这条断言有一半概率靠运气蒙对,守不住任何东西
+        (2026-08-08 变异验证发现:把清空加回来,测试照样通过)。"""
+        task = make_task(走位开关=False)
         task._facing = 'LEFT'
         task._prev_hp = 0.90
         run_with_frame(task, hp=0.80, now=200.0)
