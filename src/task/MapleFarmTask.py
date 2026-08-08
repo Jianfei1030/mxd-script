@@ -230,6 +230,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_mob_seen = None    # 上次攻击区内真检测到怪的时刻;None=从未见过(去抖用)
         self._last_attack_present = None  # 有向攻击区内有没有怪(去抖后);行为上只有 _do_attack 读它(另有 overlay/日志读)
         self._last_attack_seen = None     # 上次有向攻击区内真检测到怪的时刻;None=从未见过(去抖用)
+        self._detect_attacking = None     # 检测节拍用的「在打」快照(短宽限去抖);只有 should_detect 读它
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
         self._last_hit = 0.0          # 上次受击(作废朝向)时刻;受击防抖用,0.0 哨兵=从未受击
@@ -614,6 +615,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_attack_present = farm_logic.mob_present_debounced(
             raw_attack, now, self._last_attack_seen, cfg['丢怪保持(秒)']) \
             and not (raw_present and not raw_attack)
+        # 节拍门与分支门同源:分支用 寻怪起步宽限 判「该起步寻怪了」,节拍必须在同一刻
+        # 松开攻击档。攻击键可以被 丢怪保持(1.0s) 撑着继续挥(YOLO 单帧漏检的保护),
+        # 但检测节拍跟着一起慢就会出现:攻击区早空了、分支已走寻怪路径,下一拍却仍按
+        # 攻击间隔排,起步寻怪白等一个攻击拍(spec §3.1/§3.2 衔接漏洞)。
+        # 2026-08-08 实弹:这种拍占 5.6%(444/7896),其后拍间隔中位 0.708s。
+        # 必须在检测拍取快照、不能在 should_detect 处按 now 现算:稳态在打时拍间隔
+        # (攻击间隔)本就大于宽限,现算会让攻击档整个塌成空闲档,负载回归。
+        self._detect_attacking = farm_logic.mob_present_debounced(
+            raw_attack, now, self._last_attack_seen, cfg['寻怪起步宽限(秒)'])
         if self._boxes_enabled():
             self._draw_debug(cfg, body=body, zone=zone, attack_area=attack_area,
                              mobs=mobs, mob_present=mob_present,
@@ -977,7 +987,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 发起不了新的(spec §3.1)
             if farm_logic.should_detect(
                     now, self._last_detect,
-                    bool(self._last_attack_present), self._seek_dir is not None,
+                    bool(self._detect_attacking), self._seek_dir is not None,
                     cfg['攻击间隔(秒)'], cfg['寻怪刷新间隔(秒)'],
                     cfg['空闲刷新间隔(秒)']):
                 self._last_detect = now

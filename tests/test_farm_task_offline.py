@@ -486,6 +486,52 @@ class TestFarmTaskOffline(unittest.TestCase):
             run_with_frame(task, now=102.0)   # 间隔已过 → 补上这一点
         self.assertIn(call('shift'), task.send_key.call_args_list)
 
+    def test_detect_cadence_drops_to_idle_when_attack_zone_empty_past_grace(self):
+        """攻击区空过 寻怪起步宽限 后,下一拍必须按空闲档排,不能还按攻击间隔等。
+
+        分支门(seek_hold)用 寻怪起步宽限(0.3s) 判「该起步寻怪了」,节拍门却收
+        _last_attack_present —— 它由 丢怪保持(1.0s) 去抖。两者不同源时存在一种拍:
+        攻击区其实早就空了、分支已走寻怪路径,可打= 仍被去抖撑着 True,于是下一拍
+        按 攻击间隔 排,起步寻怪白等一个攻击拍(spec §3.1/§3.2 衔接漏洞)。
+        2026-08-08 实弹:这种拍占 5.6%(444/7896),其后拍间隔中位 0.708s。
+
+        三拍:在打 → 怪跳到异层(分支走寻怪但没目标,可打仍被撑着) → 同层怪出现。
+        第三拍距上一拍 0.35s ≥ 空闲刷新间隔,该跑检测并起步寻怪。
+        """
+        task = make_task(**{'攻击模式': '检测', '攻击间隔(秒)': 0.7})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')):
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
+            run_with_frame(task)                      # 100.0 在打:怪在攻击区
+            self.assertTrue(task._last_attack_present)
+            # 100.7 怪跳到异层远处:分支走寻怪(宽限已过)但找不到同层怪,
+            # 可打= 仍被 丢怪保持 撑着 True —— 这就是中招拍
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=2000, y=500, width=60, height=50)])
+            run_with_frame(task, now=100.7)
+            self.assertTrue(task._last_attack_present)   # 去抖撑着(这是前提,不是被测行为)
+            self.assertIsNone(task._seek_dir)
+            # 101.05 同层怪出现:距上一检测拍 0.35s ≥ 空闲刷新间隔 0.3s → 该起步寻怪
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=2000, y=680, width=60, height=50)])
+            run_with_frame(task, now=101.05)
+        self.assertEqual(task._seek_dir, 'right')
+
+    def test_detect_cadence_stays_at_attack_rate_while_mob_in_zone(self):
+        """稳态在打时节拍仍是 攻击间隔,不因上一条的短宽限塌成空闲档(§3.1 负载不回归)。
+
+        断 _last_detect:它只在真跑检测拍时被写。变异验证:把 _detect_attacking
+        恒置 False(等价于按 now 现算导致攻击档塌陷),本用例转红。
+        """
+        task = make_task(**{'攻击模式': '检测', '攻击间隔(秒)': 0.7})
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')):
+            task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
+            run_with_frame(task)                        # 100.0 检测拍
+            self.assertEqual(task._last_detect, 100.0)
+            run_with_frame(task, now=100.35)            # 0.35s < 攻击间隔 → 不跑检测
+            self.assertEqual(task._last_detect, 100.0)
+            run_with_frame(task, now=100.75)            # ≥ 攻击间隔 → 跑
+            self.assertEqual(task._last_detect, 100.75)
+
     def test_do_walk_unknown_facing_random_left_first(self):
         """朝向未知(自动+首次走位):随机一侧出、反方向回,采纳实际朝向为基线。"""
         task = make_task(**{'走位持续时间(秒)': 0.4})
@@ -2409,10 +2455,16 @@ class TestDetectCadence(unittest.TestCase):
         self.assertEqual(task._detect_and_act.call_count, 1)
 
     def test_attacking_keeps_attack_interval(self):
-        """在打时仍按 攻击间隔,负载不回归。"""
+        """在打时仍按 攻击间隔,负载不回归。
+
+        节拍门读的是 _detect_attacking(短宽限快照)而不是 _last_attack_present
+        (攻击键用的 丢怪保持 1.0s 去抖):两者分家后,攻击区空过 寻怪起步宽限
+        就立刻转空闲档,不再白等一个攻击拍。本用例 _detect_and_act 是 mock,
+        真实快照算不出来,所以直接置位——断言的行为(0.35 不跑/0.75 跑)未变。
+        """
         task = self._task()
         task._last_detect = 1000.0
-        task._last_attack_present = True
+        task._detect_attacking = True
         run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.35)
         self.assertEqual(task._detect_and_act.call_count, 0)
         run_with_frame(task, hp=1.0, mp=1.0, exp=0.5, now=1000.75)
