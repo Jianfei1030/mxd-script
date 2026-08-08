@@ -97,10 +97,22 @@ def observe(frame, anchor_obj, template, template_facing):
 TEMPLATE_W = 58   # 头+肩模板宽(附录 A.1)
 TEMPLATE_H = 66   # 头+肩模板高(附录 A.1)
 # 子框在 ROI 内的左上角偏移。附录 A 只记了 58x66 没记坐标,这两个数是
-# 2026-08-08 用 scripts/calibrate_facing_template.py 在真帧上目视标定的
-# (放大 4x + 10px 网格,对准头顶与肩线)。换角色/换分辨率必须重标。
-TEMPLATE_DX = 61
-TEMPLATE_DY = 15
+# 2026-08-08 用 scripts/calibrate_facing_template.py 在实机帧上标定的:
+# 角色「Yufeng咕咕」站定,锚点 OCR 完整命中 (x=1298 y=784),对 DX∈[66,96]
+# ×DY∈[2,34] 做了网格扫描,按「与自身镜像的匹配差值」(方向判别裕度)选。
+#   - DX=78 在所有 DY 上都最优:框 x=78..136,中心 107 正好压在头部中心
+#     (发际 x≈66..148、脸 x≈95..135)
+#   - DY 从 18 到 34 裕度持平(0.665~0.682),故按解剖学取 18 而不是刷分:
+#     框 y=18..84 避开顶部左右对称的白帽子(y≈0..28,贡献匹配质量但没有
+#     方向信息),覆盖头发+整张脸,下沿离手臂/武器(y>95,逐帧摆动)留出余量
+# 标定帧存 _frames_backup/facing_calib_frame.png(screenshots/ 在 .gitignore 里)。
+# 换角色/换发型装备/换分辨率必须重标 —— 失效表现为弃权率飙升,日志里看得见。
+#
+# 注意:此标定只固定了「子框位置」。仪器在本角色上的实际命中率仍未验证——
+# 标定当时角色站定不动,三帧里头部像素完全相同,构不成跨姿态样本。
+# 真实命中率由实弹判据 A/B 给出(spec §5.4)。
+TEMPLATE_DX = 78
+TEMPLATE_DY = 18
 
 
 def capture(frame, anchor_obj):
