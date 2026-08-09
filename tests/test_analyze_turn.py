@@ -75,6 +75,39 @@ class TestAnalyzeTurn(unittest.TestCase):
         self.assertEqual(out['beats'], 1)
         self.assertEqual(out['turns'], 0)
 
+    def test_turn_at_end_of_log_is_truncated_not_never_settled(self):
+        """日志最后一拍正好是转向拍:后面没有拍可看,不是「40 拍没结算」。
+
+        2026-08-09 实测:08-08 那条 never_settled:1 就是文件末尾的转向拍
+        (索引 26364 = 最后一拍),被 for...else 的 else 误判成没结算。
+        """
+        out = analyze_turn.scan([
+            line('10:00:00,000', 'RIGHT', 'LEFT', 'left'),
+        ])
+        self.assertEqual(out['turns'], 1)
+        self.assertEqual(out['outcome']['truncated'], 1)
+        self.assertEqual(out['outcome']['never_settled'], 0)
+        self.assertEqual(out['latencies'], [])
+
+    def test_short_tail_without_settle_is_truncated(self):
+        """转向后只剩 <40 拍就到底、且没结算 → truncated,不是 never_settled。"""
+        out = analyze_turn.scan([
+            line('10:00:00,000', 'RIGHT', 'LEFT', 'left'),      # 转向拍(new=LEFT)
+            line('10:00:00,100', 'RIGHT', 'LEFT', None),        # f1==new 但 f0!=new:不结算,继续
+            line('10:00:00,200', 'RIGHT', 'LEFT', None),        # 日志到此结束,尾长 2 < 40
+        ])
+        self.assertEqual(out['outcome']['truncated'], 1)
+        self.assertEqual(out['outcome']['never_settled'], 0)
+
+    def test_full_lookahead_without_settle_is_never_settled(self):
+        """完整 40 拍窗口内没结算 → 仍是 never_settled(护栏,修复不能误伤它)。"""
+        rows = [line('10:00:00,000', 'RIGHT', 'LEFT', 'left')]
+        for k in range(1, 45):                                  # 转向后 44 拍 ≥ 40
+            rows.append(line(f'10:00:{k:02d},000', 'RIGHT', 'LEFT', None))
+        out = analyze_turn.scan(rows)
+        self.assertEqual(out['outcome']['never_settled'], 1)
+        self.assertEqual(out['outcome']['truncated'], 0)
+
 
 if __name__ == '__main__':
     unittest.main()

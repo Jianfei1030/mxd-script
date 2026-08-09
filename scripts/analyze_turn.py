@@ -38,10 +38,15 @@ def parse(lines):
 
 
 def scan(lines):
-    """算统计。语义见计划文档 Task 1,四种结局互斥且必然命中其一。"""
+    """算统计。语义见计划文档 Task 1,五种结局互斥且必然命中其一。
+
+    truncated = 转向拍之后剩余行数不足 MAX_LOOKAHEAD(日志到此为止),
+    结局无从判断,不能当 never_settled —— 后者要求完整 40 拍窗口里都没结算。
+    """
     rows = parse(lines)
     out = dict(beats=len(rows), turns=0, latencies=[], gaps=[],
-               outcome=dict(settled=0, re_turned=0, corrected_back=0, never_settled=0))
+               outcome=dict(settled=0, re_turned=0, corrected_back=0,
+                            never_settled=0, truncated=0))
     for i, row in enumerate(rows):
         if row['turn'] == '-':
             continue
@@ -49,6 +54,7 @@ def scan(lines):
         new = row['f1']
         if i + 1 < len(rows):
             out['gaps'].append(rows[i + 1]['t'] - row['t'])
+        tail = len(rows) - (i + 1)   # 该转向拍之后还剩几拍
         for j in range(i + 1, min(i + 1 + MAX_LOOKAHEAD, len(rows))):
             nxt = rows[j]
             if nxt['turn'] != '-':
@@ -62,7 +68,14 @@ def scan(lines):
                 out['outcome']['corrected_back'] += 1
                 break
         else:
-            out['outcome']['never_settled'] += 1
+            # for 走完没 break:窗口内没结算。但若日志在本拍之后不足 40 拍就
+            # 到头,那是样本被截断(结局无从判断),不是「40 拍没结算」——
+            # 2026-08-09 实测 08-08 那条 never_settled:1 就是末尾那拍正好是
+            # 转向拍(索引 26364),被这里误判。truncated 不进百分比分母。
+            if tail < MAX_LOOKAHEAD:
+                out['outcome']['truncated'] += 1
+            else:
+                out['outcome']['never_settled'] += 1
     return out
 
 
@@ -80,8 +93,13 @@ def main():
     if not out['turns']:
         return
     print('\n== outcome after each turn ==')
-    for k, v in out['outcome'].items():
-        print(f'  {k:<16} {v:>6}  ({100 * v / out["turns"]:5.1f}%)')
+    denom = out['turns'] - out['outcome']['truncated']
+    for k in ('settled', 're_turned', 'corrected_back', 'never_settled'):
+        v = out['outcome'][k]
+        print(f'  {k:<16} {v:>6}  ({100 * v / denom:5.1f}%)')
+    if out['outcome']['truncated']:
+        print(f'  truncated({MAX_LOOKAHEAD}拍内日志到头)'
+              f' {out["outcome"]["truncated"]:>6}  (不计入分母)')
     lat = sorted(out['latencies'])
     if lat:
         print('\n== latency: turn -> first beat whose zone uses the NEW facing ==')
