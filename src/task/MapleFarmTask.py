@@ -61,6 +61,8 @@ DEFAULT_CONFIG = {
     '模板匹配阈值': 0.2,
     'YOLO角色定位开关': True,
     '身份保鲜(秒)': 10,
+    '身份复验开关': True,
+    '身份复验间隔(秒)': 3,
     '丢锚立即重扫开关': True,
     '丢怪保持(秒)': 1.0,
     '寻怪起步宽限(秒)': 0.3,
@@ -200,6 +202,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
             'YOLO角色定位开关': '锚点阶梯第三级:名字牌模板与快窗 OCR 都没拿到时,用同一拍 YOLO 检出的 player 框接管角色位置(检测的是角色本体,任何名字牌遮挡都不影响;推理与找怪同拍共享,零额外开销)。身份仍由名字牌校准:该级只在已有锚点时参战,认错人风险由「身份保鲜(秒)」兜底。关掉 = 完全退回旧阶梯。丢锚拍占比 28.5%(2026-08-08 全天)的主解,详见 specs/2026-08-09-player-anchor-yolo-fusion-design.md',
             '身份保鲜(秒)': '距上次名字牌真实命中(模板/快窗/慢扫)超过此时长后,若屏幕上有多个玩家框,YOLO 级拒绝裁决(宁可退到慢扫/缓存,不认错路人);恰好只有一个玩家框时不受此限。调小 = 收紧防误认,调大 = 怪堆重度遮挡下更少丢锚。绿框跳到别的玩家身上时,先调小它',
+            '身份复验开关': '身份过期(距上次名字牌真实命中超过「身份保鲜(秒)」)时,把慢扫提到 YOLO 级**之前**跑一次验名。为什么必须提前:YOLO 级一命中就返回,排在它后面的慢扫根本轮不到——2026-08-09 实测慢扫占比被饿到 0.6%(加 YOLO 前的基线是 2.2%),而慢扫是唯一验名、也是唯一能在上次锚点小窗之外找回角色的通道。没有它,YOLO 一旦认错人,伪锚点会继续刷新锚点时间戳、连「丢锚立即重扫」都不会触发,绿框就永久钉在路人身上。慢扫没找到照样落回 YOLO 级,只加验名机会,不新增丢锚。关掉 = 旧阶梯',
+            '身份复验间隔(秒)': '身份复验慢扫的限频(慢扫中位 118ms、最坏 235ms,不许每拍都跑)。它同时是「认错人最长持续时间」的上界:调小=纠错更快、CPU 更吃,调大=反之。只在身份已过期且名字牌两级都失效的拍才计次,正常打怪期间根本不会触发',
             '丢锚立即重扫开关': '本拍模板/快窗OCR/YOLO 三级全没拿到位置,且(刚受击 或 锚点已超过「锚点刷新间隔」没更新)时,立刻跑一次慢扫,不等 2 秒节流——丢锚常由击退位置跳变引起,常规节流恰好卡在最需要慢扫的时刻(基线里慢扫只占 2.2%)。强制扫描自身限频 0.5 秒(慢扫最坏 235ms,不许打满主循环)。关掉 = 旧节流行为',
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
@@ -272,6 +276,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
         self._force_rescan = False        # 受击置位:下一检测拍绕过慢扫节流(spec §3.5);任一通道命中即清(跳变已消化)
         self._last_forced_rescan = 0.0    # 上次强制慢扫时刻;0.0 哨兵=从未,配合 FORCED_RESCAN_MIN_INTERVAL 限频
+        self._last_identity_scan = 0.0    # 上次身份复验慢扫时刻;0.0 哨兵=从未,配合「身份复验间隔(秒)」限频
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -408,6 +413,28 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._log_detect_error(time.time(), '朝向观测', e)
             return None, 0.0, 0.0
 
+    def _scan_region(self, frame, w, h, name, cfg, now):
+        """慢通道:中央搜索区分块 OCR。命中则更新锚点、刷新身份时间戳、按需裁模板。
+
+        节流由调用方决定(常规节流 / 丢锚立即重扫 / 身份复验),这里只管扫和记账 ——
+        两个调用点各抄一份"命中后要做什么"迟早分叉,身份时间戳漏刷一处就等于验名失效。
+        OCR 抛异常按"这一级没拿到"处理,绝不冒泡(见 _resolve_anchor 文档)。
+        """
+        region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
+                                      cfg['锚点搜索区中心Y(比例)'])
+        try:
+            hit = anchor.find_in_region(frame, name, region)
+        except Exception as e:
+            hit = None
+            self._log_detect_error(now, '慢通道锚点 OCR', e)
+        if hit is None:
+            return None
+        self._update_anchor(hit, now)
+        self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
+        if (hit.text or '').strip() == name:
+            self._capture_nametag_template(frame, hit)
+        return hit
+
     def _resolve_anchor(self, frame, now, cfg, players=()):
         """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
@@ -446,9 +473,18 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 except Exception as e:
                     hit = None
                     self._log_detect_error(now, '模板分片匹配', e)
+                # 纵向合理性(spec §3.8):模板拿自己上一拍的输出当下一拍搜索中心,
+                # 一次误匹配就自我强化——匹配落在窗顶边时每拍恒定上移
+                # half_h - 模板高/2 = 62px,实测一路飘到屏幕顶再也回不来。
+                # 超帽子的当误匹配丢弃,落到验名的 OCR 通道去重建 y。
+                if hit is not None and not farm_logic.template_hit_plausible(
+                        hit.y, self._anchor[1]):
+                    hit = None
                 if hit is not None:
                     self._update_anchor(hit, now)
-                    self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
+                    # 模板**不**刷新身份时间戳:它是像素匹配,命中的 text 是空串,
+                    # 根本没验名。让它刷新 = 误匹配把 §3.7 的复验永久锁死,
+                    # 「飘到半空再也回不来」的另一半根因(spec §3.4 修正)
                     return hit, 'template'
             try:
                 hit = anchor.find_in_window(frame, name, center, FAST_HALF_W, FAST_HALF_H)
@@ -461,21 +497,45 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 if (hit.text or '').strip() == name:  # 完整命中才裁模板
                     self._capture_nametag_template(frame, hit)
                 return hit, 'window'
+            identity_fresh = now - self._last_identity_hit <= cfg['身份保鲜(秒)']
+            # 身份复验慢扫(spec §3.7):身份过期时,慢扫必须排在 YOLO 之前。
+            # YOLO 级一命中就 return,下面那段慢扫根本走不到——实测慢扫占比被饿到
+            # 0.6%(8-08 基线 2.2%),而它是唯一验名、也是唯一能在任意位置(不限
+            # 上次锚点附近的小窗)找回角色的通道。没有它,YOLO 认错人之后
+            # _update_anchor 还会刷新 _anchor_time、清掉 _force_rescan,丢锚立即
+            # 重扫也不会触发,锚点就永久钉在路人身上。扫不到照样落到 YOLO 级,
+            # 只加验名机会,不新增丢锚。
+            if (cfg.get('身份复验开关') and not identity_fresh
+                    and now - self._last_identity_scan >= cfg['身份复验间隔(秒)']):
+                self._last_identity_scan = now
+                # 慢扫最坏 235ms,同一拍绝不扫第二次:两个节流都记上,底下常规/强制
+                # 两条路径本拍自然都不会再扫。受击/超龄想要的那次慢扫已经发生,
+                # 悬着的 _force_rescan 按已消费处理(spec §3.5「命中即清」的同源语义)
+                self._last_anchor_scan = now
+                self._last_forced_rescan = now
+                self._force_rescan = False
+                hit = self._scan_region(frame, w, h, name, cfg, now)
+                if hit is not None:
+                    return hit, 'region'
             # YOLO 关联级(spec §3.3):名字牌两条通道都没拿到,用同拍 player 框接管。
             # 放在 OCR 之后——名字牌可读时身份持续刷新;放最前快通道永远轮不到,
             # 身份就再也不校准。冷启动(_anchor is None)不进本块:外层 if 已保证。
             if cfg.get('YOLO角色定位开关') and players:
-                gated = farm_logic.gate_player_boxes(players, center)
+                # 门随「距上次真观测的时长」缩放(位移合理性,spec §3.3):相邻拍
+                # 收到 ~170px,路人挤不进来;久未观测再放回固定上限
+                gate_w, gate_h = farm_logic.player_gate_size(
+                    now - self._last_anchor_hit if self._last_anchor_hit else None)
+                gated = farm_logic.gate_player_boxes(players, center, gate_w, gate_h)
                 pbox = farm_logic.select_player_box(
-                    gated, center,
-                    now - self._last_identity_hit <= cfg['身份保鲜(秒)'])
+                    gated, center, identity_fresh, gate_w, gate_h)
                 if pbox is not None:
-                    pseudo = anchor.Anchor(
-                        pbox.x + pbox.width / 2,
-                        pbox.y + pbox.height / 2 + cfg['名字牌到身体偏移(像素)'],
-                        pbox.width)
-                    # 伪锚点 y = 框中心 + 名字牌偏移:body_center() 反算回来
-                    # 正好是框中心,下游(接敌区/同层/朝向)全部不用改(spec §3.4)
+                    px_, py_ = farm_logic.player_box_anchor(pbox)
+                    pseudo = anchor.Anchor(px_, py_, pbox.width)
+                    # 伪锚点 = 框中心换算到**名字牌**坐标系(实测框中心比名字牌高
+                    # 64px)。_anchor 存的一直是名字牌位置,下一拍的 OCR 小窗、模板
+                    # 窗、关联门都按它定心——换算成身体坐标会让整条阶梯错位
+                    # 64px。body_center() 再减 88 得到的落点,与名字牌拍完全一致,
+                    # 下游(接敌区/同层/朝向)全部不用改(spec §3.4)
                     self._last_yolo_info = (len(gated),
                                             abs(pseudo.x - center[0]))
                     self._update_anchor(pseudo, now)
@@ -495,18 +555,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             if force:
                 self._last_forced_rescan = now
             self._force_rescan = False   # 消费:这次扫描就是它要的那次
-            region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
-                                          cfg['锚点搜索区中心Y(比例)'])
-            try:
-                hit = anchor.find_in_region(frame, name, region)
-            except Exception as e:
-                hit = None
-                self._log_detect_error(now, '慢通道锚点 OCR', e)
+            hit = self._scan_region(frame, w, h, name, cfg, now)
             if hit is not None:
-                self._update_anchor(hit, now)
-                self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
-                if (hit.text or '').strip() == name:
-                    self._capture_nametag_template(frame, hit)
                 return hit, 'region'
 
         if not farm_logic.anchor_expired(now, self._anchor_time, cfg['锚点保鲜(秒)']):

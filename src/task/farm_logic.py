@@ -461,18 +461,87 @@ def seek_persist(seek_raw, prev_seek, now, last_seen, grace):
 PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W,跨模块注释同步)
 PLAYER_GATE_HALF_H = 120   # 关联门半高:比快窗的 80 放宽——击退/跳跃纵向位移大,
                            # 快窗为 OCR 成本收窄的理由对免费的 YOLO 不成立(spec §3.3)
+PLAYER_BOX_TO_NAMETAG = 64  # player 框中心 → 名字牌中心的纵向距离(向下为正)。
+                            # 2026-08-09 实测:403 组「相邻拍 + 角色几乎没动」的
+                            # yolo↔名字牌配对,中位 64px(p10 61 / p90 67)。
+                            # 与「名字牌到身体偏移(像素)」(88)是两个量——那个是
+                            # 名字牌到攻击落点(肩/手高度)的标定值,这个是框中心到
+                            # 名字牌的实测几何。混用会给关联门带来 64px 系统偏置。
+
+
+TEMPLATE_MAX_DY = 45   # 模板分片命中允许的最大纵向位移(px),超了当误匹配丢弃。
+                       # 真实纵向步长(只取 OCR 验名过的相邻拍,n=2164):p50=2 /
+                       # p99=26 / p99.9=34,>40px 的只有 1 拍(0.05%)。
+
+
+def template_hit_plausible(hit_y, prev_y, max_dy=TEMPLATE_MAX_DY):
+    """模板分片命中的纵向合理性判据(spec §3.8)—— 挡住棘轮漂移。
+
+    模板通道把自己上一拍的输出当作下一拍的搜索中心,却既不验名(命中的
+    AnchorHit.text 是空串),也没有任何合理性判据 —— 一次误匹配就会自我强化:
+    匹配落在搜索窗**顶边**时,回推的锚点 y = (cy - half_h) + 0 + 模板高/2,
+    即每拍恒定上移 `half_h - th/2` = 80 - 36/2 = **62px**。2026-08-09 日志逐拍
+    实测正是 -62、-62、-62……一路飘到 y=19(屏幕顶)再也回不来;全天 11.6%
+    的拍锚点飘在平台上方 >80px,其中 90% 由 template 持有。
+
+    45px 的帽子挡得住 62px 的棘轮,又几乎不误伤(0.05%)。真换平台时纵向位移
+    更大,那一拍让给验名的 OCR 通道去重建 —— 弱证据不该有重定义 y 的权力。
+    prev_y=None(冷启动/刚复位)没有先验,不许凭空拒绝。
+    """
+    return prev_y is None or abs(hit_y - prev_y) <= max_dy
+
+
+PLAYER_GATE_BASE_W = 110    # 位移门基础半宽:击退/起跳的瞬时冲量 + 框中心观测噪声。
+                            # 实测 dt<0.15s 的关联距 max=174,p99=93 —— 110 覆盖冲量
+PLAYER_GATE_BASE_H = 70     # 基础半高:相邻拍 |Δanchor_y| 实测 p50=2 / p99=62 / max=66
+PLAYER_GATE_SPEED_X = 300.0  # 横向极速(px/s):关联距 p99 对 dt 线性拟合斜率 ~260,取整放宽
+PLAYER_GATE_SPEED_Y = 200.0  # 纵向极速(px/s):跳跃/坠落纵向位移比走路快,但受平台层高约束
+
+
+def player_gate_size(dt, half_w=PLAYER_GATE_HALF_W, half_h=PLAYER_GATE_HALF_H):
+    """按「距上次锚点观测过了多久」缩放关联门 —— 位移合理性判据(spec §3.3)。
+
+    固定 ±240/±120 的门对相邻拍宽得离谱:0.2s 里角色最多走 60px,门却容得下
+    240px 外的路人。自己那拍没被检出时(YOLO 单帧漏检、被特效盖住),路人就是
+    门内唯一候选,`len(gated)==1` 直接无条件接受 → 绿框跳到别人身上。
+    改成 base + 极速 × dt:相邻拍收到 ~170px,久未观测再放回固定上限。
+
+    上限保留是必须的:dt 大到几秒时角色可能已经跑到任何地方,门再放大就等于
+    "谁都能认成自己",那时该交给慢扫验名(§3.7),不是靠更宽的门去猜。
+    dt=None(从未观测)/负值(时钟异常)→ 退回固定上限,绝不给出比基础值更小的门。
+    """
+    if dt is None or dt < 0:
+        return half_w, half_h
+    return (min(half_w, PLAYER_GATE_BASE_W + PLAYER_GATE_SPEED_X * dt),
+            min(half_h, PLAYER_GATE_BASE_H + PLAYER_GATE_SPEED_Y * dt))
+
+
+def player_box_anchor(box, box_to_nametag=PLAYER_BOX_TO_NAMETAG):
+    """player 框 → **名字牌坐标系**下的位置 (x, y)——跨坐标系换算的唯一事实源。
+
+    关联门的 pred 来自 self._anchor,存的一直是名字牌位置;YOLO 框中心却在身体上,
+    实测比名字牌高 PLAYER_BOX_TO_NAMETAG。不换算直接比,±half_h 的门会整体上移
+    64px:2026-08-09 实测 ±120 变成「上 56px / 下 184px」,自己一跳就出门(丢锚),
+    下一层平台的路人反而稳稳在门内、成为唯一候选被无条件接受(认错人)。
+    伪锚点也走这里换算,yolo 拍与名字牌拍才落在同一个 y 上(否则差 88-64=24px,
+    攻击区随来源翻拍上下抖)。"""
+    return box.x + box.width / 2, box.y + box.height / 2 + box_to_nametag
 
 
 def gate_player_boxes(players, pred, half_w=PLAYER_GATE_HALF_W,
                       half_h=PLAYER_GATE_HALF_H):
-    """框中心落在 pred 的 ±half_w/±half_h 门内的候选(门口径唯一事实源)。
+    """框中心(换算到名字牌坐标系后)落在 pred 的 ±half_w/±half_h 门内的候选。
 
-    select_player_box 的裁决与决策日志的 yolo候选= 都从这里拿,
-    两处各写一遍迟早分叉。边界压线算门内,与 point_in_zone 口径一致。"""
+    门口径唯一事实源:select_player_box 的裁决与决策日志的 yolo候选= 都从这里拿,
+    两处各写一遍迟早分叉。边界压线算门内,与 point_in_zone 口径一致。
+    pred 是名字牌坐标,候选先经 player_box_anchor 换算再比(见该函数)。"""
     px, py = pred
-    return [b for b in players
-            if abs(b.x + b.width / 2 - px) <= half_w
-            and abs(b.y + b.height / 2 - py) <= half_h]
+    out = []
+    for b in players:
+        bx, by = player_box_anchor(b)
+        if abs(bx - px) <= half_w and abs(by - py) <= half_h:
+            out.append(b)
+    return out
 
 
 def select_player_box(players, pred, identity_fresh,
@@ -486,6 +555,8 @@ def select_player_box(players, pred, identity_fresh,
       否则返回 None——路人贴身且身份过期,宁可退到慢扫/cached,不认错人;
     - 0 个 → None,落到阶梯下一级。
     最近取欧氏距离平方:两候选横向同距但隔层时,必须选同层那个(横向距离分不开)。
+    距离同样在名字牌坐标系里量(player_box_anchor 换算),否则纵向项整体偏 64px,
+    "隔层那个更近"的判据会失真。
     传入已过门的列表也正确(门是幂等的,Task 7 先 gate 后 select 不改语义)。
     """
     gated = gate_player_boxes(players, pred, half_w, half_h)
@@ -496,5 +567,9 @@ def select_player_box(players, pred, identity_fresh,
     if not identity_fresh:
         return None
     px, py = pred
-    return min(gated, key=lambda b: (b.x + b.width / 2 - px) ** 2
-               + (b.y + b.height / 2 - py) ** 2)
+
+    def _d2(b):
+        bx, by = player_box_anchor(b)
+        return (bx - px) ** 2 + (by - py) ** 2
+
+    return min(gated, key=_d2)

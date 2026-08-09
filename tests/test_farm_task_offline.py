@@ -9,6 +9,7 @@ import numpy as np
 
 from src.detect import anchor
 from src.detect.anchor import AnchorHit
+from src.task import farm_logic
 from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmTask)
 
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
@@ -1127,6 +1128,8 @@ class TestDetectModeAnchor(unittest.TestCase):
         task._anchor = (1400.0, 900.0)
         task._anchor_time = 99.0        # 时间被固定在 100.0,锚点年龄 1s,未过期
         task._last_anchor_scan = 99.5   # 距上次扫描 0.5s < 锚点刷新间隔 2s,慢通道被节流
+        task._last_identity_hit = 99.9  # 身份新鲜:身份复验(§3.7)会绕过常规节流,
+                                        # 断言"慢通道没被调用"必须先把这个维度钉住
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None) as window, \
                 patch('src.task.MapleFarmTask.anchor.find_in_region') as region:
             got, source = task._resolve_anchor(_synthetic_frame(), 100.0, task.config)
@@ -2760,8 +2763,18 @@ class TestYoloAnchorFusion(unittest.TestCase):
         # 伪锚点喂 _update_anchor:遮挡一散名字牌在正确位置重新咬住(spec §3.4)
         task = self._task([self._player(1180, 880)])
         self._beat(task)
-        self.assertEqual(task._anchor, (1180.0, 880.0 + task.config['名字牌到身体偏移(像素)']))
+        self.assertEqual(task._anchor,
+                         (1180.0, 880.0 + farm_logic.PLAYER_BOX_TO_NAMETAG))
         self.assertEqual(task._last_anchor_hit, 100.0)
+
+    def test_yolo_pseudo_anchor_lands_on_real_nametag_height(self):
+        # 伪锚点存进 _anchor 的必须是**名字牌**坐标(下一拍 OCR 小窗、关联门都按它
+        # 定心)。框中心 → 名字牌是实测 64px,不是身体偏移 88px:用 88 会让 yolo 拍
+        # 的 anchor_y 比名字牌拍系统性低 24px(实测 403 组配对,中位 24/p10 21/p90 27),
+        # 攻击区随来源翻拍上下抖 24px,关联门也整体偏 64px
+        lines = self._beat(self._task([self._player(1180, 880)]))
+        self.assertTrue(any(f'anchor_y={880 + farm_logic.PLAYER_BOX_TO_NAMETAG}'
+                            in l for l in lines), lines)
 
     def test_yolo_does_not_refresh_identity(self):
         # yolo 不验名,不许刷新身份时间戳(spec §3.4)
@@ -2799,6 +2812,22 @@ class TestYoloAnchorFusion(unittest.TestCase):
                                       **{'YOLO角色定位开关': False}))
         self.assertTrue(any('src=cached' in l for l in lines), lines)
 
+    def test_gate_narrows_with_fresh_observation(self):
+        # 上一拍刚命中(0.2s 前),路人在 200px 外:固定 ±240 会认它,位移门不认。
+        # _last_anchor_hit 才是「上次真观测到位置」的时刻(yolo 命中也刷新它)
+        task = self._task([self._player(1400, 880)])
+        task._last_anchor_hit = 99.8
+        lines = self._beat(task)
+        self.assertFalse(any('src=yolo' in l for l in lines), lines)
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+
+    def test_gate_widens_after_long_loss(self):
+        # 久未观测(2s):门放大到固定上限,远处的自己还认得回来
+        task = self._task([self._player(1400, 880)])
+        task._last_anchor_hit = 98.0
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
     def test_mobs_come_from_find_mobs_filter_players_from_find_all(self):
         # 分流接线:mob 走 find_mobs(boxes=find_all结果),player 走 find_all(spec §3.2)
         mob = SimpleNamespace(x=1400, y=850, width=60, height=50, name='mob')
@@ -2812,6 +2841,150 @@ class TestYoloAnchorFusion(unittest.TestCase):
         self.assertTrue(any('怪=1' in l for l in lines), lines)
 
 
+class TestTemplateDriftGuard(unittest.TestCase):
+    """模板棘轮漂移(spec §3.8):模板通道拿自己上一拍的输出当下一拍搜索中心,
+    一次误匹配就一路上飘 62px/拍 直到飞出屏幕,且因为它会刷身份时间戳,
+    §3.7 的复验永远不触发 —— 实测全天 11.6% 的拍锚点飘在平台上方 >80px,
+    其中 90% 由 template 持有。"""
+
+    def _task(self, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '决策日志开关': True, **cfg})
+        task.find_all = MagicMock(return_value=[])
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        task._nametag_template = np.zeros((36, 153), np.uint8)
+        task._anchor = (1200.0, 887.0)
+        task._anchor_time = 99.8
+        task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.9      # 慢扫节流窗内:不参战
+        task._last_identity_hit = 99.9
+        return task
+
+    def _beat(self, task, tpl_hit, now=100.0):
+        with patch.object(anchor, 'split_match', return_value=tpl_hit), \
+                patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region', return_value=None), \
+                patch('time.time', return_value=now):
+            task._detect_and_act(_synthetic_frame(), now, task.config,
+                                 task.get_global_config())
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if '决策 ' in c.args[0]]
+
+    def test_ratchet_step_is_refused_and_anchor_held(self):
+        # 恰好 62px 的棘轮步长:不许被采纳,锚点必须留在原处(落到 cached)
+        task = self._task()
+        lines = self._beat(task, AnchorHit(1200.0, 887.0 - 62, 153, ''))
+        self.assertFalse(any('src=template' in l for l in lines), lines)
+        self.assertEqual(task._anchor, (1200.0, 887.0))
+
+    def test_normal_template_hit_still_accepted(self):
+        # 正常的小幅移动照常走模板快通道(它是怪堆遮挡的主解,不能连带废掉)
+        task = self._task()
+        lines = self._beat(task, AnchorHit(1240.0, 890.0, 153, ''))
+        self.assertTrue(any('src=template' in l for l in lines), lines)
+        self.assertEqual(task._anchor, (1240.0, 890.0))
+
+    def test_template_hit_does_not_refresh_identity(self):
+        # 模板是**像素**匹配,命中的 text 是空串,根本没验名 —— 它刷新身份时间戳
+        # 就等于「误匹配把复验永久锁死」。只有真读到名字的 window/region 才算验名
+        task = self._task()
+        task._last_identity_hit = 90.0
+        self._beat(task, AnchorHit(1240.0, 890.0, 153, ''))
+        self.assertEqual(task._last_identity_hit, 90.0)
+
+    def test_window_hit_still_refreshes_identity(self):
+        task = self._task()
+        task._last_identity_hit = 90.0
+        with patch.object(anchor, 'split_match', return_value=None), \
+                patch.object(anchor, 'find_in_window',
+                             return_value=AnchorHit(1240.0, 890.0, 153, 'Yufeng咕咕')), \
+                patch('time.time', return_value=100.0):
+            task._detect_and_act(_synthetic_frame(), 100.0, task.config,
+                                 task.get_global_config())
+        self.assertEqual(task._last_identity_hit, 100.0)
+
+
+class TestIdentityRecheckScan(unittest.TestCase):
+    """身份复验慢扫(spec §3.7):身份过期时慢扫必须排在 YOLO 之前。
+
+    YOLO 级一命中就 return,慢扫那段根本走不到——实测慢扫占比被饿到 0.6%
+    (8-08 基线 2.2%),而慢扫是唯一验名、也是唯一能在任意位置找回角色的通道。
+    没有它,YOLO 认错人之后 `_update_anchor` 还会刷新 `_anchor_time`、清掉
+    `_force_rescan`,丢锚立即重扫也不会触发,锚点就永久钉在路人身上。"""
+
+    def _player(self, cx, cy, w=60, h=120):
+        return SimpleNamespace(x=cx - w / 2, y=cy - h / 2,
+                               width=w, height=h, name='player')
+
+    def _task(self, identity_age, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '决策日志开关': True, **cfg})
+        task.find_all = MagicMock(return_value=[self._player(1180, 880)])
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        task._anchor = (1200.0, 900.0)
+        task._anchor_time = 99.8
+        task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.9      # 常规节流窗内:慢扫本来轮不到
+        task._last_identity_hit = 100.0 - identity_age
+        task._last_identity_scan = 0.0
+        return task
+
+    def _beat(self, task, region_hit=None, now=100.0):
+        frame = _synthetic_frame()
+        with patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region',
+                             return_value=region_hit) as scan, \
+                patch('time.time', return_value=now):
+            task._detect_and_act(frame, now, task.config,
+                                 task.get_global_config())
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if '决策 ' in c.args[0]], scan
+
+    def test_stale_identity_runs_scan_before_yolo(self):
+        # 身份过期 + 慢扫命中 → src=region,锚点被拉回真实位置,身份时间戳刷新
+        hit = AnchorHit(700.0, 890.0, 80, 'Yufeng咕咕')
+        lines, scan = self._beat(self._task(identity_age=30.0), region_hit=hit)
+        self.assertTrue(scan.called)
+        self.assertTrue(any('src=region' in l for l in lines), lines)
+
+    def test_stale_identity_scan_miss_still_falls_to_yolo(self):
+        # 慢扫没找到 → 照常让 YOLO 接管:复验只加验名机会,绝不新增丢锚
+        lines, scan = self._beat(self._task(identity_age=30.0), region_hit=None)
+        self.assertTrue(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_fresh_identity_does_not_scan(self):
+        # 身份还新鲜:不花这 118-235ms,维持原阶梯
+        lines, scan = self._beat(self._task(identity_age=1.0))
+        self.assertFalse(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_recheck_is_throttled(self):
+        # 复验自身限频:刚扫过就不再扫(慢扫最坏 235ms,不许每拍都跑)
+        task = self._task(identity_age=30.0)
+        task._last_identity_scan = 99.0     # 1s 前扫过 < 身份复验间隔(3s)
+        lines, scan = self._beat(task)
+        self.assertFalse(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_switch_off_restores_old_ladder(self):
+        lines, scan = self._beat(self._task(identity_age=30.0,
+                                            **{'身份复验开关': False}))
+        self.assertFalse(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_shares_one_scan_per_beat_with_forced_rescan(self):
+        # 受击 + 身份过期同拍撞上:慢扫最坏 235ms,只许跑一次。复验那次就算数,
+        # 悬着的强制重扫按已消费处理(否则同拍扫两次,主循环直接被打满)
+        task = self._task(identity_age=30.0)
+        task._force_rescan = True
+        _, scan = self._beat(task)
+        scan.assert_called_once()
+        self.assertFalse(task._force_rescan)
+        self.assertEqual(task._last_forced_rescan, 100.0)
+
 class TestForcedRescanWiring(unittest.TestCase):
     """事件触发即时慢扫(spec §3.5):三级全失 +(受击 或 锚点超龄)→ 绕过 2s 节流。"""
 
@@ -2824,6 +2997,8 @@ class TestForcedRescanWiring(unittest.TestCase):
         task._anchor_time = 99.8
         task._last_anchor_hit = 99.8
         task._last_anchor_scan = 99.4   # 常规 2s 节流窗内:0.6s 前刚扫过
+        task._last_identity_hit = 99.9  # 身份新鲜:本类只测强制重扫,不让身份复验
+                                        # (§3.7,同样会绕过常规节流)插进来抢这次慢扫
         return task
 
     def _beat(self, task, now=100.0):
