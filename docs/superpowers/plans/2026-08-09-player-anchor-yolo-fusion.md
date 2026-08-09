@@ -295,7 +295,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_ana
 ```
 预期：全绿。
 
-- [x] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**（本机无 `logs/ok-script.2026-08-08.log`，已按计划跳过，提交信息注明）
+- [x] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**（执行代理在隔离环境跳过并误称"本机无日志"——日志在主检出存在（logs/ 被 gitignore，worktree 里看不到）；2026-08-09 执行评审已在主检出代跑通过：A=28.5%、B p90=2.16s 中位 0.69s，与 spec §1.2 吻合，尺子有效）
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py logs\ok-script.2026-08-08.log
@@ -1263,6 +1263,8 @@ Copy-Item assets\mob_model\mob.onnx ("assets\mob_model\mob.onnx.bak_" + (Get-Dat
 
 **权重注意**：项目根只有 `yolov8n.pt`，**没有 yolov8m.pt**。`model=yolov8m.pt` 用裸名（不带路径前缀）——ultralytics 对裸官方名会自动联网下载到当前目录（dataset/）；带 `..\` 前缀则按本地文件找、直接报不存在。离线环境退用 `model=..\yolov8n.pt`（n 跑通全流程，回归门照跑；player mAP50 不过门再补 m 重训）。
 
+**mobs.yaml 路径注意**（2026-08-09 执行评审观察）：Task 6 已把 `path` 从 `.` 改为 `dataset`；ultralytics 对 data yaml 的相对 `path` 按其 settings 的 DATASETS_DIR 解析，旧值 `path: .` 曾成功训出 mob_bootstrap。若本步训练报 dataset not found，第一嫌疑就是这一行——改回 `path: .`（保持从 dataset 目录执行）再试。
+
 ```powershell
 Set-Location dataset
 ..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=mob_player_v1
@@ -1338,7 +1340,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py 
 
 - [ ] **Step 3: E2E 截图取证（按 AGENTS.md §11.5 流程,视觉模型验收）**
 
-三张必备：怪堆遮挡中绿框咬住角色本体、路人同屏绿框没跳、决策日志里 `src=yolo` 拍的同时刻画面。存 `screenshots/e2e/player-anchor-fusion/`，文件名带日期。误认抽查：`Select-String 'src=yolo' logs\ok-script.log`（全篇命令均为 PowerShell）看 `关联距=` 分布，>150 的拍逐个对截图。
+三张必备：怪堆遮挡中绿框咬住角色本体、路人同屏绿框没跳、决策日志里 `src=yolo` 拍的同时刻画面。存 `screenshots/e2e/player-anchor-fusion/`，文件名带日期。误认抽查：`Select-String 'src=yolo' logs\ok-script.log`（全篇命令均为 PowerShell）看 `关联距=` 分布，>150 的拍逐个对截图。另留意**跳跃拍**：关联门以名字牌 y 为中心，player 框中心常态在其上方约 90px，半高 120 的实际纵向余量为向上 ~30px / 向下 ~210px（评审观察）——若跳跃中 src 频繁从 yolo 退级到 cached，把现象记进执行记录，供后续决定是否把门改为以身体中心为基准。
 
 - [ ] **Step 4: 归档 + 提交**
 
@@ -1368,3 +1370,7 @@ git commit -m "docs: 丢锚治理实弹验收——判据 A-F 实测归档"
 7. Task 7 Step 2 只加 `find_all` 一行（`find_mobs` mock 已存在于 make_task:36）；另修正 mock 计数 ~80→68、Task 11 grep→Select-String、标注器拖拽预览色让位 player 绿。
 
 **第二轮（2026-08-09，阻断项）**：并行会话的合并 `ffc16a3` 把第一轮对 Task 2 的三处编辑（Produces/门测试/实现）与 Architecture 行盖回了旧版，导致 `gate_player_boxes` 全计划被引用却无定义——执行到 Task 7 必然 `AttributeError`。已重新打上：门控抽成 `gate_player_boxes` 独立函数（门口径唯一事实源）、`select_player_box` 首行改调它（幂等，Task 7 先 gate 后 select 语义不变）、补「返回列表」测试。同轮修正：Task 9 Step 4 的 QC 从 train/val 改到 raw 源头（旧坑复发——`images/` 旁没有 txt，标注器开了也看不到框），并补 labels/ 与 raw 同名 txt 的拷贝一致性核对；Architecture 行与 Task 5 提交信息的「80」→「68」。已知不改项：`copy_map_frames` 要求 val 地图前 N 帧连续存在（`final_split.py:55-59` 缺帧 raise），执行 Task 9 时留意 val 地图帧数 ≥ `--frames`。
+
+## 执行评审记录（2026-08-09，Task 1-8 完成后）
+
+独立评审（b796905..28dccad，8 提交）结论：**无 Critical，放行 Task 9**。代码与计划逐字一致、旧测试 0 行删除、接缝全数完好（boxes=[] 不落回推理 / 'YOLO 找怪' 上下文保留 / WarriorDebugTask 与 ok/ 零改动）；实跑 12 模块 **426 tests 全绿（2 skipped）**、编译 OK。已处理：Task 1 Step 5 的"本机无日志"声明不实（worktree 看不到 gitignored logs/）——评审在主检出代跑通过（A=28.5%、B p90=2.16s，spec §1.2 吻合），Step 5 注记已改为真实情况。遗留观察（不阻断）：新测试类追加在 `if __name__ == '__main__'` 之后（官方 `-m unittest` 不受影响，脚本式直跑会漏收——如需挪 main 块到文件末尾，单独小提交做）；mobs.yaml `path` 解析风险已记入 Task 10；关联门纵向非对称已记入 Task 11。工具重测基线补充：同日志 sessionize 口径 C=41.4 段/小时（spec §5 的 ≈33 是未切段的粗估——通过线 ≤6 不受影响，Task 11 以工具口径为准）。
