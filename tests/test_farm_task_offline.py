@@ -2693,3 +2693,22 @@ class TestDecisionLineYoloFields(unittest.TestCase):
     def test_fields_appended_at_line_end(self):
         # 追加在行尾:analyze_anchor/analyze_seek 的前缀正则不受影响
         self.assertTrue(self._line().endswith('关联距=-'))
+
+
+class TestFindMobsBoxesParam(unittest.TestCase):
+    """find_mobs(boxes=) 纯过滤路径:一拍一次推理(spec §3.2)的接缝。
+    不碰 og/模型,boxes 路径必须完全离线可测。"""
+
+    def _fake(self, name):
+        return SimpleNamespace(x=0, y=0, width=10, height=10, name=name)
+
+    def test_boxes_param_filters_mobs_without_inference(self):
+        from src.task.BaseMapleTask import BaseMapleTask
+        m, p = self._fake('mob'), self._fake('player')
+        out = BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[m, p, m])
+        self.assertEqual(out, [m, m])
+
+    def test_empty_boxes_gives_empty_not_inference(self):
+        from src.task.BaseMapleTask import BaseMapleTask
+        # boxes=[] 也是「已推理过」:绝不能落回自推理分支(那会二次推理)
+        self.assertEqual(BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[]), [])

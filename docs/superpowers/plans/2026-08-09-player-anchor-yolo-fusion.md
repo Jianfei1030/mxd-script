@@ -610,7 +610,7 @@ git commit -m "feat: 决策行追加 yolo候选/关联距 字段——先造观�
   - `find_mobs(self, frame=None, threshold=0.5, boxes=None) -> [Box]`——`boxes` 非 None 时**纯过滤**（`b.name == 'mob'`），不推理；None 时旧行为（自己推理，WarriorDebugTask 等调用方不变）。
   - **设计约束**：`_detect_and_act` 继续经 `find_mobs` 拿怪——`tests/test_farm_task_offline.py` 有 68 处 `task.find_mobs = MagicMock(...)`，接缝名一换全部报废；`boxes=` 过滤参数让 mock 与真实路径同时成立。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestFindMobsBoxesParam(unittest.TestCase):
@@ -634,9 +634,9 @@ class TestFindMobsBoxesParam(unittest.TestCase):
 
 - [ ] **Step 2: 跑测试确认失败**
 
-预期：第二个用例 `find_mobs(boxes=[])` 走进旧分支 `from ok import og` 后 `AttributeError`（SimpleNamespace 无 frame）——或第一个用例 `TypeError: unexpected keyword 'boxes'`。
+预期：第二个用例 `find_mobs(boxes=[])` 走进旧分支 `from ok import og` 后 `AttributeError`（SimpleNamespace 无 frame）——或第一个用例 `TypeError: unexpected keyword 'boxes'`。实际为第一种（`TypeError: unexpected keyword 'boxes'`，2 错）。
 
-- [ ] **Step 3: 实现（替换 `BaseMapleTask.py:18-21`）**
+- [x] **Step 3: 实现（替换 `BaseMapleTask.py:18-21`）**
 
 ```python
     def find_mobs(self, frame=None, threshold=0.5, boxes=None):
@@ -656,7 +656,7 @@ class TestFindMobsBoxesParam(unittest.TestCase):
                                      threshold=threshold, label=-1)
 ```
 
-- [ ] **Step 4: 跑测试确认通过 + 全量单测全绿**
+- [x] **Step 4: 跑测试确认通过 + 全量单测全绿**
 
 - [ ] **Step 5: 提交**
 
