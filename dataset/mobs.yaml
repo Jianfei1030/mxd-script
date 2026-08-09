@@ -1,5 +1,6 @@
-path: .
+path: dataset
 train: images/train
 val: images/val
 names:
   0: mob
+  1: player

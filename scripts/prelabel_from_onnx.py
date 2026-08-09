@@ -46,7 +46,8 @@ def main():
             cy = (b.y + b.height / 2) / h
             bw = b.width / w
             bh = b.height / h
-            lines.append(f'0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}')
+            cls = 1 if b.name == 'player' else 0
+            lines.append(f'{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}')
         with open(txt_path, 'w', encoding='utf-8') as out:
             out.write('\n'.join(lines) + '\n')
         if lines:

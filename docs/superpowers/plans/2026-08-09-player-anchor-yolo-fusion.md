@@ -683,7 +683,7 @@ git commit -m "feat: find_all 一次全类别推理 + find_mobs(boxes=) 纯过�
   - `label_boxes.parse_label_line(line) -> [cls, cx, cy, w, h] | None`、`label_boxes.format_label_line(box) -> str`（模块级纯函数，标注 GUI 与测试共用）；
   - 标注 GUI：`c` 键切换当前类别（0=mob 红框 / 1=player 绿框），txt 首列写类别，重存不丢类别。
 
-- [ ] **Step 1: 写失败测试 `tests/test_label_boxes.py`（整文件）**
+- [x] **Step 1: 写失败测试 `tests/test_label_boxes.py`（整文件）**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -719,9 +719,9 @@ if __name__ == '__main__':
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**（ImportError：函数不存在）
+- [x] **Step 2: 跑测试确认失败**（ImportError：函数不存在）——实际 `ImportError: cannot import name 'format_label_line'`，与预期一致。
 
-- [ ] **Step 3: 改 `scripts/label_boxes.py`**
+- [x] **Step 3: 改 `scripts/label_boxes.py`**
 
 3a. 模块级纯函数（放在 `print_usage` 前）：
 
@@ -804,7 +804,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_lab
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for base in ['src','scripts','tests'] for p in pathlib.Path(base).rglob('*.py')]; print('OK')"
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dataset\raw\map1 --check
 ```
-预期：单测绿；编译 OK；`--check` 打印 sanity 通过。dic_labels 无独立单测（实例化要载模型，铁律 §11.4 环境依赖）——由 Task 10 部署验证覆盖。
+预期：单测绿；编译 OK；`--check` 打印 sanity 通过。dic_labels 无独立单测（实例化要载模型，铁律 §11.4 环境依赖）——由 Task 10 部署验证覆盖。实测全绿；`--check` 对 dataset/raw/map1 通过。
 
 - [ ] **Step 5: 提交**
 
