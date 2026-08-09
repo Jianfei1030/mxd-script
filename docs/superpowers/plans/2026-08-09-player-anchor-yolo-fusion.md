@@ -1046,7 +1046,7 @@ git commit -m "feat: 锚点阶梯插 YOLO 关联级——名字牌失效拍由 p
 - Produces: 配置键 `'丢锚立即重扫开关'`(True)；状态 `self._force_rescan`、`self._last_forced_rescan`。
 - **对既有 18 处 `_resolve_anchor` 3 参直呼用例（tests:1118-1450）的影响已逐一核过为零**：`:1083` 一带角色名空短路、`:1135` 一带锚点年龄 1s < 刷新间隔 2s 不触发 force，其余慢扫用例 `_last_anchor_scan=0.0` 常规窗本就到点（force 与否同一结果）。全量绿灯的预期成立；红了修实现，不许改旧测试。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestForcedRescanWiring(unittest.TestCase):
@@ -1124,9 +1124,9 @@ class TestForcedRescanWiring(unittest.TestCase):
         self.assertTrue(task._force_rescan)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**（`KeyError: '丢锚立即重扫开关'` / assert_called 失败）
+- [x] **Step 2: 跑测试确认失败**（`KeyError: '丢锚立即重扫开关'` / assert_called 失败）实际与预期一致：`AttributeError: 'MapleFarmTask' object has no attribute '_force_rescan'` + 3 处 region.assert_called 失败（节流窗内该扫没扫）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a. `DEFAULT_CONFIG`（`'身份保鲜(秒)': 10,` 之后）：
 
@@ -1177,9 +1177,9 @@ class TestForcedRescanWiring(unittest.TestCase):
             self._force_rescan = True   # 击退=位置跳变:下一检测拍绕过慢扫节流立刻重扫(spec §3.5)
 ```
 
-- [ ] **Step 4: 跑新测试类 + 全量单测全绿**
+- [x] **Step 4: 跑新测试类 + 全量单测全绿**实际：7/7 新用例通过；12 模块离线全量 423 全绿（6 skipped）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/MapleFarmTask.py tests/test_farm_task_offline.py

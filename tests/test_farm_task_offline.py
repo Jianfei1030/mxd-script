@@ -2810,3 +2810,78 @@ class TestYoloAnchorFusion(unittest.TestCase):
         # 同一对象:分流必须吃 find_all 的结果,不许自己再推理
         self.assertIs(kwargs.get('boxes'), task.find_all.return_value)
         self.assertTrue(any('怪=1' in l for l in lines), lines)
+
+
+class TestForcedRescanWiring(unittest.TestCase):
+    """事件触发即时慢扫(spec §3.5):三级全失 +(受击 或 锚点超龄)→ 绕过 2s 节流。"""
+
+    def _task(self, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', **cfg})
+        task.find_all = MagicMock(return_value=[])
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        task._anchor = (1200.0, 900.0)
+        task._anchor_time = 99.8
+        task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.4   # 常规 2s 节流窗内:0.6s 前刚扫过
+        return task
+
+    def _beat(self, task, now=100.0):
+        with patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region', return_value=None) as region, \
+                patch('time.time', return_value=now):
+            task._detect_and_act(_synthetic_frame(), now, task.config,
+                                 task.get_global_config())
+        return region
+
+    def test_knockback_flag_forces_immediate_rescan(self):
+        task = self._task()
+        task._force_rescan = True
+        region = self._beat(task)
+        region.assert_called_once()          # 节流窗内照样扫了
+        self.assertFalse(task._force_rescan)  # 消费即清
+        self.assertEqual(task._last_forced_rescan, 100.0)
+
+    def test_forced_rescan_rate_limited(self):
+        task = self._task()
+        task._force_rescan = True
+        task._last_forced_rescan = 99.7      # 0.3s 前刚强制扫过
+        self._beat(task).assert_not_called()
+
+    def test_stale_anchor_age_forces_rescan_without_knockback(self):
+        task = self._task()
+        task._anchor_time = 97.0             # 超龄 3s > 锚点刷新间隔 2s
+        task._last_anchor_hit = 97.0
+        self._beat(task).assert_called_once()
+
+    def test_cold_start_not_forced(self):
+        # 从未有锚点:保持旧 2s 节奏,不许 0.5s 高频扫(spec §3.5 冷启动例外)
+        task = self._task()
+        task._anchor = None
+        task._anchor_time = None
+        self._beat(task).assert_not_called()
+
+    def test_switch_off_restores_throttle(self):
+        task = self._task(**{'丢锚立即重扫开关': False})
+        task._force_rescan = True
+        self._beat(task).assert_not_called()
+
+    def test_any_hit_clears_pending_force(self):
+        # 位置重新观测到(此处 yolo 命中)→ 跳变已消化,悬着的强制扫描作废
+        task = self._task()
+        task._force_rescan = True
+        task.find_all = MagicMock(return_value=[SimpleNamespace(
+            x=1150, y=820, width=60, height=120, name='player')])
+        self._beat(task)
+        self.assertFalse(task._force_rescan)
+
+    def test_knockback_sets_flag_via_run(self):
+        # run() 级接线:HP 掉 2%+(受击)→ 置 _force_rescan。
+        # 角色名留空:锚点通道全程短路(_scan 空目标直接 None),
+        # 不 patch OCR 也绝不会真的加载 OCR 引擎(本用例只测受击接线)
+        task = make_task(**{'攻击模式': '检测', '角色名': ''})
+        task.find_all = MagicMock(return_value=[])
+        task._boxes_enabled = MagicMock(return_value=False)
+        run_with_frame(task, hp=1.0, now=100.0)
+        run_with_frame(task, hp=0.9, now=100.3)
+        self.assertTrue(task._force_rescan)

@@ -61,6 +61,7 @@ DEFAULT_CONFIG = {
     '模板匹配阈值': 0.2,
     'YOLO角色定位开关': True,
     '身份保鲜(秒)': 10,
+    '丢锚立即重扫开关': True,
     '丢怪保持(秒)': 1.0,
     '寻怪起步宽限(秒)': 0.3,
     '寻怪保持(秒)': 0.5,
@@ -199,6 +200,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
             'YOLO角色定位开关': '锚点阶梯第三级:名字牌模板与快窗 OCR 都没拿到时,用同一拍 YOLO 检出的 player 框接管角色位置(检测的是角色本体,任何名字牌遮挡都不影响;推理与找怪同拍共享,零额外开销)。身份仍由名字牌校准:该级只在已有锚点时参战,认错人风险由「身份保鲜(秒)」兜底。关掉 = 完全退回旧阶梯。丢锚拍占比 28.5%(2026-08-08 全天)的主解,详见 specs/2026-08-09-player-anchor-yolo-fusion-design.md',
             '身份保鲜(秒)': '距上次名字牌真实命中(模板/快窗/慢扫)超过此时长后,若屏幕上有多个玩家框,YOLO 级拒绝裁决(宁可退到慢扫/缓存,不认错路人);恰好只有一个玩家框时不受此限。调小 = 收紧防误认,调大 = 怪堆重度遮挡下更少丢锚。绿框跳到别的玩家身上时,先调小它',
+            '丢锚立即重扫开关': '本拍模板/快窗OCR/YOLO 三级全没拿到位置,且(刚受击 或 锚点已超过「锚点刷新间隔」没更新)时,立刻跑一次慢扫,不等 2 秒节流——丢锚常由击退位置跳变引起,常规节流恰好卡在最需要慢扫的时刻(基线里慢扫只占 2.2%)。强制扫描自身限频 0.5 秒(慢扫最坏 235ms,不许打满主循环)。关掉 = 旧节流行为',
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
             '寻怪起步宽限(秒)': '区内检测不到怪之后,还要再等多久才允许起步去追。**必须小于「丢怪保持(秒)」**,取等 = 退回修复前行为。为什么要分成两个值:丢怪保持是为 YOLO 漏检兜底的(单帧 recall 0.886,一拍漏检就松开攻击键,法师一次施法都放不出来),那个理由只对攻击键成立——多挥一刀空的代价,远小于多站一秒不动。2026-08-08 实测有 11.5% 的拍卡在丢怪保持窗里,其中 3310 拍屏幕上明明有怪却结构性禁止寻怪。攻击键本身不受此项影响(它由「有向攻击区内有没有怪」单独去抖)。寻怪方向一旦定下来,还被丢怪保持撑着的攻击信号会立刻作废,不会出现「一边追一边挥」',
@@ -268,6 +270,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
         self._last_identity_hit = 0.0  # 上次名字牌真实命中(template/window/region)时刻;0.0=从未。多候选裁决只在保鲜窗内放行;yolo 不刷新它(它不验名,spec §3.4)
         self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
+        self._force_rescan = False        # 受击置位:下一检测拍绕过慢扫节流(spec §3.5);任一通道命中即清(跳变已消化)
+        self._last_forced_rescan = 0.0    # 上次强制慢扫时刻;0.0 哨兵=从未,配合 FORCED_RESCAN_MIN_INTERVAL 限频
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -306,6 +310,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._anchor_vx = farm_logic.anchor_vx_update(self._anchor_vx, dx, dt, dy)
         self._anchor, self._anchor_time = (hit.x, hit.y), now
         self._last_anchor_hit = now
+        self._force_rescan = False   # 任一通道命中 = 位置重新观测到,悬着的强制扫描作废
 
     def _extrapolated_anchor_x(self, now, cfg):
         """寻怪中锚点超龄 → 角色此刻应在的水平 x(实测速度优先,无实测用配置速度 × 寻怪方向)。
@@ -476,8 +481,20 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     self._update_anchor(pseudo, now)
                     return pseudo, 'yolo'
 
-        if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
+        # 丢锚立即重扫(spec §3.5):三级全失 + (受击 或 锚点超龄) → 绕过常规 2s 节流。
+        # 丢锚常由击退位置跳变引起,常规节流恰好卡在最需要慢扫的时刻(基线慢扫占 2.2%)。
+        # _anchor_time is None(冷启动)不参战:无锚常态保持旧 2s 节奏,不许 0.5s 高频扫。
+        force = (cfg.get('丢锚立即重扫开关')
+                 and (self._force_rescan
+                      or (self._anchor_time is not None
+                          and now - self._anchor_time > cfg['锚点刷新间隔(秒)'])))
+        if farm_logic.should_rescan_anchor(now, self._last_anchor_scan,
+                                           cfg['锚点刷新间隔(秒)'], force=force,
+                                           last_forced=self._last_forced_rescan):
             self._last_anchor_scan = now
+            if force:
+                self._last_forced_rescan = now
+            self._force_rescan = False   # 消费:这次扫描就是它要的那次
             region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
                                           cfg['锚点搜索区中心Y(比例)'])
             try:
@@ -1032,6 +1049,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 它顺带提供的「打破目标侧锁定死锁」由朝向纠正正面接管(spec §3.3)。
             self._last_turn = 0.0
             self._last_hit = now
+            self._force_rescan = True   # 击退=位置跳变:下一检测拍绕过慢扫节流立刻重扫(spec §3.5)
         self._prev_hp = hp
 
         # 2-3.5. 喝血/喝蓝/药水耗尽保护。喝药开关关闭时整段跳过:
