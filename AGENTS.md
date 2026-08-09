@@ -113,17 +113,17 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 
 **yolov8n（轻量级，3.2M 参数）**：
 ```powershell
-C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=C:\projects\mxd-script\yolov8n.pt imgsz=1280 epochs=50 batch=8 device=0 project=runs name=<名>
+..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=..\yolov8n.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=<名>
 ```
-- RTX 4090 训练 50 epochs 仅 ~1.4 分钟
+- 从 **dataset 目录**执行（`mobs.yaml` 的 `path: .` 相对 cwd 解析）
+- RTX 5070 Ti 训练 200 epochs ~30 分钟（10s/epoch）
 
 **yolov8m（更强，25.9M 参数，推荐用于正式训练）**：
 ```powershell
-C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=C:\projects\mxd-script\yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=<名>
+..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=<名>
 ```
-- RTX 4090 训练 200 epochs ~8 分钟
-- mAP50-95 比 yolov8n 提升 +4.6%（0.841 → 0.880）
-- **注意**：mob.onnx（99MB）已加入 .gitignore，不会提交到仓库，其他人需自行训练或单独获取
+- `yolov8m.pt` 用裸名，ultralytics 自动联网下载；离线用 `model=..\yolov8n.pt` 退级
+- **注意**：mob.onnx（12MB）**已入库**（spec §M3），训练新模型后记得提交；备份 `.onnx.bak_*` 在 .gitignore 不入库
 
 **共同要求**：
 - `python -m ultralytics` **报 No module named ultralytics.__main__**，必须用 `yolo.exe`
@@ -131,13 +131,14 @@ C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model
 
 ### 3.3 导出 ONNX
 ```powershell
-C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe export model=runs\detect\runs\<名>\weights\best.pt format=onnx imgsz=1280
+..\.venv-warrior\Scripts\yolo.exe export model=runs\detect\runs\<名>\weights\best.pt format=onnx imgsz=1280
 ```
+- 从 **dataset 目录**执行；产物路径带 `detect/runs/` 层（ultralytics 8.4.x 自动嵌套）
 
 ### 3.4 部署
 - 实机加载路径：`assets/mob_model/mob.onnx`（`src/globals.py:21`）
 - 部署前**备份旧模型**：`Copy-Item "assets\mob_model\mob.onnx" "assets\mob_model\mob.onnx.bak_<日期>"`
-- 训练产物在 `runs/detect/runs/<名>/weights/`
+- 训练产物在 `dataset/runs/detect/runs/<名>/weights/`
 
 ---
 

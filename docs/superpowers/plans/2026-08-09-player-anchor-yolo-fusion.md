@@ -1252,14 +1252,14 @@ QC 在 raw 做（不是 train/val——`images/` 旁没有 txt，对它开标注
 - Produces: 双类别 onnx 模型；Task 11 实机验收依赖它。
 - **产物路径实证**：`yolo train project=runs name=<名>`（从 dataset 目录执行）产物在 `dataset/runs/<名>/`——现有 `dataset/runs/mob_bootstrap/`（args.yaml、曲线图直接在内）就是这个结构；AGENTS.md §3.4 的 `runs/detect/runs/<名>/` 嵌套与实际不符，照抄会在 export/冒烟时找不到 best.pt。
 
-- [ ] **Step 1: 记录现役基线 + 备份模型**
+- [x] **Step 1: 记录现役基线 + 备份模型**
 
 ```powershell
 Get-Content dataset\runs\mob_bootstrap\results.csv -Tail 3   # 现役训练(目录名以 dataset\runs\ 下实际为准),抄下 mob mAP50/mAP50-95
 Copy-Item assets\mob_model\mob.onnx ("assets\mob_model\mob.onnx.bak_" + (Get-Date -Format yyyyMMdd))
 ```
 
-- [ ] **Step 2: 训练（必须从 dataset 目录执行；yolov8m 200ep，4090 约 8 分钟）**
+- [x] **Step 2: 训练（必须从 dataset 目录执行；yolov8m 200ep，4090 约 8 分钟）**
 
 **权重注意**：项目根只有 `yolov8n.pt`，**没有 yolov8m.pt**。`model=yolov8m.pt` 用裸名（不带路径前缀）——ultralytics 对裸官方名会自动联网下载到当前目录（dataset/）；带 `..\` 前缀则按本地文件找、直接报不存在。离线环境退用 `model=..\yolov8n.pt`（n 跑通全流程，回归门照跑；player mAP50 不过门再补 m 重训）。
 
@@ -1271,14 +1271,14 @@ Set-Location dataset
 Set-Location ..
 ```
 
-- [ ] **Step 3: 回归门（spec §3.1，不过门不许部署）**
+- [x] **Step 3: 回归门（spec §3.1，不过门不许部署）**
 
 看 `dataset/runs/mob_player_v1/` 的 per-class 指标（results.csv 末行 + 训练输出的 per-class 表）：
 - mob：mAP50/mAP50-95 **不低于 Step 1 抄下的现役值**（怕加类别把找怪弄坏）；
 - player：**mAP50 ≥ 0.90**。
 不过 → 回 Task 9 补数据/纠标注重训。把两组数字记进提交信息。
 
-- [ ] **Step 4: 导出 + 部署 + 冒烟**
+- [x] **Step 4: 导出 + 部署 + 冒烟**
 
 ```powershell
 Set-Location dataset
@@ -1303,7 +1303,7 @@ assert 'unknown' not in names, 'dic_labels 缺映射'
 "
 ```
 
-- [ ] **Step 5: 修正 AGENTS.md 过时路径 + 提交（模型 99MB 在 .gitignore,不入库）**
+- [x] **Step 5: 修正 AGENTS.md 过时路径 + 提交（模型 99MB 在 .gitignore,不入库）**
 
 AGENTS.md 三处按实际布局修正（其余原样，`dataset/mobs.yaml` 已在 Task 6 提交过、此处无改动）：
 - §3.2 两条训练命令：`C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe` → `..\.venv-warrior\Scripts\yolo.exe`（从 dataset 执行）、`model=C:\projects\mxd-script\yolov8n.pt` → `model=..\yolov8n.pt`；
