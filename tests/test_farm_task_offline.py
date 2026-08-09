@@ -34,6 +34,7 @@ def make_task(**cfg_overrides):
     task.log_info = MagicMock()
     task.log_debug = MagicMock()
     task.find_mobs = MagicMock(return_value=[])
+    task.find_all = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
     return task
 
@@ -2712,3 +2713,100 @@ class TestFindMobsBoxesParam(unittest.TestCase):
         from src.task.BaseMapleTask import BaseMapleTask
         # boxes=[] 也是「已推理过」:绝不能落回自推理分支(那会二次推理)
         self.assertEqual(BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[]), [])
+
+
+class TestYoloAnchorFusion(unittest.TestCase):
+    """YOLO 关联级(spec §3.3/§3.4):名字牌两级都失效时接管位置;
+    身份规则、冷启动、开关、伪锚点换算全在这里锁死。
+    OCR 两条通道一律 patch 成 None——测的是阶梯裁决,不是 OCR。"""
+
+    def _player(self, cx, cy, w=60, h=120):
+        return SimpleNamespace(x=cx - w / 2, y=cy - h / 2,
+                               width=w, height=h, name='player')
+
+    def _task(self, players, identity_age=1.0, anchored=True, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '决策日志开关': True, **cfg})
+        task.find_all = MagicMock(return_value=list(players))
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        if anchored:
+            task._anchor = (1200.0, 900.0)
+            task._anchor_time = 99.8      # 新鲜(<0.5s),不外推:搜索中心就是 1200
+            task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.9     # 慢扫节流窗内 → 慢扫不参战
+        task._last_identity_hit = 100.0 - identity_age
+        return task
+
+    def _beat(self, task, now=100.0):
+        frame = _synthetic_frame()
+        with patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region', return_value=None), \
+                patch('time.time', return_value=now):
+            task._detect_and_act(frame, now, task.config,
+                                 task.get_global_config())
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if '决策 ' in c.args[0]]
+
+    def test_occluded_nametag_yolo_takes_over(self):
+        # 名字牌两级全失,门内一个 player 框 → src=yolo,伪锚点=框中心+偏移
+        lines = self._beat(self._task([self._player(1180, 880)]))
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        # body_x = 框中心 x(伪锚点往返,spec §3.4);关联距 = |1180-1200| = 20
+        self.assertTrue(any('body_x=1180' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=1 关联距=20' in l for l in lines), lines)
+
+    def test_yolo_hit_recenters_next_window(self):
+        # 伪锚点喂 _update_anchor:遮挡一散名字牌在正确位置重新咬住(spec §3.4)
+        task = self._task([self._player(1180, 880)])
+        self._beat(task)
+        self.assertEqual(task._anchor, (1180.0, 880.0 + task.config['名字牌到身体偏移(像素)']))
+        self.assertEqual(task._last_anchor_hit, 100.0)
+
+    def test_yolo_does_not_refresh_identity(self):
+        # yolo 不验名,不许刷新身份时间戳(spec §3.4)
+        task = self._task([self._player(1180, 880)], identity_age=5.0)
+        self._beat(task)
+        self.assertEqual(task._last_identity_hit, 95.0)
+
+    def test_two_players_stale_identity_falls_to_cached(self):
+        lines = self._beat(self._task(
+            [self._player(1180, 880), self._player(1300, 880)],
+            identity_age=30.0))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertFalse(any('src=yolo' in l for l in lines))
+
+    def test_two_players_fresh_identity_picks_nearest(self):
+        lines = self._beat(self._task(
+            [self._player(1300, 880), self._player(1180, 880),
+             self._player(2000, 880)],   # 第三个在门外(|2000-1200|>240):不参与,也不计入候选数
+            identity_age=1.0))
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        # 候选数 = 门内 2,不是全屏 3(gate_player_boxes 口径)
+        self.assertTrue(any('yolo候选=2' in l for l in lines), lines)
+        self.assertTrue(any('body_x=1180' in l for l in lines), lines)
+
+    def test_cold_start_never_uses_yolo(self):
+        # 从未有过名字牌命中:没有先验位置就没有门,首个身份必须由慢扫建立
+        task = self._task([self._player(1180, 880)], anchored=False)
+        task._last_anchor_scan = 0.0   # 让慢扫真的跑(mock 返回 None → miss)
+        lines = self._beat(task)
+        self.assertTrue(any('src=fallback' in l for l in lines), lines)
+        self.assertFalse(any('src=yolo' in l for l in lines))
+
+    def test_switch_off_restores_old_ladder(self):
+        lines = self._beat(self._task([self._player(1180, 880)],
+                                      **{'YOLO角色定位开关': False}))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+
+    def test_mobs_come_from_find_mobs_filter_players_from_find_all(self):
+        # 分流接线:mob 走 find_mobs(boxes=find_all结果),player 走 find_all(spec §3.2)
+        mob = SimpleNamespace(x=1400, y=850, width=60, height=50, name='mob')
+        task = self._task([self._player(1180, 880), mob])
+        task.find_mobs = MagicMock(return_value=[mob])
+        lines = self._beat(task)
+        task.find_mobs.assert_called_once()
+        _, kwargs = task.find_mobs.call_args
+        # 同一对象:分流必须吃 find_all 的结果,不许自己再推理
+        self.assertIs(kwargs.get('boxes'), task.find_all.return_value)
+        self.assertTrue(any('怪=1' in l for l in lines), lines)

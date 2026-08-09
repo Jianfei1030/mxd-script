@@ -59,6 +59,8 @@ DEFAULT_CONFIG = {
     '玩家高(像素)': 120,
     '模板分片匹配开关': True,
     '模板匹配阈值': 0.2,
+    'YOLO角色定位开关': True,
+    '身份保鲜(秒)': 10,
     '丢怪保持(秒)': 1.0,
     '寻怪起步宽限(秒)': 0.3,
     '寻怪保持(秒)': 0.5,
@@ -195,6 +197,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '玩家高(像素)': '同「玩家宽(像素)」,仅调试画框用',
             '模板分片匹配开关': '名字牌模板快通道:OCR 完整命中时自动把名字牌裁成白字二值化模板(存 screenshots/nametag_templates/),之后每帧先用模板竖切分片匹配定位角色——怪/宠的名字牌盖住一半也照样命中,且不跑 OCR;匹配失败自动落回 OCR。怪堆里"一直寻怪不攻击"(名字牌被盖 → OCR 失败 → 锚点冻结)的主要解法',
             '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
+            'YOLO角色定位开关': '锚点阶梯第三级:名字牌模板与快窗 OCR 都没拿到时,用同一拍 YOLO 检出的 player 框接管角色位置(检测的是角色本体,任何名字牌遮挡都不影响;推理与找怪同拍共享,零额外开销)。身份仍由名字牌校准:该级只在已有锚点时参战,认错人风险由「身份保鲜(秒)」兜底。关掉 = 完全退回旧阶梯。丢锚拍占比 28.5%(2026-08-08 全天)的主解,详见 specs/2026-08-09-player-anchor-yolo-fusion-design.md',
+            '身份保鲜(秒)': '距上次名字牌真实命中(模板/快窗/慢扫)超过此时长后,若屏幕上有多个玩家框,YOLO 级拒绝裁决(宁可退到慢扫/缓存,不认错路人);恰好只有一个玩家框时不受此限。调小 = 收紧防误认,调大 = 怪堆重度遮挡下更少丢锚。绿框跳到别的玩家身上时,先调小它',
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
             '寻怪起步宽限(秒)': '区内检测不到怪之后,还要再等多久才允许起步去追。**必须小于「丢怪保持(秒)」**,取等 = 退回修复前行为。为什么要分成两个值:丢怪保持是为 YOLO 漏检兜底的(单帧 recall 0.886,一拍漏检就松开攻击键,法师一次施法都放不出来),那个理由只对攻击键成立——多挥一刀空的代价,远小于多站一秒不动。2026-08-08 实测有 11.5% 的拍卡在丢怪保持窗里,其中 3310 拍屏幕上明明有怪却结构性禁止寻怪。攻击键本身不受此项影响(它由「有向攻击区内有没有怪」单独去抖)。寻怪方向一旦定下来,还被丢怪保持撑着的攻击信号会立刻作废,不会出现「一边追一边挥」',
@@ -262,6 +266,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._facing_template = None      # 朝向模板(灰度 58x66);None=还没采到
         self._facing_template_dir = None  # 模板自身朝向 'LEFT'/'RIGHT';None=未知
         self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
+        self._last_identity_hit = 0.0  # 上次名字牌真实命中(template/window/region)时刻;0.0=从未。多候选裁决只在保鲜窗内放行;yolo 不刷新它(它不验名,spec §3.4)
+        self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -397,13 +403,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._log_detect_error(time.time(), '朝向观测', e)
             return None, 0.0, 0.0
 
-    def _resolve_anchor(self, frame, now, cfg):
+    def _resolve_anchor(self, frame, now, cfg, players=()):
         """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
         模板分片快通道(白字二值化模板竖切分片匹配,零 OCR 开销;怪的名字牌盖住一半
         也照样命中——怪堆里"一直寻怪不攻击"的主解) → OCR 快通道(上次锚点附近小窗,
-        寻怪中超龄时小窗跟外推位置) → 慢通道(中央区分块,节流) → 沿用上次(寻怪中
-        超龄则按外推位置回) → 回退(屏幕中心 x + 最后已知层高 y)。
+        寻怪中超龄时小窗跟外推位置) → **YOLO 关联级**(名字牌两级都没拿到时,用同拍
+        检出的 player 框接管;身份保鲜兜底防认错路人,spec §3.3/§3.4) → 慢通道
+        (中央区分块,节流) → 沿用上次(寻怪中超龄则按外推位置回) → 回退(屏幕中心 x
+        + 最后已知层高 y)。
         名字牌被遮挡 OCR 连续失败时,攻击区不再冻在旧位置——有模板一帧咬住真实位置,
         没模板则边走路边外推,怪进区就能接战(2026-08-06 实测"身边很多怪时一直寻怪
         不攻击"根因,spec §4.2)。
@@ -411,7 +419,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         锚点"处理,绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的
         通用 except 抓住并直接 disable() 整个任务,连保命/喝药都会停,违反
         "无怪只停手,任务继续跑"的契约。
+        players 为空(旧 3 参调用/定频模式)时 YOLO 级短路,行为完全退回旧阶梯。
         """
+        self._last_yolo_info = None   # 本拍观测先清:非 yolo 来源时决策日志输出 '-'
         h, w = frame.shape[:2]
         centre = anchor.Anchor(w / 2.0, h / 2.0, 0)
         name = (cfg['角色名'] or '').strip()
@@ -433,6 +443,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     self._log_detect_error(now, '模板分片匹配', e)
                 if hit is not None:
                     self._update_anchor(hit, now)
+                    self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
                     return hit, 'template'
             try:
                 hit = anchor.find_in_window(frame, name, center, FAST_HALF_W, FAST_HALF_H)
@@ -441,9 +452,29 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._log_detect_error(now, '快通道锚点 OCR', e)
             if hit is not None:
                 self._update_anchor(hit, now)
+                self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
                 if (hit.text or '').strip() == name:  # 完整命中才裁模板
                     self._capture_nametag_template(frame, hit)
                 return hit, 'window'
+            # YOLO 关联级(spec §3.3):名字牌两条通道都没拿到,用同拍 player 框接管。
+            # 放在 OCR 之后——名字牌可读时身份持续刷新;放最前快通道永远轮不到,
+            # 身份就再也不校准。冷启动(_anchor is None)不进本块:外层 if 已保证。
+            if cfg.get('YOLO角色定位开关') and players:
+                gated = farm_logic.gate_player_boxes(players, center)
+                pbox = farm_logic.select_player_box(
+                    gated, center,
+                    now - self._last_identity_hit <= cfg['身份保鲜(秒)'])
+                if pbox is not None:
+                    pseudo = anchor.Anchor(
+                        pbox.x + pbox.width / 2,
+                        pbox.y + pbox.height / 2 + cfg['名字牌到身体偏移(像素)'],
+                        pbox.width)
+                    # 伪锚点 y = 框中心 + 名字牌偏移:body_center() 反算回来
+                    # 正好是框中心,下游(接敌区/同层/朝向)全部不用改(spec §3.4)
+                    self._last_yolo_info = (len(gated),
+                                            abs(pseudo.x - center[0]))
+                    self._update_anchor(pseudo, now)
+                    return pseudo, 'yolo'
 
         if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
             self._last_anchor_scan = now
@@ -456,6 +487,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._log_detect_error(now, '慢通道锚点 OCR', e)
             if hit is not None:
                 self._update_anchor(hit, now)
+                self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
                 if (hit.text or '').strip() == name:
                     self._capture_nametag_template(frame, hit)
                 return hit, 'region'
@@ -593,7 +625,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         完整检测拍与寻怪快速刷新拍共用。攻击键本身不在这里按——由 _do_attack
         按"_last_attack_present"以 攻击间隔 轻点。"""
-        anchor_hit, source = self._resolve_anchor(frame, now, cfg)
+        # 一拍一次推理(find_all),mob/player 从结果里纯过滤分流(spec §3.2):
+        # 找怪走 find_mobs(boxes=)(不含 player),锚点 YOLO 级走 players。模型类
+        # 别 1 = 任意玩家角色,身份判别完全在融合层(spec §3.3),这里只按名字筛。
+        try:
+            all_boxes = self.find_all(frame)
+        except Exception as e:
+            all_boxes = []
+            self._log_detect_error(now, 'YOLO 检测', e)
+        players = [b for b in all_boxes if getattr(b, 'name', None) == 'player']
+        anchor_hit, source = self._resolve_anchor(frame, now, cfg, players)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
         self._last_body_x = body[0]          # 走动确认要用
         if cfg.get('朝向观测开关'):
@@ -618,7 +659,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         attack_area = (zone if cfg.get('攻击区形状') == '群体(对称)'
                        else farm_logic.facing_half_zone(zone, body[0], self._facing))
         try:
-            mobs = self.find_mobs(frame)
+            mobs = self.find_mobs(frame, boxes=all_boxes)
         except Exception as e:
             mobs = []
             self._log_detect_error(now, 'YOLO 找怪', e)
@@ -771,12 +812,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             near = (m.x + m.width / 2 - body[0],
                     (m.y + m.height) - anchor_hit.y,
                     (m.y + m.height / 2) - body[1])
+        yolo_cands, yolo_dist = self._last_yolo_info or (None, None)
         self.log_debug(decision_log_line(
             source, body[0], anchor_hit.y, centres, in_zone, left,
             same_feet, same_center, near,
             raw_present, mob_present, attack_in, attack_present,
             facing_before, self._facing, turn, self._seek_dir,
-            self._key_sendable(), observed, obs_s, obs_flip))
+            self._key_sendable(), observed, obs_s, obs_flip,
+            yolo_cands=yolo_cands, yolo_dist=yolo_dist))
         if observed is not None and facing_before in ('LEFT', 'RIGHT') \
                 and observed != facing_before:
             now = time.time()

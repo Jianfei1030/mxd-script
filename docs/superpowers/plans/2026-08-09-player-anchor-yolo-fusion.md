@@ -295,14 +295,14 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_ana
 ```
 预期：全绿。
 
-- [ ] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**（本机无 `logs/ok-script.2026-08-08.log`，已按计划跳过，提交信息注明）
+- [x] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**（本机无 `logs/ok-script.2026-08-08.log`，已按计划跳过，提交信息注明）
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py logs\ok-script.2026-08-08.log
 ```
 预期：A ≈ 28.5%、B p90 ≈ 2.2s（与 spec §1.2 手工统计一致，允许 ±0.5% 级别出入——正则口径差异要查明才许过）。日志缺失的机器跳过本步并在提交信息注明。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add scripts/analyze_anchor.py tests/test_analyze_anchor.py
@@ -380,7 +380,7 @@ class TestSelectPlayerBox(unittest.TestCase):
                          [inside])
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic -v 2>&1 | Select-String "select_player|FAILED|Error"
@@ -439,7 +439,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
 ```
 预期：全绿（含既有用例）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/farm_logic.py tests/test_farm_logic.py
@@ -486,7 +486,7 @@ class TestForcedRescan(unittest.TestCase):
             102.0, 100.0, 2, force=True, last_forced=101.9))
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 预期：`TypeError: should_rescan_anchor() got an unexpected keyword argument 'force'`。实际与预期一致（3 错,`test_no_force_keeps_old_behavior` 不传 force 自然过）。
 
@@ -513,7 +513,7 @@ def should_rescan_anchor(now, last_scan, interval, force=False,
 
 - [x] **Step 4: 跑测试确认通过（整个 test_farm_logic 全绿，含旧的 167-168 行）**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/farm_logic.py tests/test_farm_logic.py
@@ -557,7 +557,7 @@ class TestDecisionLineYoloFields(unittest.TestCase):
         self.assertTrue(self._line().endswith('关联距=-'))
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_task_offline.TestDecisionLineYoloFields -v
@@ -588,7 +588,7 @@ return 表达式最后一行 `f'分值=...'` 之后追加：
 
 全量命令见 Global Constraints。既有 `tests.test_analyze_anchor`（Task 1 用 `decision_log_line` 构造样本行）必须仍绿——它证明前缀正则真的兼容新字段。实测全量 402 绿,test_analyze_anchor 未动。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/MapleFarmTask.py tests/test_farm_task_offline.py
@@ -632,7 +632,7 @@ class TestFindMobsBoxesParam(unittest.TestCase):
         self.assertEqual(BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[]), [])
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 预期：第二个用例 `find_mobs(boxes=[])` 走进旧分支 `from ok import og` 后 `AttributeError`（SimpleNamespace 无 frame）——或第一个用例 `TypeError: unexpected keyword 'boxes'`。实际为第一种（`TypeError: unexpected keyword 'boxes'`，2 错）。
 
@@ -658,7 +658,7 @@ class TestFindMobsBoxesParam(unittest.TestCase):
 
 - [x] **Step 4: 跑测试确认通过 + 全量单测全绿**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/BaseMapleTask.py tests/test_farm_task_offline.py
@@ -797,7 +797,7 @@ names:
   1: player
 ```
 
-- [ ] **Step 4: 跑测试 + 编译检查**
+- [x] **Step 4: 跑测试 + 编译检查**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_label_boxes -v
@@ -806,7 +806,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dat
 ```
 预期：单测绿；编译 OK；`--check` 打印 sanity 通过。dic_labels 无独立单测（实例化要载模型，铁律 §11.4 环境依赖）——由 Task 10 部署验证覆盖。实测全绿；`--check` 对 dataset/raw/map1 通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/OpenVinoYolo8Detect.py dataset/mobs.yaml scripts/label_boxes.py scripts/prelabel_from_onnx.py tests/test_label_boxes.py
@@ -823,7 +823,7 @@ git commit -m "feat: 模型类别基建——class1=player(任意玩家),标注�
 - Consumes: `farm_logic.gate_player_boxes` / `select_player_box`（Task 2）、`find_all` / `find_mobs(boxes=)`（Task 5）、`decision_log_line(yolo_cands=, yolo_dist=)`（Task 4）
 - Produces: 锚点来源新标签 `'yolo'`；配置键 `'YOLO角色定位开关'`(True)、`'身份保鲜(秒)'`(10)；状态 `self._last_identity_hit`、`self._last_yolo_info`；`_resolve_anchor(self, frame, now, cfg, players=())` 新签名。**签名影响面**：src 内唯一调用点 `MapleFarmTask.py:561`；但 `tests/test_farm_task_offline.py:1118-1450` 另有 18 处 3 参直呼——`players=()` 默认值让它们不传新参照旧走老阶梯（空 players → YOLO 块短路），这些旧用例必须原样保持全绿，不许改。Task 8 在同函数内接慢扫强制门。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestYoloAnchorFusion(unittest.TestCase):
@@ -923,20 +923,20 @@ class TestYoloAnchorFusion(unittest.TestCase):
         self.assertTrue(any('怪=1' in l for l in lines), lines)
 ```
 
-- [ ] **Step 2: `make_task` 加 find_all 默认 mock（`tests/test_farm_task_offline.py:36` 的 `task.find_mobs = MagicMock(return_value=[])` 之后加一行,find_mobs 那行已存在勿重复）**
+- [x] **Step 2: `make_task` 加 find_all 默认 mock（`tests/test_farm_task_offline.py:36` 的 `task.find_mobs = MagicMock(return_value=[])` 之后加一行,find_mobs 那行已存在勿重复）**
 
 ```python
     task.find_all = MagicMock(return_value=[])
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_task_offline.TestYoloAnchorFusion -v
 ```
-预期：`KeyError: 'YOLO角色定位开关'` 或 src=yolo 断言失败。
+预期：`KeyError: 'YOLO角色定位开关'` 或 src=yolo 断言失败。实际与预期一致：8 个用例中 4 个失败（src=yolo 缺失,决策行落 src=cached;锚点未重定位）,其余 4 个（冷启动/过期身份/关开关/分流接线）本就测回退阶梯,天然通过。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 4a. `DEFAULT_CONFIG`（`'模板匹配阈值': 0.2,` 之后插入）：
 
@@ -1022,11 +1022,11 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
             yolo_cands=yolo_cands, yolo_dist=yolo_dist))
 ```
 
-- [ ] **Step 5: 跑新测试类 + 全量单测**
+- [x] **Step 5: 跑新测试类 + 全量单测**
 
-全量必须全绿：既有 68 处 `find_mobs` mock 用例与 18 处 `_resolve_anchor` 3 参直呼用例是「接缝未破坏」的回归证明。任何一个红都说明分流动了不该动的行为——修实现，不许改旧测试。
+全量必须全绿：既有 68 处 `find_mobs` mock 用例与 18 处 `_resolve_anchor` 3 参直呼用例是「接缝未破坏」的回归证明。任何一个红都说明分流动了不该动的行为——修实现，不许改旧测试。实际：8/8 新用例通过；12 模块离线全量 416 全绿（6 skipped）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add src/task/MapleFarmTask.py tests/test_farm_task_offline.py
