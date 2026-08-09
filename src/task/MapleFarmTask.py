@@ -186,7 +186,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '寻怪外推速度(像素/秒)': '寻怪中名字牌被怪遮挡、OCR 连续失败时,攻击区按此速度跟随走动中的角色(水平外推),怪进区即可接战;名字牌一露头快通道立刻重新咬住。无实测速度时用此值,实测行走速度约 250',
             '玩家宽(像素)': '仅用于调试可视化画框(勾选 GUI「启用标记框」时显示),不影响攻击判定',
             '玩家高(像素)': '同「玩家宽(像素)」,仅调试画框用',
-            '模板分片匹配开关': '名字牌模板快通道:OCR 完整命中时自动把名字牌裁成白字二值化模板(存 screenshots/nametag_templates/),之后每帧先用模板竖切分片匹配定位角色——怪/宠的名字牌盖住一半也照样命中,且不跑 OCR;匹配失败自动落回 OCR。怪堆里"一直寻怪不攻击"(名字牌被盖 → OCR 失败 → 锚点冻结)的主要解法',
+            '模板分片匹配开关': '名字牌模板快通道:OCR 完整命中时自动把名字牌裁成白字二值化模板(存 screenshots/nametag_templates/),之后每帧先用模板竖切分片匹配定位角色——怪/宠的名字牌盖住一半也照样命中,且不跑 OCR;匹配失败自动落回 OCR。怪堆里"一直寻怪不攻击"(名字牌被盖 → OCR 失败 → 锚点冻结)的主要解法。命中后还会验证位置周围有暗底(名字牌有暗色半透明底框),拒绝云/天空误匹配',
             '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
@@ -393,10 +393,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def _resolve_anchor(self, frame, now, cfg):
         """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
-        模板分片快通道(白字二值化模板竖切分片匹配,零 OCR 开销;怪的名字牌盖住一半
-        也照样命中——怪堆里"一直寻怪不攻击"的主解) → OCR 快通道(上次锚点附近小窗,
-        寻怪中超龄时小窗跟外推位置) → 慢通道(中央区分块,节流) → 沿用上次(寻怪中
-        超龄则按外推位置回) → 回退(屏幕中心 x + 最后已知层高 y)。
+        模板分片快通道(白字二值化模板竖切分片匹配 + 暗底验证,零 OCR 开销;
+        怪/宠的名字牌盖住一半也照样命中,命中后验证暗底拒绝云/天空误匹配)
+        → OCR 快通道(上次锚点附近小窗,寻怪中超龄时小窗跟外推位置) → 慢通道
+        (中央区分块,节流) → 沿用上次(寻怪中超龄则按外推位置回) → 回退
+        (屏幕中心 x + 最后已知层高 y)。
         名字牌被遮挡 OCR 连续失败时,攻击区不再冻在旧位置——有模板一帧咬住真实位置,
         没模板则边走路边外推,怪进区就能接战(2026-08-06 实测"身边很多怪时一直寻怪
         不攻击"根因,spec §4.2)。
@@ -411,16 +412,25 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         if not name:
             return centre, 'fallback'
 
+        # 蓝框=锚点搜索区(与 _draw_debug 画的「名字搜索范围」同一区域)。
+        # 模板匹配与快通道 OCR 的窗口都裁到它里面——蓝框是锚点搜索的合法边界,
+        # 不许任何通道跑框外(框外的组队列表/状态栏写着一模一样的角色名)。
+        region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'],
+                                      cfg['锚点搜索区高(比例)'],
+                                      cfg['锚点搜索区中心Y(比例)'])
+
         if self._anchor is not None:
             search_x = self._extrapolated_anchor_x(now, cfg)
             center = (search_x, self._anchor[1])
             # 模板分片快通道:每次 OCR 完整命中都会自动更新模板(见 _capture_nametag_template),
             # 名字牌一被怪盖住左半,右半片照样命中,OCR 反而读不出东西——这条通道正是为
-            # 这个时刻准备的。模板在窗外/超阈值/没模板 → 落回 OCR 快通道,阶梯照走。
+            # 这个时刻准备的。verify_dark=True:命中后再验证位置周围有暗底,
+            # 拒绝云/天空误匹配(名字牌有暗色半透明底框,云没有)。
             if self._nametag_template is not None and cfg['模板分片匹配开关']:
                 try:
                     hit = anchor.split_match(frame, self._nametag_template, center,
-                                             FAST_HALF_W, FAST_HALF_H, cfg['模板匹配阈值'])
+                                             FAST_HALF_W, FAST_HALF_H, cfg['模板匹配阈值'],
+                                             verify_dark=True, clamp_region=region)
                 except Exception as e:
                     hit = None
                     self._log_detect_error(now, '模板分片匹配', e)
@@ -428,7 +438,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     self._update_anchor(hit, now)
                     return hit, 'template'
             try:
-                hit = anchor.find_in_window(frame, name, center, FAST_HALF_W, FAST_HALF_H)
+                hit = anchor.find_in_window(frame, name, center, FAST_HALF_W, FAST_HALF_H,
+                                            clamp_region=region)
             except Exception as e:
                 hit = None
                 self._log_detect_error(now, '快通道锚点 OCR', e)
@@ -440,8 +451,6 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
             self._last_anchor_scan = now
-            region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
-                                          cfg['锚点搜索区中心Y(比例)'])
             try:
                 hit = anchor.find_in_region(frame, name, region)
             except Exception as e:

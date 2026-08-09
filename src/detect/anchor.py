@@ -17,6 +17,11 @@
   模板只含文字本身,背景怎么变都不影响匹配。模板再竖切 2 片分开匹配
   (TM_SQDIFF_NORMED,mask=片本身只比白字形像素):怪的名字牌盖住左半,
   右半片照样完美命中,定位返回整牌中心(详见 split_match / capture_template)
+- 暗底验证(2026-08-10):名字牌有深色半透明底框(亮度<100 占 ~40%),
+  白字叠加其上(亮度>150 占 ~35%)。纯白字模板匹配会误中云/天空(同为亮白色);
+  解法是先照常模板匹配,命中后再验证命中位置周围是否有暗底——
+  云/天空命中点无暗底,被拒绝;验证只查一个 ROI,开销微秒级。
+  宠物遮挡时暗底框仍完整,验证不受影响;TEMPLATE_SPLITS=4 覆盖更多遮挡组合。
 """
 import cv2
 import numpy as np
@@ -30,7 +35,13 @@ TILE_OVERLAP = 200  # 必须 > 名字牌宽度(实测 ~130px)
 
 WHITE_LOW = 150            # 白字二值化下界:只留白字形(255),其余归 0
 TEMPLATE_MIN_WHITE = 10    # 模板/分片的最少白像素:全黑(黑帧/空片)没有可比的字形
-TEMPLATE_SPLITS = 2        # 竖切片数:怪的名字牌盖左半,右半片照样命中
+TEMPLATE_SPLITS = 4        # 竖切片数:4片覆盖"端侧+大+模+型"各1字,宠物盖1-2字时其他片仍命中
+
+# 暗底验证参数(2026-08-10 实测名字牌特征:暗底 ~40%,白字 ~35%)
+DARK_BG_THRESH = 100       # 暗底阈值:亮度<100 的像素视为暗底
+DARK_BG_MIN_RATIO = 0.30   # 命中位置周围暗底最小占比:名字牌 ~40%,低于此可能是云/天空
+DARK_BG_VERIFY_PAD_X = 120 # 验证区域半宽(像素):名字牌宽 ~130-220,取框中心 ±120
+DARK_BG_VERIFY_HALF_H = 35 # 验证区域半高(像素):名字牌高 ~40-60,取框中心 ±35
 
 # OCR 预处理开关:名字牌是白字+黑描边+半透明底框,DB 检测器对高对比描边文字
 # 的边缘响应不稳,容易漏检小字(2026-08-08 实测:不配合模板匹配几乎找不到名字)。
@@ -101,18 +112,23 @@ def _enhance_for_ocr(img):
 
 
 def _matches(text, target):
-    """完全匹配,或被遮挡后只剩尾巴的部分匹配。
+    """完全匹配,或被遮挡/粘连后只剩部分文本的匹配。
 
-    只认后缀:遮挡源(自己的宠物牌、相邻玩家牌子)压在名字前半,OCR 只读出尾巴
-    (实测 'ng咕咕')——用它当近似锚点,好过战斗中连续多帧被挡满 10s 直接退化到
-    画面中心。尾巴太短(<半长)信息量不够,容易撞上别的同尾缀玩家,仍然丢弃。
-    粘连文本(如 '小白雪人ifeng咕咕')比 target 长,不可能是它的后缀,天然被排除。
+    场景(实测 2026-08-10):
+    - 怪/邻玩家牌压名字前半 → OCR 读出尾巴 'ng咕咕' → target.endswith(text)
+    - 白色雪人宠物挡名字右侧 → OCR 读出前缀 '端侧大' 甚至只剩 '端侧' → target.startswith(text)
+    - 名字牌与下方 CV 标签粘连 → OCR 读出 '端侧大模型CV' → text.startswith(target)
+    三者任一满足即收,好过退化到画面中心。半长 = len(target)//2,下限 2
+    (被挡剩 2 字 '端侧' 也算锚点)。太短(<半长)信息量不够,容易撞上别的
+    同字玩家,仍然丢弃。完全无关的粘连(如 '小白雪人ifeng咕咕')与 target
+    无公共前后缀,天然被排除。
     """
     text = text.strip()
     if text == target:
         return True
-    min_len = max(3, len(target) // 2)
-    return len(text) >= min_len and target.endswith(text)
+    min_len = max(2, len(target) // 2)
+    return (len(text) >= min_len and (target.endswith(text) or target.startswith(text))
+            or len(target) >= min_len and (text.startswith(target) or text.endswith(target)))
 
 
 def _scan(frame, name, boxes, ocr_fn):
@@ -137,13 +153,19 @@ def find_in_region(frame, name, region, ocr_fn=None):
     return _scan(frame, name, tiles(region), ocr_fn)
 
 
-def find_in_window(frame, name, center, half_w, half_h, ocr_fn=None):
-    """快通道:只看上次锚点周围的小窗。窗口会被裁到帧内。"""
+def find_in_window(frame, name, center, half_w, half_h, ocr_fn=None, clamp_region=None):
+    """快通道:只看上次锚点附近的小窗。窗口先裁到帧内,再裁到 clamp_region 内
+    (蓝框=锚点搜索区,快通道 OCR 不许超出它);两者交集为空 → 无命中。"""
     h, w = frame.shape[:2]
     cx, cy = center
-    box = (max(0, int(cx - half_w)), max(0, int(cy - half_h)),
-           min(w, int(cx + half_w)), min(h, int(cy + half_h)))
-    return _scan(frame, name, [box], ocr_fn)
+    x0, y0 = max(0, int(cx - half_w)), max(0, int(cy - half_h))
+    x1, y1 = min(w, int(cx + half_w)), min(h, int(cy + half_h))
+    if clamp_region is not None:
+        x0, y0 = max(x0, int(clamp_region[0])), max(y0, int(clamp_region[1]))
+        x1, y1 = min(x1, int(clamp_region[2])), min(y1, int(clamp_region[3]))
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return _scan(frame, name, [(x0, y0, x1, y1)], ocr_fn)
 
 
 def body_center(anchor_obj, offset_px):
@@ -167,6 +189,40 @@ def _to_white_binary(img):
     return cv2.inRange(blur, WHITE_LOW, 255)
 
 
+def has_dark_background(frame, hit, thresh=DARK_BG_THRESH,
+                        min_ratio=DARK_BG_MIN_RATIO,
+                        pad_x=None, half_h=DARK_BG_VERIFY_HALF_H):
+    """验证模板匹配命中位置周围是否有暗底(名字牌的半透明底框)。
+
+    名字牌是白字+暗色半透明底框(暗底占 ~40%);云/天空是纯亮色,命中点周围
+    无暗底。模板匹配命中后再做此验证,把误中的云/天空拒绝掉。
+
+    Args:
+        frame: BGR 图像
+        hit: AnchorHit 模板匹配命中
+        thresh: 暗底亮度阈值
+        min_ratio: 暗底最小占比,低于此视为无暗底(云/天空)
+        pad_x: 验证区域半宽(像素)。None 时按名字牌宽度推导
+               (hit.width*0.6,下限 60)——固定 240 会把周围亮背景带进来
+               稀释暗底占比(实测 frame_0256: 240 宽 29.1% 被拒,
+               名字牌宽 0.6 倍 94 后 30%+ 通过)。
+        half_h: 验证区域半高(像素)
+    Returns:
+        bool 命中位置周围是否有暗底
+    """
+    if pad_x is None:
+        pad_x = max(int(hit.width * 0.6), 60)
+    h, w = frame.shape[:2]
+    x0 = max(0, int(hit.x - pad_x))
+    x1 = min(w, int(hit.x + pad_x))
+    y0 = max(0, int(hit.y - half_h))
+    y1 = min(h, int(hit.y + half_h))
+    if x1 <= x0 or y1 <= y0:
+        return False
+    gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    return np.mean(gray < thresh) >= min_ratio
+
+
 def capture_template(frame, anchor_obj, pad=12, half_h=18):
     """OCR 完整命中时,以命中框为中心裁名字牌区域 → 白字二值化模板。
 
@@ -186,7 +242,8 @@ def capture_template(frame, anchor_obj, pad=12, half_h=18):
     return tmpl
 
 
-def split_match(frame, template, center, half_w, half_h, threshold, splits=TEMPLATE_SPLITS):
+def split_match(frame, template, center, half_w, half_h, threshold, splits=TEMPLATE_SPLITS,
+                verify_dark=False, clamp_region=None):
     """模板分片匹配:白字二值化帧 vs 二值模板,竖切 splits 片各自
     cv2.matchTemplate(TM_SQDIFF_NORMED)(不用 mask 参数:masked 归一化在
     全黑窗口会产出 inf/NaN,minMaxLoc 结果直接不可用;二值图上黑对黑本来就差 0,
@@ -194,11 +251,18 @@ def split_match(frame, template, center, half_w, half_h, threshold, splits=TEMPL
     怪的名字牌盖住一片,另一片照样命中,定位返回整牌中心。
     分数超 threshold(0=完全一致)→ 无命中;窗口内放不下模板 → 无命中。
     空白片(没有白字形)跳过;全黑窗口平方差归一化会除 0 得 inf,靠
-    `not (score <= threshold)` 一并拒绝(inf/NaN 都不放行)。"""
+    `not (score <= threshold)` 一并拒绝(inf/NaN 都不放行)。
+    verify_dark=True 时,命中后再验证位置周围有暗底(名字牌特征),
+    云/天空误匹配(无暗底)被拒绝。
+    clamp_region=(x0,y0,x1,y1) 时窗口先裁到帧内再裁到它(蓝框=锚点搜索区,
+    模板匹配不许越界);两窗交集为空 → 无命中。"""
     h, w = frame.shape[:2]
     cx, cy = center
     x0, y0 = max(0, int(cx - half_w)), max(0, int(cy - half_h))
     x1, y1 = min(w, int(cx + half_w)), min(h, int(cy + half_h))
+    if clamp_region is not None:
+        x0, y0 = max(x0, int(clamp_region[0])), max(y0, int(clamp_region[1]))
+        x1, y1 = min(x1, int(clamp_region[2])), min(y1, int(clamp_region[3]))
     if x1 <= x0 or y1 <= y0:
         return None
     roi = _to_white_binary(frame[y0:y1, x0:x1])
@@ -220,8 +284,10 @@ def split_match(frame, template, center, half_w, half_h, threshold, splits=TEMPL
     if best_score is None or not (best_score <= threshold):
         return None
     lx, ly = best_loc
-    # 片命中位置回推整模板左上角:模板中心 = 片偏移 - 片起点 + 半模板宽
-    return AnchorHit(x0 + lx - best_xs + tw / 2.0, y0 + ly + th / 2.0, tw, '')
+    hit = AnchorHit(x0 + lx - best_xs + tw / 2.0, y0 + ly + th / 2.0, tw, '')
+    if verify_dark and not has_dark_background(frame, hit):
+        return None
+    return hit
 
 
 def save_template(template, path):
