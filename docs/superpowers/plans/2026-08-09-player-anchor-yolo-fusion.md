@@ -321,7 +321,7 @@ git commit -m "feat: analyze_anchor 丢锚判据 A-E 度量工具——尺子先
 - Consumes: 无（纯函数；player 框是任意带 `.x/.y/.width/.height` 属性的对象，与 `ok/feature/Box.py` 的 Box 同形）
 - Produces: `PLAYER_GATE_HALF_W = 240`、`PLAYER_GATE_HALF_H = 120`、`gate_player_boxes(players, pred, half_w=..., half_h=...) -> [box]`（门口径的唯一事实源——决策日志的 `yolo候选` 记的就是它的长度）、`select_player_box(players, pred, identity_fresh, half_w=..., half_h=...) -> box | None`。Task 7 在 `_resolve_anchor` 调用两者。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
 
 ```python
 from types import SimpleNamespace
@@ -385,9 +385,9 @@ class TestSelectPlayerBox(unittest.TestCase):
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic -v 2>&1 | Select-String "select_player|FAILED|Error"
 ```
-预期：`AttributeError: module ... has no attribute 'PLAYER_GATE_HALF_W'`（或 select_player_box）。
+预期：`AttributeError: module ... has no attribute 'PLAYER_GATE_HALF_W'`（或 select_player_box）。实际与预期一致（select_player_box/PLAYER_GATE_HALF_W/gate_player_boxes 三处 AttributeError，8 个用例全红）。
 
-- [ ] **Step 3: 实现（追加到 `src/task/farm_logic.py` 末尾）**
+- [x] **Step 3: 实现（追加到 `src/task/farm_logic.py` 末尾）**
 
 ```python
 PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W,跨模块注释同步)
@@ -432,7 +432,7 @@ def select_player_box(players, pred, identity_fresh,
                + (b.y + b.height / 2 - py) ** 2)
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic -v

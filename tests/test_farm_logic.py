@@ -629,3 +629,59 @@ class TestFacingHalfZone(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+from types import SimpleNamespace
+
+
+def _pbox(cx, cy, w=60, h=120):
+    """player 框:按中心坐标构造(x/y 是左上角,与 Box 同形)。"""
+    return SimpleNamespace(x=cx - w / 2, y=cy - h / 2, width=w, height=h)
+
+
+class TestSelectPlayerBox(unittest.TestCase):
+    """YOLO 关联门(spec §3.3):恰 1 个门内候选 → 接受;多个 → 身份新鲜才取最近;
+    0 个/身份过期多候选 → None(宁可退级,不认错人)。"""
+
+    def test_single_candidate_in_gate_accepted_even_if_identity_stale(self):
+        # 恰 1 个在门内:接受,不看身份新鲜度(屏幕上只有一个玩家,几乎必是自己)
+        box = _pbox(1200, 900)
+        self.assertIs(fl.select_player_box([box], (1180, 880), False), box)
+
+    def test_candidate_outside_gate_rejected(self):
+        # 横向差 250 > 半宽 240 → 门外
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1450, 900)], (1200, 900), True))
+        # 纵向差 130 > 半高 120 → 门外
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1200, 1030)], (1200, 900), True))
+
+    def test_gate_boundary_inclusive(self):
+        # 恰压门边算门内 —— 与 point_in_zone 的边界口径一致
+        box = _pbox(1200 + fl.PLAYER_GATE_HALF_W, 900)
+        self.assertIs(fl.select_player_box([box], (1200, 900), False), box)
+
+    def test_multiple_fresh_identity_picks_nearest(self):
+        near, far = _pbox(1180, 880), _pbox(1350, 900)
+        self.assertIs(fl.select_player_box([far, near], (1200, 900), True), near)
+
+    def test_multiple_nearest_breaks_horizontal_tie_by_y(self):
+        # 横向同距、纵向不同(隔一层平台的路人):取合位移最近的那个
+        same_floor, other_floor = _pbox(1240, 900), _pbox(1160, 1000)
+        self.assertIs(fl.select_player_box(
+            [other_floor, same_floor], (1200, 900), True), same_floor)
+
+    def test_multiple_stale_identity_rejected(self):
+        # 路人贴身且身份过期 → 拒绝,退给慢扫/cached,不认错人
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1180, 880), _pbox(1350, 900)], (1200, 900), False))
+
+    def test_empty_players_rejected(self):
+        self.assertIsNone(fl.select_player_box([], (1200, 900), True))
+
+    def test_gate_player_boxes_returns_only_in_gate_as_list(self):
+        # 决策日志 yolo候选= 记门内候选数,不是全屏数——全屏数混着门外路人,
+        # 调关联门/查误认时会误导。返回列表(而非单个框),供 len() 计数
+        inside, outside = _pbox(1240, 900), _pbox(1500, 900)
+        self.assertEqual(fl.gate_player_boxes([inside, outside], (1200, 900)),
+                         [inside])

@@ -443,3 +443,45 @@ def seek_persist(seek_raw, prev_seek, now, last_seen, grace):
     if grace <= 0 or prev_seek is None or last_seen is None:
         return None
     return prev_seek if now - last_seen <= grace else None
+
+
+PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W,跨模块注释同步)
+PLAYER_GATE_HALF_H = 120   # 关联门半高:比快窗的 80 放宽——击退/跳跃纵向位移大,
+                           # 快窗为 OCR 成本收窄的理由对免费的 YOLO 不成立(spec §3.3)
+
+
+def gate_player_boxes(players, pred, half_w=PLAYER_GATE_HALF_W,
+                      half_h=PLAYER_GATE_HALF_H):
+    """框中心落在 pred 的 ±half_w/±half_h 门内的候选(门口径唯一事实源)。
+
+    select_player_box 的裁决与决策日志的 yolo候选= 都从这里拿,
+    两处各写一遍迟早分叉。边界压线算门内,与 point_in_zone 口径一致。"""
+    px, py = pred
+    return [b for b in players
+            if abs(b.x + b.width / 2 - px) <= half_w
+            and abs(b.y + b.height / 2 - py) <= half_h]
+
+
+def select_player_box(players, pred, identity_fresh,
+                      half_w=PLAYER_GATE_HALF_W, half_h=PLAYER_GATE_HALF_H):
+    """YOLO player 框 → 「哪个是我」的关联裁决(spec §3.3)。
+
+    YOLO 只学「什么是玩家」,身份判别在这里:pred 是外推位置(与快窗 OCR 同一个
+    搜索中心),门内候选由 gate_player_boxes 给出。
+    - 恰 1 个 → 接受(不看身份新鲜度:门内只有一个玩家,几乎必是自己);
+    - 多个 → identity_fresh(距上次名字牌真实命中还在保鲜窗内)才取合位移最近的,
+      否则返回 None——路人贴身且身份过期,宁可退到慢扫/cached,不认错人;
+    - 0 个 → None,落到阶梯下一级。
+    最近取欧氏距离平方:两候选横向同距但隔层时,必须选同层那个(横向距离分不开)。
+    传入已过门的列表也正确(门是幂等的,Task 7 先 gate 后 select 不改语义)。
+    """
+    gated = gate_player_boxes(players, pred, half_w, half_h)
+    if not gated:
+        return None
+    if len(gated) == 1:
+        return gated[0]
+    if not identity_fresh:
+        return None
+    px, py = pred
+    return min(gated, key=lambda b: (b.x + b.width / 2 - px) ** 2
+               + (b.y + b.height / 2 - py) ** 2)
