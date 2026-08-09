@@ -4,7 +4,7 @@
 
 **Goal:** 把丢锚拍占比从 28.5% 压到 ≤10%——给现有 YOLO 检测加 player 类（同拍一次推理），锚点阶梯在名字牌两级之后插一级「YOLO 关联」，身份仍由名字牌校准；捎带丢锚事件触发即时慢扫。
 
-**Architecture:** 纯决策逻辑进 `farm_logic.py`（可离线单测），任务层只做接线；检测接缝保持 `find_mobs`（新增 `boxes=` 过滤参数 + `find_all` 一次全类别推理），~80 处现有测试 mock 零改动。模型侧 class 1 = 任意玩家角色，身份判别完全在融合层。
+**Architecture:** 纯决策逻辑进 `farm_logic.py`（可离线单测），任务层只做接线；检测接缝保持 `find_mobs`（新增 `boxes=` 过滤参数 + `find_all` 一次全类别推理），68 处现有测试 mock 零改动。模型侧 class 1 = 任意玩家角色，身份判别完全在融合层。
 
 **Tech Stack:** Python 3.12（`.venv-warrior`）、OpenVINO YOLOv8（onnx 1280）、cv2、unittest、yolo.exe（训练）。
 
@@ -319,7 +319,7 @@ git commit -m "feat: analyze_anchor 丢锚判据 A-E 度量工具——尺子先
 
 **Interfaces:**
 - Consumes: 无（纯函数；player 框是任意带 `.x/.y/.width/.height` 属性的对象，与 `ok/feature/Box.py` 的 Box 同形）
-- Produces: `PLAYER_GATE_HALF_W = 240`、`PLAYER_GATE_HALF_H = 120`、`select_player_box(players, pred, identity_fresh, half_w=..., half_h=...) -> box | None`。Task 7 在 `_resolve_anchor` 调用。
+- Produces: `PLAYER_GATE_HALF_W = 240`、`PLAYER_GATE_HALF_H = 120`、`gate_player_boxes(players, pred, half_w=..., half_h=...) -> [box]`（门口径的唯一事实源——决策日志的 `yolo候选` 记的就是它的长度）、`select_player_box(players, pred, identity_fresh, half_w=..., half_h=...) -> box | None`。Task 7 在 `_resolve_anchor` 调用两者。
 
 - [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
 
@@ -371,6 +371,13 @@ class TestSelectPlayerBox(unittest.TestCase):
 
     def test_empty_players_rejected(self):
         self.assertIsNone(fl.select_player_box([], (1200, 900), True))
+
+    def test_gate_player_boxes_returns_only_in_gate_as_list(self):
+        # 决策日志 yolo候选= 记门内候选数,不是全屏数——全屏数混着门外路人,
+        # 调关联门/查误认时会误导。返回列表(而非单个框),供 len() 计数
+        inside, outside = _pbox(1240, 900), _pbox(1500, 900)
+        self.assertEqual(fl.gate_player_boxes([inside, outside], (1200, 900)),
+                         [inside])
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -383,9 +390,21 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
 - [ ] **Step 3: 实现（追加到 `src/task/farm_logic.py` 末尾）**
 
 ```python
-PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W)
+PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W,跨模块注释同步)
 PLAYER_GATE_HALF_H = 120   # 关联门半高:比快窗的 80 放宽——击退/跳跃纵向位移大,
                            # 快窗为 OCR 成本收窄的理由对免费的 YOLO 不成立(spec §3.3)
+
+
+def gate_player_boxes(players, pred, half_w=PLAYER_GATE_HALF_W,
+                      half_h=PLAYER_GATE_HALF_H):
+    """框中心落在 pred 的 ±half_w/±half_h 门内的候选(门口径唯一事实源)。
+
+    select_player_box 的裁决与决策日志的 yolo候选= 都从这里拿,
+    两处各写一遍迟早分叉。边界压线算门内,与 point_in_zone 口径一致。"""
+    px, py = pred
+    return [b for b in players
+            if abs(b.x + b.width / 2 - px) <= half_w
+            and abs(b.y + b.height / 2 - py) <= half_h]
 
 
 def select_player_box(players, pred, identity_fresh,
@@ -393,24 +412,22 @@ def select_player_box(players, pred, identity_fresh,
     """YOLO player 框 → 「哪个是我」的关联裁决(spec §3.3)。
 
     YOLO 只学「什么是玩家」,身份判别在这里:pred 是外推位置(与快窗 OCR 同一个
-    搜索中心),框中心落在 ±half_w/±half_h 门内才是候选。
+    搜索中心),门内候选由 gate_player_boxes 给出。
     - 恰 1 个 → 接受(不看身份新鲜度:门内只有一个玩家,几乎必是自己);
     - 多个 → identity_fresh(距上次名字牌真实命中还在保鲜窗内)才取合位移最近的,
       否则返回 None——路人贴身且身份过期,宁可退到慢扫/cached,不认错人;
     - 0 个 → None,落到阶梯下一级。
     最近取欧氏距离平方:两候选横向同距但隔层时,必须选同层那个(横向距离分不开)。
-    边界压线算门内,与 point_in_zone 口径一致。
+    传入已过门的列表也正确(门是幂等的,Task 7 先 gate 后 select 不改语义)。
     """
-    px, py = pred
-    gated = [b for b in players
-             if abs(b.x + b.width / 2 - px) <= half_w
-             and abs(b.y + b.height / 2 - py) <= half_h]
+    gated = gate_player_boxes(players, pred, half_w, half_h)
     if not gated:
         return None
     if len(gated) == 1:
         return gated[0]
     if not identity_fresh:
         return None
+    px, py = pred
     return min(gated, key=lambda b: (b.x + b.width / 2 - px) ** 2
                + (b.y + b.height / 2 - py) ** 2)
 ```
@@ -645,7 +662,7 @@ class TestFindMobsBoxesParam(unittest.TestCase):
 
 ```powershell
 git add src/task/BaseMapleTask.py tests/test_farm_task_offline.py
-git commit -m "feat: find_all 一次全类别推理 + find_mobs(boxes=) 纯过滤——保留 80 处测试接缝"
+git commit -m "feat: find_all 一次全类别推理 + find_mobs(boxes=) 纯过滤——保留 68 处测试接缝"
 ```
 
 ---
@@ -1216,7 +1233,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dat
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\final_split.py --train <既有train地图...> combat_<地图名> --val <既有val地图> --frames 50
 ```
-QC：抽 10 张 train/val 图用 label_boxes 打开目检（红=mob、绿=player），确认 player 绿框贴身、无宠物误标、mob 框未丢类别。
+QC 在 raw 做（不是 train/val——`images/` 旁没有 txt，对它开标注器一个框都看不到，正是 Step 3 的坑）：对每个参与切分的 `dataset/raw/<地图>/` 用 label_boxes 抽开 10 张目检（png+txt 同目录，红=mob、绿=player），确认 player 绿框贴身、无宠物误标、mob 框未丢类别；再抽 3 张核对切分产物——`dataset/labels/<split>/<地图>_frame_XXXX.txt` 与 raw 同名 txt 内容一致（`final_split` 是纯拷贝，`Compare-Object (Get-Content a) (Get-Content b)` 应为空）。
 
 - [ ] **Step 5: 完成判据（无 git 产物）**
 
@@ -1349,3 +1366,5 @@ git commit -m "docs: 丢锚治理实弹验收——判据 A-F 实测归档"
 5. `yolo候选` 语义从全屏数改为门内候选数：新增 `gate_player_boxes` 作为门口径唯一事实源（Task 2/4/7 三处同步）。
 6. `_resolve_anchor` 在 tests:1118-1450 有 18 处 3 参直呼：`players=()` 默认值保证兼容，Task 7/8 的 Interfaces 已写明影响面与 force 门零影响的逐条分析。
 7. Task 7 Step 2 只加 `find_all` 一行（`find_mobs` mock 已存在于 make_task:36）；另修正 mock 计数 ~80→68、Task 11 grep→Select-String、标注器拖拽预览色让位 player 绿。
+
+**第二轮（2026-08-09，阻断项）**：并行会话的合并 `ffc16a3` 把第一轮对 Task 2 的三处编辑（Produces/门测试/实现）与 Architecture 行盖回了旧版，导致 `gate_player_boxes` 全计划被引用却无定义——执行到 Task 7 必然 `AttributeError`。已重新打上：门控抽成 `gate_player_boxes` 独立函数（门口径唯一事实源）、`select_player_box` 首行改调它（幂等，Task 7 先 gate 后 select 语义不变）、补「返回列表」测试。同轮修正：Task 9 Step 4 的 QC 从 train/val 改到 raw 源头（旧坑复发——`images/` 旁没有 txt，标注器开了也看不到框），并补 labels/ 与 raw 同名 txt 的拷贝一致性核对；Architecture 行与 Task 5 提交信息的「80」→「68」。已知不改项：`copy_map_frames` 要求 val 地图前 N 帧连续存在（`final_split.py:55-59` 缺帧 raise），执行 Task 9 时留意 val 地图帧数 ≥ `--frames`。
