@@ -140,9 +140,22 @@ def anchor_expired(now, anchor_time, ttl):
     return anchor_time is None or now - anchor_time > ttl
 
 
-def should_rescan_anchor(now, last_scan, interval):
-    """是否应该重新扫描锚点。"""
-    return now - last_scan >= interval
+FORCED_RESCAN_MIN_INTERVAL = 0.5   # 强制慢扫自身限频:慢扫最坏 235ms,不许打满主循环
+
+
+def should_rescan_anchor(now, last_scan, interval, force=False,
+                         last_forced=0.0,
+                         forced_min_interval=FORCED_RESCAN_MIN_INTERVAL):
+    """是否应该重新扫描锚点。
+
+    force=True 是丢锚事件通道(spec §3.5):击退/锚点超龄时绕过常规节流立刻扫,
+    但距上次强制扫描必须 >= forced_min_interval——丢锚常由位置跳变引起,
+    常规 2s 节流恰好卡在最需要慢扫的时刻(基线里慢扫只占 2.2%)。
+    默认参数 = 旧行为,既有调用方不受影响。last_forced=0.0 哨兵(从未强制)天然放行。
+    """
+    if now - last_scan >= interval:
+        return True
+    return force and now - last_forced >= forced_min_interval
 
 
 def anchor_vx_update(old_vx, dx, dt, dy,

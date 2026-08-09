@@ -685,3 +685,28 @@ class TestSelectPlayerBox(unittest.TestCase):
         inside, outside = _pbox(1240, 900), _pbox(1500, 900)
         self.assertEqual(fl.gate_player_boxes([inside, outside], (1200, 900)),
                          [inside])
+
+
+class TestForcedRescan(unittest.TestCase):
+    """丢锚事件触发即时慢扫(spec §3.5):force 绕过常规节流,但自身限频 0.5s。"""
+
+    def test_force_bypasses_regular_throttle(self):
+        # 常规窗没到(0.6s < 2s),force 放行
+        self.assertTrue(fl.should_rescan_anchor(100.6, 100.0, 2, force=True))
+
+    def test_force_rate_limited_by_min_interval(self):
+        # 距上次强制扫描 0.3s < 0.5s → 不放行(慢扫最坏 235ms,不许打满主循环)
+        self.assertFalse(fl.should_rescan_anchor(
+            100.6, 100.0, 2, force=True, last_forced=100.3))
+        # 边界:恰好 0.5s → 放行(与 should_attack 同口径)
+        self.assertTrue(fl.should_rescan_anchor(
+            100.8, 100.0, 2, force=True, last_forced=100.3))
+
+    def test_no_force_keeps_old_behavior(self):
+        self.assertFalse(fl.should_rescan_anchor(101.0, 100.0, 2))
+        self.assertTrue(fl.should_rescan_anchor(102.0, 100.0, 2))
+
+    def test_regular_window_due_passes_even_when_forced_rate_limited(self):
+        # 常规窗已到点:force 的限频不该反过来卡住常规扫描
+        self.assertTrue(fl.should_rescan_anchor(
+            102.0, 100.0, 2, force=True, last_forced=101.9))

@@ -458,7 +458,7 @@ git commit -m "feat: select_player_box 关联门——恰1接受/多候选看身
 - Consumes: 无
 - Produces: `FORCED_RESCAN_MIN_INTERVAL = 0.5`、`should_rescan_anchor(now, last_scan, interval, force=False, last_forced=0.0, forced_min_interval=FORCED_RESCAN_MIN_INTERVAL) -> bool`。Task 8 在 `_resolve_anchor` 传 `force=` 与 `last_forced=`。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
 
 ```python
 class TestForcedRescan(unittest.TestCase):
@@ -488,9 +488,9 @@ class TestForcedRescan(unittest.TestCase):
 
 - [ ] **Step 2: 跑测试确认失败**
 
-预期：`TypeError: should_rescan_anchor() got an unexpected keyword argument 'force'`。
+预期：`TypeError: should_rescan_anchor() got an unexpected keyword argument 'force'`。实际与预期一致（3 错,`test_no_force_keeps_old_behavior` 不传 force 自然过）。
 
-- [ ] **Step 3: 实现（替换 `farm_logic.py` 的 `should_rescan_anchor`，常量放函数上方）**
+- [x] **Step 3: 实现（替换 `farm_logic.py` 的 `should_rescan_anchor`，常量放函数上方）**
 
 ```python
 FORCED_RESCAN_MIN_INTERVAL = 0.5   # 强制慢扫自身限频:慢扫最坏 235ms,不许打满主循环
@@ -511,7 +511,7 @@ def should_rescan_anchor(now, last_scan, interval, force=False,
     return force and now - last_forced >= forced_min_interval
 ```
 
-- [ ] **Step 4: 跑测试确认通过（整个 test_farm_logic 全绿，含旧的 167-168 行）**
+- [x] **Step 4: 跑测试确认通过（整个 test_farm_logic 全绿，含旧的 167-168 行）**
 
 - [ ] **Step 5: 提交**
 
