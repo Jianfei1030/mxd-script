@@ -2671,3 +2671,25 @@ class TestSeekPersistWiring(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestDecisionLineYoloFields(unittest.TestCase):
+    """yolo候选/关联距 字段(spec §3.6):没有 yolo 命中时写 '-',绝不写 0
+    (0 会被判据脚本当真值,同 near 字段的既有纪律)。"""
+
+    def _line(self, **kw):
+        from src.task.MapleFarmTask import decision_log_line
+        return decision_log_line(
+            'yolo', 1230.0, 866.0, [(1.0, 2.0)], [], 0, 0, 0, None,
+            False, False, [], False, 'LEFT', 'LEFT', None, None, True,
+            None, 0.0, 0.0, **kw)
+
+    def test_fields_dash_when_absent(self):
+        self.assertIn('yolo候选=- 关联距=-', self._line())
+
+    def test_fields_rendered_when_present(self):
+        self.assertIn('yolo候选=2 关联距=35', self._line(yolo_cands=2, yolo_dist=35.4))
+
+    def test_fields_appended_at_line_end(self):
+        # 追加在行尾:analyze_anchor/analyze_seek 的前缀正则不受影响
+        self.assertTrue(self._line().endswith('关联距=-'))

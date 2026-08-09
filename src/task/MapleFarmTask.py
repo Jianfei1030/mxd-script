@@ -100,7 +100,7 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
                       same_feet, same_center, near,
                       raw_present, mob_present, attack_in, attack_present,
                       facing_before, facing_now, turn, seek_dir, key_sendable,
-                      observed, obs_s, obs_flip):
+                      observed, obs_s, obs_flip, yolo_cands=None, yolo_dist=None):
     """决策日志行(不含时间戳前缀)—— 格式的唯一事实源。
 
     scripts/analyze_facing.py 与 scripts/analyze_seek.py 的正则按它解析,
@@ -114,6 +114,11 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
     两个都写出来,是为了量出「攻击区罩得到却判不同层」那条带上到底有多少怪。
     near = 水平最近那只怪的 (dx, dy脚, dy心);屏幕无怪时 None → 三项写 '-',
     绝不写 0(0 会被判据脚本当成真值)。
+
+    yolo候选 / 关联距 是 YOLO 关联级(spec §3.6)的观测:候选 = **门内**候选数
+    (gate_player_boxes 口径——全屏数混着门外路人,调关联门/查误认会误导),
+    关联距 = 命中框中心与外推位置的水平距离。
+    非 yolo 来源的拍两项都写 '-',绝不写 0。追加在行尾:analyze 脚本前缀匹配。
     """
     near_s = ('近怪dx=- dy脚=- dy心=-' if near is None else
               f'近怪dx={near[0]:+.0f} dy脚={near[1]:+.0f} dy心={near[2]:+.0f}')
@@ -126,7 +131,9 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
             f'转向={turn or "-"} 寻怪={seek_dir or "-"} '
             f'可发键={key_sendable} '
             f'实测={_FACING_SHORT.get(observed, "?")} '
-            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}')
+            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}'
+            f' yolo候选={yolo_cands if yolo_cands is not None else "-"}'
+            f' 关联距={f"{yolo_dist:.0f}" if yolo_dist is not None else "-"}')
 
 
 def divergence_log_line(facing_before, observed, obs_s, obs_flip,

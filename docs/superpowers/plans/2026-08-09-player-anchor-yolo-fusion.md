@@ -532,7 +532,7 @@ git commit -m "feat: should_rescan_anchor 加 force——事件触发绕过节�
 - Consumes: 无
 - Produces: `decision_log_line(..., yolo_cands=None, yolo_dist=None)`——两个新**关键字**参数追加在 `obs_flip` 之后；行尾追加 `yolo候选=N 关联距=D`（未提供时都写 `-`，绝不写 0）。Task 7 的 `_log_decision` 传值；Task 1 的正则是前缀匹配、天然兼容。既有调用方/测试不传新参数照常工作。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestDecisionLineYoloFields(unittest.TestCase):
@@ -562,9 +562,9 @@ class TestDecisionLineYoloFields(unittest.TestCase):
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_task_offline.TestDecisionLineYoloFields -v
 ```
-预期：`TypeError ... unexpected keyword argument 'yolo_cands'`。
+预期：`TypeError ... unexpected keyword argument 'yolo_cands'`。实际与预期一致（1 错 + 2 字段断言失败）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `decision_log_line` 签名末尾加 `yolo_cands=None, yolo_dist=None`；docstring 补一段：
 
@@ -584,9 +584,9 @@ return 表达式最后一行 `f'分值=...'` 之后追加：
 
 （原最后一行 `f'分值={...}/{...:.2f}')` 去掉右括号改为续接上面两行。）
 
-- [ ] **Step 4: 跑测试确认通过 + 全量单测**
+- [x] **Step 4: 跑测试确认通过 + 全量单测**
 
-全量命令见 Global Constraints。既有 `tests.test_analyze_anchor`（Task 1 用 `decision_log_line` 构造样本行）必须仍绿——它证明前缀正则真的兼容新字段。
+全量命令见 Global Constraints。既有 `tests.test_analyze_anchor`（Task 1 用 `decision_log_line` 构造样本行）必须仍绿——它证明前缀正则真的兼容新字段。实测全量 402 绿,test_analyze_anchor 未动。
 
 - [ ] **Step 5: 提交**
 
