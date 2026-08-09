@@ -395,9 +395,11 @@ def is_window_in_screen_bounds(window_left, window_top, window_width, window_hei
     for monitor_rect in monitors_bounds:
         monitor_left, monitor_top, monitor_right, monitor_bottom = monitor_rect
 
-        # Allow a 20 pixel boundary tolerance for maximized windows which often leak outside monitor bounds by 8-13 pixels.
-        if (window_left >= monitor_left - 20 and window_top >= monitor_top - 20 and
-                window_right <= monitor_right + 20 and window_bottom <= monitor_bottom + 20):
+        # Allow a 50 pixel boundary tolerance for borderless fullscreen windows which often
+        # leak outside monitor bounds (game client at (-6,31) with 2560x1440 on a 2560x1440
+        # monitor → bottom edge at 1471, exceeding by 31px).
+        if (window_left >= monitor_left - 50 and window_top >= monitor_top - 50 and
+                window_right <= monitor_right + 50 and window_bottom <= monitor_bottom + 50):
             return True
 
     return False

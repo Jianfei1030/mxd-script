@@ -134,5 +134,61 @@ class TestBodyCenter(unittest.TestCase):
         self.assertEqual(got, (1300.0, 790.0))
 
 
+class TestEnhanceForOcr(unittest.TestCase):
+
+    def test_white_text_becomes_black_on_light(self):
+        """白字黑描边 → 反转后应是黑字浅底,贴合 DB 训练分布。
+        黑底上的白字(255):反转后字变黑(≈0)、底变白(≈255)。"""
+        img = np.zeros((40, 200, 3), np.uint8)      # 黑底
+        img[10:30, 20:60] = 255                      # 白字块
+        out = anchor._enhance_for_ocr(img)
+        self.assertEqual(out.shape, img.shape)       # 尺寸不变,坐标可换算
+        self.assertLess(out[20, 40].mean(), 30)      # 原白字位置 → 变黑
+        self.assertGreater(out[5, 5].mean(), 200)    # 原黑底位置 → 变浅
+
+    def test_preserves_dimensions_for_coordinate_mapping(self):
+        """任意尺寸输入,输出形状必须一致(OCR 命中框坐标依赖这点)。"""
+        for h, w in [(240, 640), (80, 480), (1, 1)]:
+            out = anchor._enhance_for_ocr(np.zeros((h, w, 3), np.uint8))
+            self.assertEqual(out.shape, (h, w, 3))
+
+    def test_disabled_flag_skips_preprocess(self):
+        """开关关闭时 _scan 原样送图:构造一个会被增强改变的帧,关闭后 OCR 收到的
+        应与原始一致(通过 fake_ocr 捕获入参验证)。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+        frame[880:910, 1200:1300] = 255              # 白字块
+        seen = {}
+        original = anchor.OCR_PREPROCESS_ENABLED
+        try:
+            anchor.OCR_PREPROCESS_ENABLED = False
+            def capture(image):
+                seen['crop'] = image.copy()
+                return [[[[[10.0, 20.0], [140.0, 20.0], [140.0, 55.0], [10.0, 55.0]], (NAME, 0.99)]]]
+            anchor.find_in_window(frame, NAME, (1300, 880), 240, 80, ocr_fn=capture)
+            # 快通道窗口 (1060, 800)-(1540, 960):白字块应在窗口内
+            crop = seen['crop']
+            self.assertEqual(crop.shape[:2], (160, 480))
+            self.assertGreater(crop[880 - 800 + 10, 1200 - 1060 + 10].mean(), 200)
+        finally:
+            anchor.OCR_PREPROCESS_ENABLED = original
+
+    def test_enabled_flag_applies_preprocess(self):
+        """开关打开时 _scan 送增强后的图:白字位置应反转为黑(与开关关闭对比)。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+        frame[880:910, 1200:1300] = 255
+        seen = {}
+        original = anchor.OCR_PREPROCESS_ENABLED
+        try:
+            anchor.OCR_PREPROCESS_ENABLED = True
+            def capture(image):
+                seen['crop'] = image.copy()
+                return [[[[[10.0, 20.0], [140.0, 20.0], [140.0, 55.0], [10.0, 55.0]], (NAME, 0.99)]]]
+            anchor.find_in_window(frame, NAME, (1300, 880), 240, 80, ocr_fn=capture)
+            crop = seen['crop']
+            self.assertLess(crop[880 - 800 + 10, 1200 - 1060 + 10].mean(), 30)
+        finally:
+            anchor.OCR_PREPROCESS_ENABLED = original
+
+
 if __name__ == '__main__':
     unittest.main()

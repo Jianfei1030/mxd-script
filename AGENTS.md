@@ -25,6 +25,10 @@
   ```
   $p = Start-Process -FilePath ".\.venv-warrior\Scripts\python.exe" -ArgumentList "main_debug.py" -WorkingDirectory "C:\projects\mxd-script" -PassThru -RedirectStandardError "logs\main_debug_err.log" -RedirectStandardOutput "logs\main_debug_out.log"
   ```
+- ⛔ **铁律：启动 GUI 必须用管理员身份**——pydirect 的 `is_admin()` 检查是硬门槛，非管理员 GUI 检测只读可用但**按键发送被禁用**。管理员启动命令：
+  ```
+  Start-Process -FilePath ".\.venv-warrior\Scripts\python.exe" -ArgumentList "main_debug.py" -WorkingDirectory "C:\projects\mxd-script" -Verb RunAs
+  ```
 - `pythonw.exe` 启动 GUI 会**静默崩溃**（进程秒退无输出），用 `python.exe` + 重定向捕获错误
 - GUI 可能产生**双进程**（stub + 真实 GUI），判断真实 GUI 看 WorkingSet 大小（>100MB 才是真身）
 - stderr `RefreshAdb pydirect:You must be an admin to use Win32Interaction` **无害**（只影响按键任务，检测是只读的）
@@ -285,6 +289,7 @@ C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe export model=runs\detect\r
 | 标定结果读不到 | 写了 config.json 而非 WarriorDebugTask.json | 检查写入路径 |
 | 绿框/攻击区偏移 | 名字牌锚点偏移/参数不对 | 用 `calibrate_warrior_zone.py` 标定 |
 | paint 日志爆炸 | paint 回调每帧执行 | 回调内禁日志 |
+| **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配** | **⛔ 必须关闭组队血量显示（UI 设置里关）** |
 
 ---
 

@@ -157,6 +157,7 @@ class MainWindow(FluentWindow):
         if debug:
             from ok.gui.debug.DebugTab import DebugTab
             debug_tab = DebugTab(config, exit_event)
+            self.debug_tab = debug_tab
             self.addSubInterface(debug_tab, FluentIcon.DEVELOPER_TOOLS, self.tr('Debug'),
                                  position=NavigationItemPosition.BOTTOM)
             from ok.gui.debug.RunCodeTab import RunCodeTab

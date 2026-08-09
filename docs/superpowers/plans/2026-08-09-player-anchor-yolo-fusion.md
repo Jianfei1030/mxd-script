@@ -552,8 +552,9 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
 `decision_log_line` 签名末尾加 `yolo_cands=None, yolo_dist=None`；docstring 补一段：
 
 ```
-    yolo候选 / 关联距 是 YOLO 关联级(spec §3.6)的观测:候选 = 本拍全屏 player
-    框数,关联距 = 命中框中心与外推位置的水平距离(调关联门/查误认用)。
+    yolo候选 / 关联距 是 YOLO 关联级(spec §3.6)的观测:候选 = **门内**候选数
+    (gate_player_boxes 口径——全屏数混着门外路人,调关联门/查误认会误导),
+    关联距 = 命中框中心与外推位置的水平距离。
     非 yolo 来源的拍两项都写 '-',绝不写 0。追加在行尾:analyze 脚本前缀匹配。
 ```
 
@@ -590,7 +591,7 @@ git commit -m "feat: 决策行追加 yolo候选/关联距 字段——先造观�
 - Produces:
   - `find_all(self, frame=None, threshold=0.5) -> [Box]`——一次全类别推理，Task 7 每检测拍调一次；
   - `find_mobs(self, frame=None, threshold=0.5, boxes=None) -> [Box]`——`boxes` 非 None 时**纯过滤**（`b.name == 'mob'`），不推理；None 时旧行为（自己推理，WarriorDebugTask 等调用方不变）。
-  - **设计约束**：`_detect_and_act` 继续经 `find_mobs` 拿怪——离线测试有 ~80 处 `task.find_mobs = MagicMock(...)`，接缝名一换全部报废；`boxes=` 过滤参数让 mock 与真实路径同时成立。
+  - **设计约束**：`_detect_and_act` 继续经 `find_mobs` 拿怪——`tests/test_farm_task_offline.py` 有 68 处 `task.find_mobs = MagicMock(...)`，接缝名一换全部报废；`boxes=` 过滤参数让 mock 与真实路径同时成立。
 
 - [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
@@ -752,7 +753,8 @@ def format_label_line(box):
             current_cls = 1 - current_cls
             print(f"当前类别: {current_cls} ({CLASS_NAMES[current_cls]})")
   ```
-- `print_usage` 与文件 docstring 补一行 `c = 切换标注类别（0=mob 红框, 1=player 绿框）`。
+- `print_usage` 与文件 docstring 补一行 `c = 切换标注类别（0=mob 红框, 1=player 绿框）`；
+- 鼠标拖拽预览矩形颜色 `(0, 255, 0)`（`mouse` 的 MOUSEMOVE 分支）改 `(255, 255, 255)` 白——绿色已让给 player 类，预览撞色会误导当前所选类别。
 
 3c. `scripts/prelabel_from_onnx.py:49` 类别从 Box.name 来（旧模型只出 mob，新模型出两类都对）：
 
@@ -801,8 +803,8 @@ git commit -m "feat: 模型类别基建——class1=player(任意玩家),标注�
 - Test: `tests/test_farm_task_offline.py`（`make_task` 加一行 + 追加测试类）
 
 **Interfaces:**
-- Consumes: `farm_logic.select_player_box`（Task 2）、`find_all` / `find_mobs(boxes=)`（Task 5）、`decision_log_line(yolo_cands=, yolo_dist=)`（Task 4）
-- Produces: 锚点来源新标签 `'yolo'`；配置键 `'YOLO角色定位开关'`(True)、`'身份保鲜(秒)'`(10)；状态 `self._last_identity_hit`、`self._last_yolo_info`；`_resolve_anchor(self, frame, now, cfg, players=())` 新签名（唯一调用点 `MapleFarmTask.py:561`）。Task 8 在同函数内接慢扫强制门。
+- Consumes: `farm_logic.gate_player_boxes` / `select_player_box`（Task 2）、`find_all` / `find_mobs(boxes=)`（Task 5）、`decision_log_line(yolo_cands=, yolo_dist=)`（Task 4）
+- Produces: 锚点来源新标签 `'yolo'`；配置键 `'YOLO角色定位开关'`(True)、`'身份保鲜(秒)'`(10)；状态 `self._last_identity_hit`、`self._last_yolo_info`；`_resolve_anchor(self, frame, now, cfg, players=())` 新签名。**签名影响面**：src 内唯一调用点 `MapleFarmTask.py:561`；但 `tests/test_farm_task_offline.py:1118-1450` 另有 18 处 3 参直呼——`players=()` 默认值让它们不传新参照旧走老阶梯（空 players → YOLO 块短路），这些旧用例必须原样保持全绿，不许改。Task 8 在同函数内接慢扫强制门。
 
 - [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
@@ -870,9 +872,11 @@ class TestYoloAnchorFusion(unittest.TestCase):
 
     def test_two_players_fresh_identity_picks_nearest(self):
         lines = self._beat(self._task(
-            [self._player(1300, 880), self._player(1180, 880)],
+            [self._player(1300, 880), self._player(1180, 880),
+             self._player(2000, 880)],   # 第三个在门外(|2000-1200|>240):不参与,也不计入候选数
             identity_age=1.0))
         self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        # 候选数 = 门内 2,不是全屏 3(gate_player_boxes 口径)
         self.assertTrue(any('yolo候选=2' in l for l in lines), lines)
         self.assertTrue(any('body_x=1180' in l for l in lines), lines)
 
@@ -902,10 +906,9 @@ class TestYoloAnchorFusion(unittest.TestCase):
         self.assertTrue(any('怪=1' in l for l in lines), lines)
 ```
 
-- [ ] **Step 2: `make_task` 加默认 mock（`tests/test_farm_task_offline.py:36` 附近）**
+- [ ] **Step 2: `make_task` 加 find_all 默认 mock（`tests/test_farm_task_offline.py:36` 的 `task.find_mobs = MagicMock(return_value=[])` 之后加一行,find_mobs 那行已存在勿重复）**
 
 ```python
-    task.find_mobs = MagicMock(return_value=[])
     task.find_all = MagicMock(return_value=[])
 ```
 
@@ -936,7 +939,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
 
 ```python
         self._last_identity_hit = 0.0  # 上次名字牌真实命中(template/window/region)时刻;0.0=从未。多候选裁决只在保鲜窗内放行;yolo 不刷新它(它不验名,spec §3.4)
-        self._last_yolo_info = None    # 本拍 YOLO 关联观测 (全屏player框数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
+        self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
 ```
 
 4d. `_detect_and_act`：行 561 前插入推理分流，行 585-589 的旧 find_mobs try 块改造。改后开头为：
@@ -970,8 +973,9 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
             # 放在 OCR 之后——名字牌可读时身份持续刷新;放最前快通道永远轮不到,
             # 身份就再也不校准。冷启动(_anchor is None)不进本块:外层 if 已保证。
             if cfg.get('YOLO角色定位开关') and players:
+                gated = farm_logic.gate_player_boxes(players, center)
                 pbox = farm_logic.select_player_box(
-                    players, center,
+                    gated, center,
                     now - self._last_identity_hit <= cfg['身份保鲜(秒)'])
                 if pbox is not None:
                     pseudo = anchor.Anchor(
@@ -980,7 +984,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
                         pbox.width)
                     # 伪锚点 y = 框中心 + 名字牌偏移:body_center() 反算回来
                     # 正好是框中心,下游(接敌区/同层/朝向)全部不用改(spec §3.4)
-                    self._last_yolo_info = (len(players),
+                    self._last_yolo_info = (len(gated),
                                             abs(pseudo.x - center[0]))
                     self._update_anchor(pseudo, now)
                     return pseudo, 'yolo'
@@ -1003,7 +1007,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
 
 - [ ] **Step 5: 跑新测试类 + 全量单测**
 
-全量必须全绿：既有 ~80 处 `find_mobs` mock 用例是「接缝未破坏」的回归证明。任何一个红都说明分流动了不该动的行为——修实现，不许改旧测试。
+全量必须全绿：既有 68 处 `find_mobs` mock 用例与 18 处 `_resolve_anchor` 3 参直呼用例是「接缝未破坏」的回归证明。任何一个红都说明分流动了不该动的行为——修实现，不许改旧测试。
 
 - [ ] **Step 6: 提交**
 
@@ -1023,6 +1027,7 @@ git commit -m "feat: 锚点阶梯插 YOLO 关联级——名字牌失效拍由 p
 **Interfaces:**
 - Consumes: `should_rescan_anchor(force=, last_forced=)`（Task 3）、Task 7 后的 `_resolve_anchor` 结构
 - Produces: 配置键 `'丢锚立即重扫开关'`(True)；状态 `self._force_rescan`、`self._last_forced_rescan`。
+- **对既有 18 处 `_resolve_anchor` 3 参直呼用例（tests:1118-1450）的影响已逐一核过为零**：`:1083` 一带角色名空短路、`:1135` 一带锚点年龄 1s < 刷新间隔 2s 不触发 force，其余慢扫用例 `_last_anchor_scan=0.0` 常规窗本就到点（force 与否同一结果）。全量绿灯的预期成立；红了修实现，不许改旧测试。
 
 - [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
@@ -1189,59 +1194,67 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py c
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\prelabel_from_onnx.py combat_<地图名> --conf 0.25
 ```
 
-- [ ] **Step 3: 人工标注新帧 + 给存量帧补 player 框**
+- [ ] **Step 3: 人工标注新帧 + 在 raw 源头给存量帧补 player 框**
+
+**路径纪律**：`label_boxes.py` 的 txt 与 png 同目录读写（`txt_path_for`，`label_boxes.py:53-55`）；`dataset/labels/{train,val}/` 是 `final_split.py` 从 raw **拷贝**出来的产物。对 `dataset/images/train` 跑标注器会看不到既有 mob 框、还在 images 下写一套永远进不了训练集的孤儿 txt——**存量标注的唯一源头是 `dataset/raw/<地图>/`，补标只在 raw 做，改完重跑切分**。
 
 ```powershell
+# 先确认哪些地图参与当前切分(看 train/val 文件名前缀,raw 现有 map1..map5)
+Get-ChildItem dataset\images\train -Name | ForEach-Object { ($_ -split '_frame_')[0] } | Sort-Object -Unique
+Get-ChildItem dataset\images\val -Name | ForEach-Object { ($_ -split '_frame_')[0] } | Sort-Object -Unique
+# 新采的实战帧
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dataset\raw\combat_<地图名>
-$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dataset\images\train
-$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dataset\images\val
+# 上面前缀清单里的每个存量地图逐个补标(示例 map1,其余同理)
+$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dataset\raw\map1
 ```
-规则：`c` 切到 1(player,绿框) 框**所有**玩家角色（自己+路人+队友，整身含发型武器，不含名字牌文字）；**宠物不标 player**；mob 预标框逐张过目纠错。存量 train/val 图角色几乎每帧都在，逐张补一个 player 框。
+规则：`c` 切到 1(player,绿框) 框**所有**玩家角色（自己+路人+队友，整身含发型武器，不含名字牌文字）；**宠物不标 player**；mob 预标框逐张过目纠错。存量帧角色几乎每帧都在，逐张补一个 player 框。
 
-- [ ] **Step 4: 切分并入训练集 + QC**
+- [ ] **Step 4: 重跑切分 + QC**
+
+`final_split.py`（`scripts/final_split.py:98-113`）会先**清空** train/val 再从 raw 全量重拷——所以 Step 3 必须先在 raw 完成。`--train`/`--val` 都收多个地图名，以 Step 3 查到的前缀清单为准（脚本默认 train=map1 map2 / val=map3，**不许凭默认值猜**）：
 
 ```powershell
-$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\final_split.py --train combat_<地图名> --frames 15
+$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\final_split.py --train <既有train地图...> combat_<地图名> --val <既有val地图> --frames 50
 ```
-（final_split 用法以 `AGENTS.md` §3.1 为准：train 地图取全部帧、`--frames` 只作用于 val。）QC：抽查 `dataset/preview/boxed/`（若预览脚本尚不画类别色，直接抽 10 张用 label_boxes 打开目检），确认 player 绿框贴身、无宠物误标。
+QC：抽 10 张 train/val 图用 label_boxes 打开目检（红=mob、绿=player），确认 player 绿框贴身、无宠物误标、mob 框未丢类别。
 
-- [ ] **Step 5: 提交（只提交标注 txt 与 yaml 类改动;png 是否入库沿现状——`dataset/raw` 现已入库则一并提交）**
+- [ ] **Step 5: 完成判据（无 git 产物）**
 
-```powershell
-git add dataset/
-git commit -m "data: 补采实战帧+全量补标 player 类(自己/路人都标,宠物不标)"
-```
+`dataset/` 整目录在 `.gitignore`（第 6-10 行按子目录、第 15 行 `/dataset`；`git ls-files dataset` 只有 `classes.txt` 与 `mobs.yaml` 两个被跟踪文件，且 mobs.yaml 已在 Task 6 提交）——**本任务没有可提交之物，不执行 git 操作**。完成判据 = Step 4 的 QC 通过 + train/val 重切分完成，向协调者报告帧数与地图清单即可。
 
 ---
 
 ### Task 10: 训练、回归门、部署
 
 **Files:**
-- 产出：`dataset/runs/detect/runs/<名>/weights/best.pt|best.onnx` → 部署 `assets/mob_model/mob.onnx`
-- 不改代码。
+- 产出：`dataset/runs/mob_player_v1/weights/best.pt|best.onnx` → 部署 `assets/mob_model/mob.onnx`
+- Modify: `AGENTS.md`（§3.2-3.4 过时路径顺手修正——本计划初稿照抄它踩过坑）
 
 **Interfaces:**
-- Consumes: Task 9 的数据集、`AGENTS.md` §3.2-3.4 的训练/导出/部署流程
+- Consumes: Task 9 的数据集、`AGENTS.md` §3.2-3.4 的训练/导出/部署流程（**产物路径以下一行实证为准，不以 AGENTS.md 为准**）
 - Produces: 双类别 onnx 模型；Task 11 实机验收依赖它。
+- **产物路径实证**：`yolo train project=runs name=<名>`（从 dataset 目录执行）产物在 `dataset/runs/<名>/`——现有 `dataset/runs/mob_bootstrap/`（args.yaml、曲线图直接在内）就是这个结构；AGENTS.md §3.4 的 `runs/detect/runs/<名>/` 嵌套与实际不符，照抄会在 export/冒烟时找不到 best.pt。
 
 - [ ] **Step 1: 记录现役基线 + 备份模型**
 
 ```powershell
-Get-ChildItem dataset\runs -Recurse -Filter results.csv | Select-Object -Last 3   # 找到现役训练的 val 结果,抄下 mob mAP50/mAP50-95
+Get-Content dataset\runs\mob_bootstrap\results.csv -Tail 3   # 现役训练(目录名以 dataset\runs\ 下实际为准),抄下 mob mAP50/mAP50-95
 Copy-Item assets\mob_model\mob.onnx ("assets\mob_model\mob.onnx.bak_" + (Get-Date -Format yyyyMMdd))
 ```
 
 - [ ] **Step 2: 训练（必须从 dataset 目录执行；yolov8m 200ep，4090 约 8 分钟）**
 
+**权重注意**：项目根只有 `yolov8n.pt`，**没有 yolov8m.pt**。`model=yolov8m.pt` 用裸名（不带路径前缀）——ultralytics 对裸官方名会自动联网下载到当前目录（dataset/）；带 `..\` 前缀则按本地文件找、直接报不存在。离线环境退用 `model=..\yolov8n.pt`（n 跑通全流程，回归门照跑；player mAP50 不过门再补 m 重训）。
+
 ```powershell
 Set-Location dataset
-..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=..\yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=mob_player_v1
+..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=mob_player_v1
 Set-Location ..
 ```
 
 - [ ] **Step 3: 回归门（spec §3.1，不过门不许部署）**
 
-看 `dataset/runs/detect/runs/mob_player_v1/` 的 per-class 指标：
+看 `dataset/runs/mob_player_v1/` 的 per-class 指标（results.csv 末行 + 训练输出的 per-class 表）：
 - mob：mAP50/mAP50-95 **不低于 Step 1 抄下的现役值**（怕加类别把找怪弄坏）；
 - player：**mAP50 ≥ 0.90**。
 不过 → 回 Task 9 补数据/纠标注重训。把两组数字记进提交信息。
@@ -1250,9 +1263,9 @@ Set-Location ..
 
 ```powershell
 Set-Location dataset
-..\.venv-warrior\Scripts\yolo.exe export model=runs\detect\runs\mob_player_v1\weights\best.pt format=onnx imgsz=1280
+..\.venv-warrior\Scripts\yolo.exe export model=runs\mob_player_v1\weights\best.pt format=onnx imgsz=1280
 Set-Location ..
-Copy-Item dataset\runs\detect\runs\mob_player_v1\weights\best.onnx assets\mob_model\mob.onnx -Force
+Copy-Item dataset\runs\mob_player_v1\weights\best.onnx assets\mob_model\mob.onnx -Force
 ```
 
 冒烟（OpenVINO 路径加载新模型，双类别都出框；ultralytics 加载 onnx 会卡死 120s+，必须走 OpenVINO——AGENTS.md §2.2）：
@@ -1271,11 +1284,16 @@ assert 'unknown' not in names, 'dic_labels 缺映射'
 "
 ```
 
-- [ ] **Step 5: 提交（模型 99MB 在 .gitignore,不入库;提交训练记录说明）**
+- [ ] **Step 5: 修正 AGENTS.md 过时路径 + 提交（模型 99MB 在 .gitignore,不入库）**
+
+AGENTS.md 三处按实际布局修正（其余原样，`dataset/mobs.yaml` 已在 Task 6 提交过、此处无改动）：
+- §3.2 两条训练命令：`C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe` → `..\.venv-warrior\Scripts\yolo.exe`（从 dataset 执行）、`model=C:\projects\mxd-script\yolov8n.pt` → `model=..\yolov8n.pt`；
+- §3.3 导出命令：`model=runs\detect\runs\<名>\weights\best.pt` → `model=runs\<名>\weights\best.pt`；
+- §3.4：`训练产物在 runs/detect/runs/<名>/weights/` → `训练产物在 dataset/runs/<名>/weights/`。
 
 ```powershell
-git add dataset/mobs.yaml
-git commit --allow-empty -m "train: mob_player_v1 部署——mob mAP50 <旧→新>,player mAP50 <值>,旧模型已备份"
+git add AGENTS.md
+git commit -m "train: mob_player_v1 部署——mob mAP50 <旧→新>,player mAP50 <值>,旧模型已备份;顺手修正 AGENTS §3.2-3.4 训练路径(实证 dataset/runs/<名>/)"
 ```
 
 ---
@@ -1299,11 +1317,11 @@ git commit --allow-empty -m "train: mob_player_v1 部署——mob mAP50 <旧→�
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py logs\ok-script.log --since <挂机开始 HH:MM:SS>
 ```
-判据 A/B/C/D/E 对照 spec §5 通过线；F = 20 分钟内无停机守卫触发（grep 日志「停止打怪」）。**任一不过：记录实际值，不许改通过线，回 spec §3 重新设计。**
+判据 A/B/C/D/E 对照 spec §5 通过线；F = 20 分钟内无停机守卫触发（`Select-String '停止打怪' logs\ok-script.log`）。**任一不过：记录实际值，不许改通过线，回 spec §3 重新设计。**
 
 - [ ] **Step 3: E2E 截图取证（按 AGENTS.md §11.5 流程,视觉模型验收）**
 
-三张必备：怪堆遮挡中绿框咬住角色本体、路人同屏绿框没跳、决策日志里 `src=yolo` 拍的同时刻画面。存 `screenshots/e2e/player-anchor-fusion/`，文件名带日期。误认抽查：`grep 'src=yolo' logs/ok-script.log` 看 `关联距=` 分布，>150 的拍逐个对截图。
+三张必备：怪堆遮挡中绿框咬住角色本体、路人同屏绿框没跳、决策日志里 `src=yolo` 拍的同时刻画面。存 `screenshots/e2e/player-anchor-fusion/`，文件名带日期。误认抽查：`Select-String 'src=yolo' logs\ok-script.log`（全篇命令均为 PowerShell）看 `关联距=` 分布，>150 的拍逐个对截图。
 
 - [ ] **Step 4: 归档 + 提交**
 
@@ -1320,4 +1338,14 @@ git commit -m "docs: 丢锚治理实弹验收——判据 A-F 实测归档"
 
 - **Spec 覆盖**：§1.3 工具→Task 1；§3.1 数据/类别→Task 6/9/10；§3.2 一拍一次推理→Task 5/7；§3.3 关联门→Task 2/7；§3.4 伪锚点/身份→Task 7；§3.5 强制慢扫→Task 3/8；§3.6 可观测→Task 1/4/11；§5 数据门→Task 11；§6 回退开关→Task 7/8 配置项 + Task 10 备份。
 - **占位符**：无 TBD/TODO；所有代码块给全文或精确插入点。
-- **类型一致**：`select_player_box(players, pred, identity_fresh)`（Task 2 定义 = Task 7 调用）；`should_rescan_anchor(..., force, last_forced)`（Task 3 = Task 8）；`find_mobs(boxes=)`/`find_all`（Task 5 = Task 7）；`decision_log_line(yolo_cands=, yolo_dist=)`（Task 4 = Task 7）；来源标签 `'yolo'`（Task 1 测试 = Task 7 实现）。
+- **类型一致**：`select_player_box(players, pred, identity_fresh)`（Task 2 定义 = Task 7 调用）；`gate_player_boxes`（Task 2 定义 = Task 7 计数 = Task 4 字段口径）；`should_rescan_anchor(..., force, last_forced)`（Task 3 = Task 8）；`find_mobs(boxes=)`/`find_all`（Task 5 = Task 7）；`decision_log_line(yolo_cands=, yolo_dist=)`（Task 4 = Task 7）；来源标签 `'yolo'`（Task 1 测试 = Task 7 实现）。
+
+## 评审修订记录（2026-08-09，用户评审 7 项全部核实）
+
+1. Task 9 补标路径：`label_boxes` txt 与 png 同目录读写，存量标注源头在 `dataset/raw/`——对 `images/` 跑标注器会产生进不了训练集的孤儿 txt。已改为 raw 源头补标 + `final_split` 重切分（其会先清空 train/val，实证 `final_split.py:98-113`）。
+2. Task 9 原 `git add dataset/` 必然失败：`.gitignore` 第 6-10/15 行整目录忽略，`git ls-files dataset` 仅 classes.txt/mobs.yaml。已改为「无 git 产物」。
+3. Task 10 产物路径：实证 `dataset/runs/mob_bootstrap/` 结构，`runs/detect/runs/` 嵌套是 AGENTS.md 的过时记录。已全部改为 `dataset/runs/<名>/`，并把 AGENTS.md §3.2-3.4 的修正折入 Task 10 Step 5。
+4. yolov8m.pt 不在项目根（仅 n）：改用裸名 `model=yolov8m.pt` 触发 ultralytics 自动下载，离线退 n。
+5. `yolo候选` 语义从全屏数改为门内候选数：新增 `gate_player_boxes` 作为门口径唯一事实源（Task 2/4/7 三处同步）。
+6. `_resolve_anchor` 在 tests:1118-1450 有 18 处 3 参直呼：`players=()` 默认值保证兼容，Task 7/8 的 Interfaces 已写明影响面与 force 门零影响的逐条分析。
+7. Task 7 Step 2 只加 `find_all` 一行（`find_mobs` mock 已存在于 make_task:36）；另修正 mock 计数 ~80→68、Task 11 grep→Select-String、标注器拖拽预览色让位 player 绿。

@@ -27,12 +27,15 @@ def make_frame_with_nametag(nametag_pos=(1100, 860), size=(130, 30)):
 
 
 class FakeOcr:
+    """模拟真实 OCR:anchor 的 OCR 预处理(_enhance_for_ocr)会把白字黑描边反转为
+    黑字浅底,因此这里检测**暗像素**(gray < 128)而不是白像素。"""
+
     def __init__(self, frame):
         self._frame = frame
 
     def ocr(self, crop):
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        mask = (gray > 128).astype(np.uint8)
+        mask = (gray < 128).astype(np.uint8)
         if mask.sum() < 500:
             return []
         ys, xs = np.where(mask)
