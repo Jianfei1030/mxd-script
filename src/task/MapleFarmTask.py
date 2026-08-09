@@ -624,12 +624,6 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # (攻击间隔)本就大于宽限,现算会让攻击档整个塌成空闲档,负载回归。
         self._detect_attacking = farm_logic.mob_present_debounced(
             raw_attack, now, self._last_attack_seen, cfg['寻怪起步宽限(秒)'])
-        if self._boxes_enabled():
-            self._draw_debug(cfg, body=body, zone=zone, attack_area=attack_area,
-                             mobs=mobs, mob_present=mob_present,
-                             attack_present=self._last_attack_present)
-        else:
-            self._clear_debug()
         # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种
         # 变化(A=纠正前、B=本拍结束),分歧行也据它判(spec §3.4)。
         facing_before, turn = belief_before_obs, None
@@ -691,6 +685,20 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     # 起步即停手:_last_attack_present 可能还被 丢怪保持 撑着 True,
                     # 不作废的话 _do_attack 会一边追一边朝空气轻点攻击键
                     self._last_attack_present = False
+        # 画框放在转向之后:attack_area 是按本拍转向「前」的朝向算的(决策必须如此,
+        # 见上面 spec §5.1 的注释),直接画它,悬浮窗就永远比角色朝向慢一拍 ——
+        # 排查时会把「节拍慢」误读成「转了但攻击区没跟上」(2026-08-09 就是这么发现的)。
+        # 这里只改画什么、不改判什么:决策与决策日志用的仍是 attack_area。
+        # 群体(对称)下攻击区本就等于整个接敌区,转向不参与,原样画。
+        draw_area = (attack_area
+                     if turn is None or cfg.get('攻击区形状') == '群体(对称)'
+                     else farm_logic.facing_half_zone(zone, body[0], self._facing))
+        if self._boxes_enabled():
+            self._draw_debug(cfg, body=body, zone=zone, attack_area=draw_area,
+                             mobs=mobs, mob_present=mob_present,
+                             attack_present=self._last_attack_present)
+        else:
+            self._clear_debug()
         if cfg.get('决策日志开关'):
             self._log_decision(source, anchor_hit, body, zone, attack_area, centres, mobs,
                                raw_present, mob_present, self._last_attack_present,

@@ -1706,6 +1706,44 @@ class TestDebugOverlay(unittest.TestCase):
             MapleFarmTask.disable(task)
         overlay.clear_draw.assert_called_once_with('maple_farm_debug')
 
+    def test_overlay_draws_the_zone_that_takes_effect_after_the_turn(self):
+        """转向那一拍,悬浮窗画的是转向**之后**生效的攻击区。
+
+        决策仍用转向前的 attack_area(spec §5.1,Task 2 也没动它),
+        但画框若跟着用它,悬浮窗就永远比角色朝向慢一拍,排查时会把
+        「节拍慢」误读成「转了但攻击区没跟上」。
+        变异验证:把 draw_area 改回 attack_area,本用例转红。
+        """
+        task = make_task(**{'攻击模式': '检测'})   # 默认 单体(面朝)
+        task._facing = 'RIGHT'
+        task._boxes_enabled = MagicMock(return_value=True)
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')), \
+                patch.object(MapleFarmTask, '_draw_debug') as draw:
+            # 怪在左侧、面朝右 → 本拍发左转向
+            task.find_mobs = MagicMock(
+                return_value=[MagicMock(x=960, y=700, width=60, height=50)])
+            run_with_frame(task)
+        self.assertEqual(task._facing, 'LEFT')
+        draw.assert_called_once()
+        _, kwargs = draw.call_args
+        # 左半区:右边界 = 身体 x(1280)。修复前画的是右半区,左边界才是 1280
+        self.assertEqual(kwargs['attack_area'][2], 1280)
+
+    def test_overlay_group_shape_unaffected_by_turn(self):
+        """群体(对称)下攻击区就是整个接敌区,转向不该把它砍成一半。"""
+        task = make_task(**{'攻击模式': '检测', '攻击区形状': '群体(对称)'})
+        task._facing = 'RIGHT'
+        task._boxes_enabled = MagicMock(return_value=True)
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')), \
+                patch.object(MapleFarmTask, '_draw_debug') as draw:
+            task.find_mobs = MagicMock(
+                return_value=[MagicMock(x=960, y=700, width=60, height=50)])
+            run_with_frame(task)
+        _, kwargs = draw.call_args
+        self.assertEqual(kwargs['attack_area'], kwargs['zone'])
+
 
 class TestAttackDebounceAndTurnCooldown(unittest.TestCase):
     """一拍漏检不松攻击键;冷却内不许反向转向。
