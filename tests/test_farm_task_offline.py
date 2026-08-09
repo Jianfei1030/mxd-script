@@ -522,6 +522,9 @@ class TestFarmTaskOffline(unittest.TestCase):
         恒置 False(等价于按 now 现算导致攻击档塌陷),本用例转红。
         """
         task = make_task(**{'攻击模式': '检测', '攻击间隔(秒)': 0.7})
+        # 稳态前提:面朝右、怪在右侧 → 首拍不转向。转向落地会作废检测节拍
+        # (2026-08-09 计划 Task 2 的意图),首拍转向的话断言量的就不是"稳态节拍"
+        task._facing = 'RIGHT'
         with patch('src.detect.anchor.find_in_region',
                    return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')):
             task.find_mobs = MagicMock(return_value=[MagicMock(x=1300, y=700, width=60, height=50)])
@@ -531,6 +534,41 @@ class TestFarmTaskOffline(unittest.TestCase):
             self.assertEqual(task._last_detect, 100.0)
             run_with_frame(task, now=100.75)            # ≥ 攻击间隔 → 跑
             self.assertEqual(task._last_detect, 100.75)
+
+    def test_turn_invalidates_detect_cadence(self):
+        """转向落地 → 作废检测节拍,下一拍不再按 攻击间隔 等。
+
+        攻击区是按本拍转向**之前**的朝向算的(:583 的 spec §5.1 注释,本计划
+        不推翻),新朝向要下一拍才生效;而转向只发生在接战分支,那一拍
+        _detect_attacking 常被 寻怪起步宽限 撑着 True → 下一拍按 攻击间隔 排,
+        攻击区因此要等 0.7s 才翻过去。2026-08-08 实弹:端到端延迟 p90=0.627s、
+        p99=1.103s,转向拍到下一拍的间隔 p90=0.706s(正好一个攻击间隔)。
+
+        寻怪起步宽限 调到 1.0 是为了把「节拍仍在攻击档」这个前提坐实
+        (默认 0.3 时 100.7 已出宽限,会退化成空闲档,测不到最坏情况)。
+        变异验证:删掉实现里的 `self._last_detect = 0.0`,本用例转红。
+        """
+        task = make_task(**{'攻击模式': '检测', '攻击间隔(秒)': 0.7,
+                            '寻怪起步宽限(秒)': 1.0})
+        task._facing = 'RIGHT'
+        with patch('src.detect.anchor.find_in_region',
+                   return_value=AnchorHit(1280, 800, 130, 'Yufeng咕咕')):
+            # 100.0 面朝右、右侧有怪:在打
+            task.find_mobs = MagicMock(
+                return_value=[MagicMock(x=1500, y=700, width=60, height=50)])
+            run_with_frame(task)
+            self.assertTrue(task._last_attack_present)   # 前提
+            # 100.7 怪换到左侧:发左转向。此拍 _detect_attacking 仍被 1.0s 宽限撑着,
+            # 攻击区还锚在右半边(本拍决策照旧,这是设计)
+            task.find_mobs = MagicMock(
+                return_value=[MagicMock(x=960, y=700, width=60, height=50)])
+            run_with_frame(task, now=100.7)
+            self.assertEqual(task._facing, 'LEFT')
+            self.assertTrue(task._detect_attacking)      # 前提:节拍仍在攻击档
+            # 100.8 距上一拍仅 0.1s < 攻击间隔 —— 修复前这一拍根本不跑检测
+            run_with_frame(task, now=100.8)
+        self.assertEqual(task._last_detect, 100.8)       # 检测拍真的跑了
+        self.assertTrue(task._last_attack_present)       # 攻击区已翻到左半边,罩住了怪
 
     def test_do_walk_unknown_facing_random_left_first(self):
         """朝向未知(自动+首次走位):随机一侧出、反方向回,采纳实际朝向为基线。"""
