@@ -99,6 +99,40 @@ class TestAnalyzeTurn(unittest.TestCase):
         self.assertEqual(out['outcome']['truncated'], 1)
         self.assertEqual(out['outcome']['never_settled'], 0)
 
+    def test_blocked_turn_is_not_counted_as_a_turn(self):
+        """写了 转向= 但信念没变 = 键没落地,不算一次转向。
+
+        _detect_and_act:645 无条件赋值 turn,之后才用 转向冷却 / 硬直抑制窗 /
+        _key_sendable 门控实际按键(:646-654),_log_decision 收的是那个无条件的值。
+        `scripts/analyze_facing.py:11-13` 早就记过这个坑:「冷却/抑制窗挡住的
+        转向键没落地却照样写 转向=right … 改用信念 朝向=f0→f1 判定」。
+        2026-08-09 实测 08-08 日志:3452 条 转向≠- 里有 926 条(26.8%)没落地。
+        """
+        out = analyze_turn.scan([
+            line('10:00:00,000', 'RIGHT', 'RIGHT', 'left'),   # 被挡下:信念没变
+            line('10:00:00,100', 'RIGHT', 'RIGHT', None),
+        ])
+        self.assertEqual(out['turns'], 0)
+        self.assertEqual(out['gaps'], [])
+        self.assertEqual(out['latencies'], [])
+
+    def test_blocked_turn_before_settling_is_not_a_re_turn(self):
+        """结算前那拍只是「算出了一个被挡下的 turn」→ 不算换向,该结算照样结算。
+
+        这条是 re_turned 被虚高的直接来源:Task 2 让下一拍提前到 ~0.1s,而
+        转向冷却 仍是 1.5s,于是「算出一个仍被冷却挡着的 turn」的拍现在极可能
+        就是紧接的下一拍。不修的话 re_turned 会因为纯统计假象冲破计划里
+        32% 的回退红线,误杀一个正常工作的修复(2026-08-09 review 发现)。
+        """
+        out = analyze_turn.scan([
+            line('10:00:00,000', 'RIGHT', 'LEFT', 'left'),    # 真落地
+            line('10:00:00,100', 'LEFT', 'LEFT', 'right'),    # 算出 turn 但被挡下
+        ])
+        self.assertEqual(out['turns'], 1)
+        self.assertEqual(out['outcome']['re_turned'], 0)
+        self.assertEqual(out['outcome']['settled'], 1)
+        self.assertAlmostEqual(out['latencies'][0], 0.1, places=3)
+
     def test_full_lookahead_without_settle_is_never_settled(self):
         """完整 40 拍窗口内没结算 → 仍是 never_settled(护栏,修复不能误伤它)。"""
         rows = [line('10:00:00,000', 'RIGHT', 'LEFT', 'left')]

@@ -37,6 +37,26 @@ def parse(lines):
     return rows
 
 
+def landed(row):
+    """这一拍的转向键是不是**真的落地了**。
+
+    不能只看 `转向=` 字段:`_detect_and_act:645` 无条件赋值
+    `turn = attack_turn_direction(...)`,之后才用 转向冷却 / 硬直抑制窗 /
+    _key_sendable 门控实际按键(:646-654),而 `_log_decision` 收的是那个
+    无条件的值 —— 键被挡下、`_facing` 根本没变,日志照样写 `转向=left`。
+    `scripts/analyze_facing.py:11-13` 早就记过同一个坑,判据 B 因此改用信念判定。
+
+    `_facing` 只在转向 tap 落地、寻怪换向、走位结束时才变,所以
+    「本拍写了 turn」+「信念 f0→f1 确实变了」才算一次真转向。
+    2026-08-09 实测 08-08 日志:3452 条 `转向≠-` 里 926 条(26.8%)没落地;
+    按字段计数会把 re_turned 从 4.7% 抬到 28.7%,直接顶到计划的回退红线。
+
+    已知残留:先被朝向纠正翻一次、再转回原朝向的拍会出现 f0==f1 而被漏掉。
+    analyze_facing 接受同一限制,不在这里另起炉灶。
+    """
+    return row['turn'] != '-' and row['f0'] != row['f1']
+
+
 def scan(lines):
     """算统计。语义见计划文档 Task 1,五种结局互斥且必然命中其一。
 
@@ -48,7 +68,7 @@ def scan(lines):
                outcome=dict(settled=0, re_turned=0, corrected_back=0,
                             never_settled=0, truncated=0))
     for i, row in enumerate(rows):
-        if row['turn'] == '-':
+        if not landed(row):
             continue
         out['turns'] += 1
         new = row['f1']
@@ -57,7 +77,7 @@ def scan(lines):
         tail = len(rows) - (i + 1)   # 该转向拍之后还剩几拍
         for j in range(i + 1, min(i + 1 + MAX_LOOKAHEAD, len(rows))):
             nxt = rows[j]
-            if nxt['turn'] != '-':
+            if landed(nxt):
                 out['outcome']['re_turned'] += 1
                 break
             if nxt['f0'] == new and nxt['f1'] == new:
