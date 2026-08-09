@@ -36,7 +36,7 @@
 - Consumes: `src.task.MapleFarmTask.decision_log_line`（测试用它构造样本行——真绑定，格式一改测试立刻红；签名见 `MapleFarmTask.py:93`）
 - Produces: `analyze_anchor.parse(lines) -> [dict(t, src, can_atk)]`、`sessionize(rows, gap=10.0, min_rows=20)`、`loss_episodes(sessions) -> [float]`、`metrics(sessions) -> dict`；命令行 `python scripts/analyze_anchor.py [日志] [--since HH:MM:SS] [--until HH:MM:SS]`。Task 11 验收调它。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_analyze_anchor.py`（整文件）：
 
@@ -140,14 +140,14 @@ if __name__ == '__main__':
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_analyze_anchor -v
 ```
-预期：`ModuleNotFoundError: No module named 'scripts.analyze_anchor'`（若整个 `scripts` 包导入失败，先看 `tests/test_calibrate_offline.py` 是怎么导入 scripts 下模块的，照同一方式解决——`scripts/` 缺 `__init__.py` 就补一个空文件并纳入本次提交）。
+预期：`ModuleNotFoundError: No module named 'scripts.analyze_anchor'`（若整个 `scripts` 包导入失败，先看 `tests/test_calibrate_offline.py` 是怎么导入 scripts 下模块的，照同一方式解决——`scripts/` 缺 `__init__.py` 就补一个空文件并纳入本次提交）。实际报错与预期一致；namespace package 导入无需补 `__init__.py`。
 
-- [ ] **Step 3: 实现 `scripts/analyze_anchor.py`（整文件）**
+- [x] **Step 3: 实现 `scripts/analyze_anchor.py`（整文件）**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -288,14 +288,14 @@ if __name__ == '__main__':
     main(sys.argv[1:])
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_analyze_anchor -v
 ```
 预期：全绿。
 
-- [ ] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**
+- [ ] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**（本机无 `logs/ok-script.2026-08-08.log`，已按计划跳过，提交信息注明）
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py logs\ok-script.2026-08-08.log
