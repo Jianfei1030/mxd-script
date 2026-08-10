@@ -82,7 +82,7 @@ DEFAULT_CONFIG = {
     '显示怪物框': True,
 }
 
-CALIBRATED_SIZE = (2560, 1440)  # 只在此分辨率挂机(README 约束)
+CALIBRATED_SIZE = (2560, 1440)  # 校准分辨率;不符时只提醒不硬停(见 run(),2026-08-10 用户口径)
 
 FAST_HALF_W = 240        # 快通道搜索窗半宽(像素)
 FAST_HALF_H = 80         # 快通道搜索窗半高
@@ -248,6 +248,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_hp_potion_press = 0.0  # 上次按下药键时刻;0.0 哨兵=尚无上一窗口,只记基线不判无效
         self._dead_frames = 0
         self._bad_size_frames = 0
+        self._size_warned = False      # 分辨率不符的提醒,整个任务只发一次
         self._last_potion_check = 0.0
         self._prev_hp = None          # 上一拍 HP(受击检测用);None=第一拍
         self._last_sig = None
@@ -1127,12 +1128,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             return
         h, w = frame.shape[:2]
         if (w, h) != CALIBRATED_SIZE:
-            # 窗口切换/最小化瞬间会拿到异常尺寸帧,连续 10 帧确认再停
+            # 分辨率不符:只提醒、不硬停(2026-08-10 用户口径,提醒而非硬性条件)。
+            # 窗口切换/最小化瞬间也会拿到异常尺寸帧,先攒 10 帧确认防误报;
+            # 整个任务只提醒一次(_size_warned 置位后不再发),提醒后不 return、
+            # 照常处理当前帧(非校准分辨率下 ROI 会整体偏位,由用户自行权衡)。
             self._bad_size_frames += 1
-            if self._bad_size_frames >= 10:
-                self.stop_farming(f'分辨率 {w}x{h} 非校准值 {CALIBRATED_SIZE[0]}x{CALIBRATED_SIZE[1]},请调回后再挂机')
-            return
-        self._bad_size_frames = 0
+            if not self._size_warned and self._bad_size_frames >= 10:
+                self._size_warned = True
+                self.log_warning(f'分辨率 {w}x{h} 非校准值 {CALIBRATED_SIZE[0]}x{CALIBRATED_SIZE[1]},ROI 会偏位——仅提醒一次,继续挂机', notify=True)
+        else:
+            self._bad_size_frames = 0
 
         now = time.time()
         keys = self.get_global_config('游戏按键')
