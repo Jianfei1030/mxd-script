@@ -66,6 +66,7 @@ DEFAULT_CONFIG = {
     '受击防抖(秒)': 1.0,
     '硬直抑制窗(秒)': 0.0,
     '朝向纠正开关': True,
+    '攻击前垫步开关': False,
     '朝向观测开关': False,
     '决策日志开关': False,
     # 调试可视化开关（勾选 GUI「启用标记框」时显示）
@@ -91,6 +92,7 @@ NAMETAG_TEMPLATE_PAD = 12      # 模板裁剪两侧边距(文字框外留白)
 FALLBACK_WARN_INTERVAL = 60   # 回退屏幕中心的告警最小间隔(秒),防刷屏
 DETECT_ERROR_LOG_INTERVAL = 60   # 检测(OCR/YOLO)异常日志最小间隔(秒),10Hz 主循环下不限频会刷爆日志
 TURN_TAP_SECONDS = 0.05  # 转向轻点:方向键按 50ms 即翻转朝向,位移可忽略(约几像素,方向随怪侧轮换不累积)
+PAD_STEP_TAP_SECONDS = 0.015  # 攻击前垫步:方向键按 15ms,位移更小——垫步只需"点一下朝向",不需完整翻转
 FACING_TEMPLATE_DIR = 'screenshots/facing_templates'  # 朝向模板持久化目录(灰度头+肩)
 _FACING_SHORT = {'LEFT': 'L', 'RIGHT': 'R'}   # 决策行里 实测= 字段的短写
 FACING_CAPTURE_MIN_DX = 40   # 采朝向模板要求的最小确认位移(像素):角色真走了这么远,朝向才是观测出来的而不是猜的
@@ -196,6 +198,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '受击防抖(秒)': '受击(HP 掉 2%+)事件的最小间隔。游戏受击后约 1 秒无敌,1 秒内不可能有新的真实掉血,但血条渐变动画会把一次掉血拆成多拍读数、每拍都触发受击——每次受击都会作废朝向并重置转向冷却,重复触发让冷却形同虚设,怪穿过时左右扭+打空。取 1 秒 = 游戏无敌时长,不会漏真受击。设 0 = 关掉防抖',
             '硬直抑制窗(秒)': '受击后多久内不按转向/攻击键。**默认 0 = 关闭,实测有害,别开**。原意是躲开击退硬直(硬直中按键被游戏吞掉,但转向代码照常盲写朝向 → 信念分叉打空),但 2026-08-08 逐拍实测证明它把问题放大了:受击会把 _facing 清成 None,而 facing_half_zone 在 None 时退化成整个对称区,于是抑制窗禁止转向的这段时间里,有向攻击区失效、照常朝背后的怪开火。设 0.8 时「朝向未知」占挂机时间 23.3%、受击到下次成功转向中位 1.55s;设 0 后回落到 8.1% / 0.70s(四条事先写死的判据全过)。真正的解法是「只在角色可操作的时刻发键」,见 docs/superpowers/specs/2026-08-08-facing-observer-design.md §6。保留此项只为复现当时的对照实验',
             '朝向纠正开关': '观测到角色真实朝向与信念不符时,以观测为准写回。_facing 原本是纯信念(只有"我们自己按了方向键所以认为转过去了"这一种写入),键被游戏吞掉就会与现实分叉、朝空处放技能。2026-08-08 实弹 30 分钟:观测器可用率 77.3%、随机噪声 0.4%(事先写死的线是 >=50% 与 <=5%),够格当纠正依据。它同时接管了「受击作废朝向」原本顺带提供的破死锁作用,所以那行清空已经删掉。依赖朝向模板,模板要等第一次寻怪走动确认才采得到,在那之前不生效(行为同改动前)。关掉 = 观测器退回只读',
+            '攻击前垫步开关': '战士专用(默认关,不影响法师等其他职业):每次攻击前先朝攻击区内最近怪所在侧轻点方向键(20ms,见 PAD_STEP_TAP_SECONDS),再按攻击键。目的是兜住 _facing 信念被击退/按键丢失破坏的盲区——此时攻击区内有怪、attack_turn_direction 认为"面朝侧还有目标"不转向,角色背对怪一直砍空气且无修正机会。垫步不信任信念:信念错则物理修正朝向,信念对则轻点是 no-op(已朝该侧按方向键零代价)。垫步只在 攻击间隔 放行的拍执行,节奏与攻击一致。需要 攻击模式=检测(定频无怪位置信息,无从定向)',
             '朝向观测开关': '只读排查用:每个锚点真命中的检测拍,用模板匹配读出角色**真实**朝向,与信念朝向一起写进决策日志(字段 实测= / 分值=),不一致时另写一行「朝向分歧」。它不改变任何决策,纯粹是尺子——_facing 是纯信念,项目在它上面改过四轮却一直没有直接证据。开着会在没模板时先等一次寻怪走动来采模板(要求沿按键方向真走够 40px,避免用信念标定模板)。需要同时开 决策日志开关。排完记得关',
             '决策日志开关': '排查用:每个检测拍往 logs/ok-script.log 写一行决策数据(锚点来源、身体x、区内怪的左右分布、是否有怪、可打区内怪数、可打、朝向变化、转向、寻怪方向、按键能否送出),另外每次检测到受击(HP 下降)写一行「受击」。排"左右转向不攻击/打空"这类问题时打开,挂机两分钟后 grep 「决策」/「受击」看。寻怪刷新间隔小时会写得很密(0.1s = 每秒 10 行),排完记得关',
         })
@@ -241,6 +244,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._detect_attacking = None     # 检测节拍用的「在打」快照(短宽限去抖);只有 should_detect 读它
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
+        self._last_centres = []       # 最近一次检测拍的怪中心列表(垫步定向用)
+        self._last_zone = None        # 最近一次检测拍的接敌区(垫步定向用)
         self._last_hit = 0.0          # 上次受击(作废朝向)时刻;受击防抖用,0.0 哨兵=从未受击
         self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
         self._seek_dir = None         # 自动寻怪目标方向 'left'/'right';None=不寻怪(区内有怪/无同层怪/开关关)
@@ -613,6 +618,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 and observed != self._facing):
             self._facing = observed
         zone = farm_logic.attack_zone(body, cfg['攻击区宽(像素)'], cfg['攻击区高(像素)'])
+        self._last_zone = zone   # 垫步定向读:最近一次检测拍的接敌区
         # 有向攻击区 = 接敌区的面朝侧一半(spec §4)。zone 从此是「接敌区」:
         # 管转向/寻怪/坐椅/走位;attack_area 管「能不能打」,只喂 _do_attack。
         # 用的是本拍转向「之前」的 self._facing——此处 facing_before 还没赋值,
@@ -625,6 +631,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             mobs = []
             self._log_detect_error(now, 'YOLO 找怪', e)
         centres = [(m.x + m.width / 2, m.y + m.height / 2) for m in mobs]
+        self._last_centres = centres   # 垫步定向读:最近一次检测拍的怪中心
         # 屏幕上有没有怪(不限攻击区):经验停滞守卫据此判断"是真没收益"还是"本来就没得打"
         self._last_any_mob = len(mobs) > 0
         # 去抖:漏检一拍不退出攻击态(见 farm_logic.mob_present_debounced)。
@@ -850,6 +857,21 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 and farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
                 and not farm_logic.stun_suppressed(
                     now, self._last_hit, cfg['硬直抑制窗(秒)'])):
+            # 攻击前垫步(战士可选):先朝最近怪所在侧轻点方向键再攻击。
+            # 兜住 _facing 信念被击退/按键丢失破坏的盲区——区内有怪时
+            # attack_turn_direction 认为"面朝侧还有目标"不转向,角色背对怪
+            # 一直砍空气。垫步不信任信念,信念错则物理修正,信念对则是 no-op。
+            # 键窗口不可点击时不垫步(方向键丢了 _facing 不许盲写,见 _key_sendable)。
+            # 2 秒没攻击(空闲/寻怪中)不垫步:此时无朝向需求,垫步只会干扰寻怪移动。
+            if (cfg.get('攻击前垫步开关')
+                    and self._last_zone is not None
+                    and (self._last_attack == 0.0 or now - self._last_attack < 2.0)):
+                body_x = self._last_body_x if self._last_body_x is not None else CALIBRATED_SIZE[0] / 2
+                side = farm_logic.attack_pre_tap_direction(
+                    self._last_centres, self._last_zone, body_x)
+                if side is not None and self._key_sendable():
+                    key = '左移键' if side == 'left' else '右移键'
+                    self.send_key(keys[key], down_time=PAD_STEP_TAP_SECONDS)
             self.send_key(keys['攻击键'])
             self._last_attack = now
 
@@ -887,6 +909,28 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._seek_key = None
         self._seek_start_body_x = None
 
+    def _release_seek_key_light(self):
+        """暂停回调专用轻量松键:只发 interaction.send_key_up,不走 send_key_up
+        的 reset_scene/check_enabled 链。
+
+        背景(F9 暂停 → GUI 未响应,2026-08-10):communicate.executor_paused 是
+        DirectConnection,`_on_executor_paused` 跑在 GUI 主线程。而 send_key_up →
+        reset_scene → check_enabled(check_pause=True) 在 paused=True 时调
+        executor.sleep(1)——sleep 循环在 GUI 线程跑满 1 秒,期间还反复 WGC 取帧,
+        窗口表现就是"切回 GUI 未响应"。暂停回调只需要"把按着的方向键抬起来",
+        不需要 reset_scene/check_enabled/节流,直接用 interaction 原语发 keyUp。"""
+        if self._seek_key is None:
+            return
+        try:
+            keys = self.get_global_config('游戏按键')
+            interaction = self.executor.interaction
+            if interaction is not None:
+                interaction.send_key_up(keys[self._seek_key])
+        except Exception as e:
+            self.log_error(f'暂停松键失败: {e!r}')
+        self._seek_key = None
+        self._seek_start_body_x = None
+
     def _release_attack_key(self):
         """松开攻击长按(没按着就无事可做)。尽力而为:任何失败都只记日志
         不抛出——松键失败不能把停任务/暂停流程搞崩,按键最终也会随窗口失焦自然失效。"""
@@ -899,16 +943,39 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self.log_error(f'松开攻击键失败: {e!r}')
         self._attack_held = False
 
+    def _release_attack_key_light(self):
+        """暂停回调专用轻量松键,见 _release_seek_key_light 的线程/阻塞说明。"""
+        if not self._attack_held:
+            return
+        try:
+            keys = self.get_global_config('游戏按键')
+            interaction = self.executor.interaction
+            if interaction is not None:
+                interaction.send_key_up(keys['攻击键'])
+        except Exception as e:
+            self.log_error(f'暂停松攻击键失败: {e!r}')
+        self._attack_held = False
+
     def _release_held_keys(self):
         """松开全部长按键(寻怪方向键 + 攻击键)。"""
         self._release_seek_key()
         self._release_attack_key()
 
+    def _release_held_keys_light(self):
+        """暂停回调专用:全部长按键用轻量路径松开(不在 GUI 线程跑阻塞链)。"""
+        self._release_seek_key_light()
+        self._release_attack_key_light()
+
     def _on_executor_paused(self, paused):
         """F9 全局暂停时松开所有长按键——executor 暂停后 run() 不再被调用,
-        不在这松键角色会一直走下去/打下去;恢复(False)不做事,下一拍会自动重新按下。"""
+        不在这松键角色会一直走下去/打下去;恢复(False)不做事,下一拍会自动重新按下。
+
+        必须用轻量松键路径:本回调经 DirectConnection 在 GUI 主线程执行,
+        send_key_up → reset_scene → check_enabled 在 paused=True 时会触发
+        executor.sleep(1) 阻塞 GUI 线程约 1 秒(期间还反复 WGC 取帧),
+        表现为"切回 GUI 未响应"(2026-08-10 实测修复)。"""
         if paused:
-            self._release_held_keys()
+            self._release_held_keys_light()
 
     def disable(self):
         """停任务前松开可能还按着的长按键,防止角色在任务停止后继续走/打。"""

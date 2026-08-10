@@ -400,6 +400,20 @@ def nearest_mob_side(centres, zone, body_x):
     return nearest, ('right' if nearest >= body_x else 'left')
 
 
+def attack_pre_tap_direction(centres, zone, body_x):
+    """攻击前垫步方向:接敌区内最近怪在左 → 'left',在右 → 'right';无怪 → None。
+
+    用途(「攻击前垫步」可选开关):战士的 _facing 是盲写信念,被击退/按键丢失
+    破坏后与实际朝向脱节——攻击区内有怪(attack_turn_direction 判定"面朝侧还有
+    目标"返回 None)时,角色会背对怪一直按攻击键砍空气,且没有修正机会。
+    垫步不信任信念:每次攻击前按最近怪所在侧的方向键轻点,信念错则物理修正,
+    信念对则该轻点是 no-op(已朝该侧按方向键零代价,50ms 位移可忽略)。
+    复用 nearest_mob_side 的判边规则(x == body_x 压身上的怪归右,避免贴脸噪声)。
+    """
+    _, side = nearest_mob_side(centres, zone, body_x)
+    return side
+
+
 def same_floor(mob_feet_y, player_feet_y, tolerance):
     """怪脚底与角色脚底(名字牌 y)高度差在容差内 → 同一层,水平走近可达。
     容差小于平台间高度差,避免追到别的平台。"""

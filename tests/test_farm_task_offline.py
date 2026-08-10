@@ -35,6 +35,7 @@ def make_task(**cfg_overrides):
     task.log_debug = MagicMock()
     task.find_mobs = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
+    task._executor = SimpleNamespace(interaction=MagicMock())
     return task
 
 
@@ -839,16 +840,30 @@ class TestSeekMove(unittest.TestCase):
 
     def test_executor_pause_releases_held_key(self):
         """F9 暂停(executor_paused 信号)时松开长按的方向键:
-        暂停后 run() 不再被调用,不松键角色会一直走下去。"""
+        暂停后 run() 不再被调用,不松键角色会一直走下去。
+        2026-08-10 修复:暂停回调走 interaction 轻量路径(不走 send_key_up →
+        reset_scene → check_enabled 的 sleep(1) 阻塞链,那是 F9 暂停后 GUI
+        未响应的根因),所以断言 interaction.send_key_up 而不是 task.send_key_up。"""
         task = make_task()
         task._seek_dir = 'right'
         task._do_seek_move(task.config, KEYS)
         task._on_executor_paused(True)
-        self.assertEqual(task.send_key_up.call_args_list, [call('right')])
+        task._executor.interaction.send_key_up.assert_called_once_with('right')
         self.assertIsNone(task._seek_key)
         # 恢复:下一拍重新按下
         task._do_seek_move(task.config, KEYS)
         self.assertEqual(task.send_key_down.call_args_list, [call('right'), call('right')])
+
+    def test_executor_pause_uses_light_path_not_send_key_up(self):
+        """暂停回调必须走轻量路径:send_key_up → reset_scene → check_enabled 在
+        paused=True 时触发 executor.sleep(1),在 GUI 主线程跑满 1 秒 = GUI 未响应。
+        task.send_key_up 不该被暂停回调调用。"""
+        task = make_task()
+        task._seek_dir = 'right'
+        task._seek_key = '右移键'
+        task._do_seek_move(task.config, KEYS)
+        task._on_executor_paused(True)
+        task.send_key_up.assert_not_called()
 
     def test_pause_resume_signal_false_does_nothing(self):
         """暂停信号带 False(恢复)不松键。"""
@@ -977,6 +992,46 @@ class TestAttackTap(unittest.TestCase):
         task._do_attack(task.config, KEYS, now=100.0)
         task._on_executor_paused(True)
         self.assertNotIn(call('shift'), task.send_key_up.call_args_list)
+
+    def test_pad_step_fires_when_recently_attacking(self):
+        """攻击间隔内(有攻击记录)→垫步触发(2秒禁垫步条件放行)。"""
+        task = make_task(**{'攻击模式': '检测', '攻击前垫步开关': True, '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._last_zone = ((980, 530, 1580, 730))
+        task._last_centres = [(1100, 640)]
+        task._last_body_x = 1280
+        # _last_attack=98.5 → now=100 差 1.5s = 间隔(should_attack 放行),且 1.5<2(垫步放行)
+        task._last_attack = 98.5
+        task._do_attack(task.config, KEYS, now=100.0)
+        # 应该有攻击键 + 垫步方向键共 2 次 send_key
+        self.assertEqual(task.send_key.call_count, 2)
+        first_call_key = task.send_key.call_args_list[0][0][0]
+        self.assertIn(first_call_key, ('left', 'right'))  # 先垫步
+        second_call_key = task.send_key.call_args_list[1][0][0]
+        self.assertEqual(second_call_key, 'shift')  # 后攻击
+
+    def test_pad_step_skipped_when_idle_2s(self):
+        """2秒没攻击(空闲/寻怪中)→不触发垫步,只按攻击键。"""
+        task = make_task(**{'攻击模式': '检测', '攻击前垫步开关': True, '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._last_zone = ((980, 530, 1580, 730))
+        task._last_centres = [(1100, 640)]
+        task._last_body_x = 1280
+        task._last_attack = 97.0  # 3秒前 → now - last_attack = 3 > 2
+        task._do_attack(task.config, KEYS, now=100.0)
+        self.assertEqual(task.send_key.call_count, 1)
+        self.assertEqual(task.send_key.call_args_list[0][0][0], 'shift')
+
+    def test_pad_step_fires_on_first_attack(self):
+        """首次攻击(_last_attack=0.0哨兵)→垫步仍触发(哨兵特殊处理)。"""
+        task = make_task(**{'攻击模式': '检测', '攻击前垫步开关': True, '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._last_zone = ((980, 530, 1580, 730))
+        task._last_centres = [(1500, 640)]
+        task._last_body_x = 1280
+        # _last_attack 保持默认 0.0（哨兵，从未攻击过）
+        task._do_attack(task.config, KEYS, now=100.0)
+        self.assertEqual(task.send_key.call_count, 2)
 
 
 class TestSitChair(unittest.TestCase):
