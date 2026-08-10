@@ -418,6 +418,46 @@ class TestNearestMobSide(unittest.TestCase):
         self.assertEqual(fl.nearest_mob_side([], self.ZONE, 1280), (None, None))
 
 
+class TestAttackPreTap(unittest.TestCase):
+    """攻击前垫步方向:最近怪在哪侧就轻点哪侧方向键(不比较 facing)。
+
+    2026-08-09 需求:战士 _facing 是盲写信念,被击退/按键丢失破坏后攻击区内有怪
+    (attack_turn_direction 认为"面朝侧还有目标"不转向),角色背对怪一直砍空气。
+    垫步不信任信念,攻击前无条件朝最近怪所在侧轻点——信念错则物理修正,
+    信念对则 no-op(已朝该侧按方向键零代价,50ms 位移可忽略)。"""
+
+    ZONE = fl.attack_zone((1280, 630), 600, 200)   # x∈[980,1580], y∈[530,730]
+
+    def test_mob_on_left_returns_left(self):
+        centres = [(1100, 640), (1500, 640)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'left')
+
+    def test_mob_on_right_returns_right(self):
+        centres = [(1000, 640), (1500, 640)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'right')
+
+    def test_nearest_mob_wins_over_far_mob(self):
+        # 左右都有怪:朝最近的一侧垫步(远的等打完这只再处理)
+        centres = [(1010, 640), (1560, 640)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'left')
+
+    def test_mob_exactly_at_body_x_counts_as_right(self):
+        # 怪压身上:判边噪声不许引发左右横跳,固定按 right(与 nearest_mob_side 同规则)
+        self.assertEqual(fl.attack_pre_tap_direction([(1280, 640)], self.ZONE, 1280), 'right')
+
+    def test_mob_inside_zone_ignores_outside_mob(self):
+        # 区外更近的怪不参与:垫步只服务攻击判定(与 nearest_mob_side 同规则)
+        centres = [(1100, 640), (1000, 200)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'left')
+
+    def test_no_mob_in_zone_returns_none(self):
+        self.assertIsNone(fl.attack_pre_tap_direction([(2000, 200), (100, 100)],
+                                                      self.ZONE, 1280))
+
+    def test_empty_centres_returns_none(self):
+        self.assertIsNone(fl.attack_pre_tap_direction([], self.ZONE, 1280))
+
+
 class TestMobPresentDebounce(unittest.TestCase):
     """区内有怪的去抖:一拍漏检不许立刻退出攻击态。
 

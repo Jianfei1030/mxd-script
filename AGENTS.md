@@ -255,7 +255,31 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - 画框跟随检测拍节流（MapleFarmTask 检测模式：在打→攻击间隔 / 在追→寻怪刷新间隔 / 空闲→空闲刷新间隔），paint 回调本身每帧 GUI repaint 执行，~10ms
 - 检测耗时：1280 推理 ~22ms + 名字牌 OCR ~118ms（首次）→ 后续快通道小窗 <50ms
 
-### 7.4 击退受击检测（朝向信念修复，2026-08-07 实测）
+### 7.4 名字牌暗底验证（anti-cloud，2026-08-10 实测）
+- **问题**：名字牌=白字+暗色半透明底框(暗底 <100 占 ~40%、白字 >150 占 ~35%)。纯白字模板匹配会**误中云/天空**(同为亮白色)
+- **解法**：`split_match(verify_dark=True)` 命中后调 `has_dark_background` 验证位置周围暗底占比 ≥30%——名字牌通过、云/天空(无暗底)被拒绝。验证只查一个 ROI，微秒级开销
+- **验证区域宽度跟随名字牌**：`pad_x = hit.width*0.6`（下限 60），不要用固定 240——固定宽会把周围亮背景带进来稀释暗底占比（实测 frame_0256：240 宽 29.1% 被拒，94 后通过）
+- **TEMPLATE_SPLITS 2→4**：宠物会随机遮挡名字中间 2 个字(用户实测截图)，4 片覆盖"端侧+大+模+型"各 1 字，被盖 1-2 字时其他片仍命中
+- **`_matches` 前缀/后缀/粘连三向匹配**（2026-08-10 视觉模型验收 5 帧确认）：宠物可挡名字**任意侧**——
+  - 怪/邻牌挡前半 → OCR 读尾巴 → `target.endswith(text)`（旧实现只认这个，58% 通过率）
+  - 白色雪人宠物挡右侧 → OCR 读前缀 `'端侧大'`/`'端侧'` → `target.startswith(text)`
+  - 名字牌与 CV 标签粘连 → OCR 读 `'端侧大模型CV'`/`'CV端侧大模型'` → `text.startswith(target)`/`text.endswith(target)`
+  - 半长 = `len(target)//2`，下限 2（被挡剩 2 字 '端侧' 也算锚点）
+  - 离线评估：151 帧新数据通过率 **58% → 90.7%**
+- ⛔ **踩过的坑(勿重走)**：不要试图"先全图找暗底矩形再匹配"——洞穴地图背景本身就是暗色，直接找暗底会匹配到整个背景；白字连通域被字符间隙拆成 35 块；膨胀连接字符会把整个搜索窗口白字连成一片(1024x431)；滑动窗口 7.7s 太慢。**先匹配、命中后验证单点暗底**才是可行解
+- 测试：`tests/test_anchor.py` 的 `TestHasDarkBackground` / `TestSplitMatchVerifyDark` / `TestMatchesPrefixSuffix`（合成帧，离线可跑）
+
+### 7.6 快速匹配范围限制（clamp_region，2026-08-08 实施 + 08-09 实测）
+- **语义**：蓝框（锚点搜索区 = 「名字搜索范围」）是锚点搜索的**合法边界**。模板匹配 `split_match` 与快通道 OCR `find_in_window` 的窗口先裁到帧内、**再裁到蓝框内**，两窗交集为空 → 无命中；慢通道 OCR `find_in_region` 本就限定蓝框
+- **实现**：`anchor.split_match` / `anchor.find_in_window` 加可选参数 `clamp_region=(x0,y0,x1,y1)`（anchor.py:156-168、245-290）；`MapleFarmTask._resolve_anchor` 开头算一次 `region = anchor.search_region(w, h, 宽比例, 高比例, 中心Y比例)` 传给两通道（:418-420, 433, 442）——与 `_draw_debug` 画「名字搜索范围」用**同一表达式**，蓝框与限制永不脱节
+- **蓝框公式**：`search_region(frame_w, frame_h, width_ratio, height_ratio, center_y_ratio=0.55)` = 以 (w/2, h*center_y) 为中心、宽高按比例取半的矩形（anchor.py:58-72）
+- ⛔ **2026-08-09 实测大坑：clamp 只保证"窗口不越蓝框"，不保证"蓝框内没有干扰源"**——
+  - 实测 `configs/MapleFarmTask.json`：宽=1.0 / 高=0.4 / 中心Y=0.55 → 2560×1440 下蓝框 = **(0, 504, 2560, 1080)**
+  - **组队列表 (x≈2256, y≈538) 在蓝框内**（504 ≤ 538 ≤ 1080，且宽=1.0 时 x=2256 必然在内）→ 决策日志持续 `src=window body_x=2256 anchor_y=538`，绿框飘到右侧组队列表，**clamp 拦不住**（它没越框，是框本身包了它）
+  - 排查锚点位置异常：**先算蓝框范围再对照**（`anchor.search_region` 一行），命中点在框内 = 蓝框参数问题（收窄宽/调中心Y/调高把干扰源排除），在框外 = clamp 失效
+- **测试**：`tests/test_anchor.py` 的 clamp 用例（蓝框必须 ≥ 模板尺寸，否则 split_match 按"窗口放不下模板"返回 None 误报——clamp_region 宽 < 模板宽 128px 时会踩这个坑，用例用 (1100,830,1340,900) 且坐标断言放宽为区间）
+
+### 7.5 击退受击检测（朝向信念修复，2026-08-07 实测）
 - **实测结论**：冒险岛被怪碰到 → 往**远离怪物**方向击退 + **翻转朝向来面对怪物**（用户实测确认）
 - **玩家朝向不是服务端状态**：`MapleCharacter` 无 facing 字段（只有 `MapleMonster` 有），抓包/读内存读不到，像素是唯一可观测面
 - **`_facing` 是盲写信念**（MapleFarmTask.py:158），只在转向轻点/寻怪走动/走位后更新 → **击退是唯一破坏源**。挥砍中 body_x 跳变 >80px 的拍占 19%，击退高频
@@ -308,7 +332,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 | 标定结果读不到 | 写了 config.json 而非 MapleFarmTask.json | 检查写入路径 |
 | 绿框/攻击区偏移 | 名字牌锚点偏移/参数不对 | 用 `calibrate_attack_zone.py` 标定 |
 | paint 日志爆炸 | paint 回调每帧执行 | 回调内禁日志 |
-| **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配** | **⛔ 必须关闭组队血量显示（UI 设置里关）** |
+| **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配；且蓝框(搜索区宽=1.0)本身包含组队列表位置 (x≈2256, y≈538)，clamp 拦不住框内干扰源** | **⛔ 必须关闭组队血量显示（UI 设置里关）**；收窄搜索区宽/调中心Y/调高把组队列表排除出蓝框（见 §7.6） |
 
 ---
 
