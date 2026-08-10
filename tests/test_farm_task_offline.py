@@ -2997,6 +2997,46 @@ class TestYoloAnchorFusion(unittest.TestCase):
         self.assertTrue(all('yolo候选=- 关联距=- yolo全屏=-' in l
                             for l in lines), lines)
 
+    def test_lost_unique_box_takes_over_beyond_gate(self):
+        # 丢锚 3s + 全屏唯一框在门外(横向 800px)→ 末级接管,一拍 src=yolo
+        # (08-09/08-10 两次完全丢失的主修复:不再等名字牌可读的慢扫)
+        task = self._task([self._player(2000, 880)], identity_age=30.0)
+        task._anchor_time = 97.0        # 丢锚 3s(now=100)
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        self.assertTrue(any('body_x=2000' in l for l in lines), lines)
+        # 接管不刷身份时间戳:认错路人靠复验慢扫兜底,整条风险章都押在这行上
+        self.assertEqual(task._last_identity_hit, 70.0)
+        # 本剧本接管瞬移不会污染实测速度:dt=3s > ANCHOR_VX_MAX_AGE(2s)先挡,
+        # dy=|944-900|=44 ≥ platform_dy(30)再挡(接管本身就常伴换层)
+        self.assertEqual(task._anchor_vx, 0.0)
+
+    def test_lost_unique_box_takeover_vx_learning_is_known_and_capped(self):
+        # 通性锁定(spec §5):age 落在 1.0~2.0s 且同层(dy<30,正是横向逃逸
+        # 主场景)时,两道门都拦不住,接管瞬移会被低通学进去
+        # (dx=600/dt=1.5=400px/s ≤ 600 跳变门 → 0.7*400=280)。
+        # 不加门:外推 ±500 封顶 + 同向防护兜底。这条锁「知道它在学、学多少」
+        task = self._task([self._player(1800, 836)], identity_age=30.0)
+        task._anchor_time = 98.5        # 丢锚 1.5s(now=100);pseudo y=836+64=900=锚点 y,dy=0
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        self.assertAlmostEqual(task._anchor_vx, 0.7 * 600 / 1.5, places=5)
+
+    def test_lost_unique_box_respects_switch_off(self):
+        task = self._task([self._player(2000, 880)], identity_age=30.0,
+                          **{'丢锚唯一框接管开关': False})
+        task._anchor_time = 97.0
+        lines = self._beat(task)
+        self.assertFalse(any('src=yolo' in l for l in lines), lines)
+
+    def test_lost_unique_box_rejects_multiple_players(self):
+        # 丢锚再久,全屏 ≥2 框也不接管(多人图保守,spec §3.4)
+        task = self._task([self._player(2000, 880), self._player(600, 880)],
+                          identity_age=30.0)
+        task._anchor_time = 97.0
+        lines = self._beat(task)
+        self.assertFalse(any('src=yolo' in l for l in lines), lines)
+
 
 class TestTemplateDriftGuard(unittest.TestCase):
     """模板棘轮漂移(spec §3.8):模板通道拿自己上一拍的输出当下一拍搜索中心,

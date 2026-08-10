@@ -605,6 +605,29 @@ def select_player_box(players, pred, identity_fresh,
     return min(gated, key=_d2)
 
 
+LOST_UNIQUE_MIN_AGE = 1.0   # 丢锚超此时长(秒)才允许唯一框接管:新鲜丢失先走常规门
+LOST_UNIQUE_GATE_Y = 300    # 唯一框纵向门(px):实测层高差 240-300,换层接得住、隔层挡得住
+
+
+def select_lost_unique_box(players, pred_y, anchor_age,
+                           min_age=LOST_UNIQUE_MIN_AGE, gate_y=LOST_UNIQUE_GATE_Y):
+    """丢锚末级安全网(spec 2026-08-10 §3.4):常规门裁决失败后,
+    丢锚超 min_age 且全屏**恰好 1 个** player 框且同层 → 直接接管。
+
+    唯一性就是身份判据(单人挂机全屏 1 框几乎恒是自己,与 select_player_box
+    「门内恰 1 个不看身份」同理,范围扩到全屏)。横向不看门:pred 已逃逸,
+    横向先验已死;纵向先验仍活(外推只推 x),±gate_y 挡住隔层路人。
+    多框拒裁:多人图宁可慢扫不认错。认错上界 = 名字牌下次可读 + 复验间隔,
+    身份时间戳不由本通道刷新(yolo 级既有纪律)。
+    """
+    if anchor_age is None or anchor_age < min_age or len(players) != 1:
+        return None
+    _, by = player_box_anchor(players[0])
+    if abs(by - pred_y) > gate_y:
+        return None
+    return players[0]
+
+
 def crowd_present(mob_count, threshold):
     """接敌区内怪数达到阈值 → 该用群攻(前后双向命中,不需要朝向)。
 

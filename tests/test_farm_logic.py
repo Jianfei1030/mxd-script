@@ -896,3 +896,47 @@ class TestForcedRescan(unittest.TestCase):
         # 常规窗已到点:force 的限频不该反过来卡住常规扫描
         self.assertTrue(fl.should_rescan_anchor(
             102.0, 100.0, 2, force=True, last_forced=101.9))
+
+
+class TestSelectLostUniqueBox(unittest.TestCase):
+    """丢锚唯一框接管(spec 2026-08-10 §3.4):丢锚超 1s 且全屏唯一 player 框
+    且同层(±300) → 直接接管。唯一性=身份判据;横向不看门(pred 已逃逸,
+    横向先验已死),纵向先验仍活(外推只推 x)。"""
+
+    def _player(self, cx, cy):
+        return type('Box', (), {'x': cx - 30, 'y': cy - 60,
+                                'width': 60, 'height': 120})()
+
+    def test_accepts_unique_same_layer_box(self):
+        box = self._player(2000, 880)   # 横向距 pred 800px(门外),纵向同层
+        got = fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=2.0)
+        self.assertIs(got, box)
+
+    def test_rejects_when_age_insufficient(self):
+        box = self._player(2000, 880)
+        self.assertIsNone(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=0.9))
+
+    def test_age_boundary_accepts(self):
+        # 压线:年龄恰好 1.0s 算丢锚(与 anchor_expired 的 >= 口径一致)
+        box = self._player(2000, 880)
+        self.assertIs(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=1.0), box)
+
+    def test_rejects_multiple_boxes(self):
+        # 多框 = 可能多人图,宁可慢扫不认错(行为不变)
+        boxes = [self._player(2000, 880), self._player(600, 880)]
+        self.assertIsNone(
+            fl.select_lost_unique_box(boxes, pred_y=900.0, anchor_age=5.0))
+
+    def test_rejects_off_layer_box(self):
+        # 隔层路人:|by - pred_y| > 300 拒(实测层高差 240-300)
+        box = self._player(2000, 1200)  # by = 1200+64 = 1264,差 364
+        self.assertIsNone(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=5.0))
+
+    def test_layer_boundary_accepts(self):
+        # 压线:|dy| 恰 300 算同层(与 gate_player_boxes 边界算门内一致)
+        box = self._player(2000, 1136)  # by = 1136+64 = 1200,差恰 300
+        self.assertIs(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=5.0), box)
