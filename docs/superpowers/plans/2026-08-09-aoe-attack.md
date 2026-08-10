@@ -986,3 +986,17 @@ Select-String -Path logs\ok-mxd.log -Pattern '^.*群攻 ' | Measure-Object -Line
 - `_log_decision` 新签名（`in_zone` 在 `centres` 之后）—— Task 3 同时改定义与唯一调用点 ✓
 - `_draw_debug` 新签名（`aoe_ready` 在 `attack_present` 之后）—— Task 6 同时改定义与唯一调用点 ✓
 - 测试夹具 `AOE_KEYS` / `_aoe_mob` / `_aoe_task` / `_run_with_mobs` / `_sent` —— Task 3 Step 1 一次定义，Task 4/5/6 复用 ✓
+
+---
+
+## 实施后修订（2026-08-10）
+
+Task 1–6 全部落地并提交后，一次全量 code review 暴露了两处问题，均已修复并单独提交。本节记录结论，计划正文（Task 1–7 的步骤）保持原样不改，因为它记录的是**当时**的执行过程。
+
+**① 陈旧计数放空群攻（真 bug）。** `_do_attack` 每个 10Hz 拍都跑，而 `_last_zone_count` 只在受 `should_detect` 节流的检测拍写。怪清光后的非检测拍会拿旧计数再发一次群攻。修法是给计数加新鲜度戳 `_last_zone_count_time`，`_aoe_ready` 要求 `== now`。详见 spec §3.4「计数新鲜度门」。
+
+> 注意计划的实弹验证判据 A（「每行 `区内=N` 必须 N ≥ 阈值」）**发现不了这个缺陷**——日志写的就是那个陈旧的 N，照样满足 N ≥ 阈值。
+
+**② 删掉 `群攻间隔(秒)`，群攻与单体共用 `攻击间隔(秒)`。** 独立节拍的两条理由都不成立（耗蓝经用户判定不是问题；「保护施法窗」站不住，且代码里根本没有施法窗模型），而它确定地引入了相位差——群攻会落在上次单体后 0.6s，短于 `攻击间隔` 0.7。详见 spec §3.1 / §3.7。
+
+**对 Task 7 的影响**：Step 3 的 GUI 设置里不再有 `群攻间隔(秒)` 这一项；判据 A/B 的文字见 spec §5.3 修订版。其余步骤不变。

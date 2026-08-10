@@ -3063,11 +3063,21 @@ class TestForcedRescanWiring(unittest.TestCase):
 
 
 class TestAoeConfig(unittest.TestCase):
-    """群攻的三个配置键:默认值 + 「留空=关闭」约定 + 说明文案。"""
+    """群攻的两个配置键:默认值 + 「留空=关闭」约定 + 说明文案。"""
 
     def test_task_defaults(self):
         self.assertEqual(DEFAULT_CONFIG['群攻怪数阈值'], 3)
-        self.assertEqual(DEFAULT_CONFIG['群攻间隔(秒)'], 2.0)
+
+    def test_no_separate_aoe_interval(self):
+        """群攻不再有独立节拍:与单体共用 攻击间隔(秒),按怪数二选一。
+
+        原设计给了 群攻间隔(秒)=2.0,理由是「群攻耗蓝是单体数倍」。该理由被
+        用户否掉(耗蓝不是问题);剩下的「群攻施法约 1 秒、独立节拍保护施法窗」
+        经查是站不住的——单体自己就在 攻击间隔=0.7 下自断施法(实测施法时长
+        0.7-1.0s,见 2026-08-08-facing-observer-design.md:66),群攻并不特殊。
+        独立节拍还引入了相位差:两个节拍互质地各走各的,群攻会落在上次单体后
+        0.6s(< 攻击间隔 0.7)。共用一个节拍从构造上消掉这一整类问题。"""
+        self.assertNotIn('群攻间隔(秒)', DEFAULT_CONFIG)
 
     def test_global_key_defaults_to_empty(self):
         """群攻键默认留空 = 功能关闭,与 椅子键(可留空) 同一约定。"""
@@ -3110,6 +3120,19 @@ def _sent(task):
     return [c.args[0] for c in task.send_key.call_args_list if c.args]
 
 
+def _ready_task(**cfg_overrides):
+    """把 _aoe_ready 的输入直接摆好:计数快照(值 + 测得时刻)、单体节拍、受击时刻。
+
+    判据现在有四项状态输入,用「真跑一拍」去摆它们会让「这条测的是哪一项」不可读,
+    而且真跑的那一拍自己就会发群攻、把 _last_attack 推到 now,断言时点被迫漂移。
+    快照有没有被正确写进去,由 test_zone_count_snapshot 单独盯着。"""
+    task = _aoe_task(**cfg_overrides)
+    task._last_zone_count = 3
+    task._last_zone_count_time = 100.0
+    task._last_attack = 0.0        # 0.0 哨兵=从未攻击,节拍天然放行
+    return task
+
+
 class TestAoeReady(unittest.TestCase):
     """群攻判据 _aoe_ready:转向门与攻击门的唯一事实源(spec §3.4)。"""
 
@@ -3126,43 +3149,46 @@ class TestAoeReady(unittest.TestCase):
         self.assertEqual(task._last_zone_count, 1)
 
     def test_ready_when_count_reaches_threshold(self):
-        task = _aoe_task()
-        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
-        # 时点取 102.0 而非 100.0:跑完的 now=100.0 那一拍已真发群攻(_last_aoe=100.0),
-        # 同一时刻判「就绪」会被群攻间隔门拦住(0.0 >= 2.0 为假);等一个间隔再断言
-        # 「计数达阈值 → 就绪」,与 test_not_ready_within_interval 的 101.0/102.0 同口径。
-        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 102.0))
+        task = _ready_task()
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
 
     def test_not_ready_below_threshold(self):
-        task = _aoe_task()
-        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230)])
+        task = _ready_task()
+        task._last_zone_count = 2
         self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
 
     def test_not_ready_when_key_unbound(self):
         """群攻键留空 = 功能关闭,计数够也不 ready。"""
-        task = _aoe_task()
-        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        task = _ready_task()
         self.assertFalse(task._aoe_ready(task.config, dict(KEYS), 100.0))
 
-    def test_not_ready_within_interval(self):
-        """群攻节拍未到:上次群攻 100.0,群攻间隔 2.0 → 101.0 不放行,102.0 放行。"""
-        task = _aoe_task()
-        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
-        task._last_aoe = 100.0
-        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 101.0))
-        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 102.0))
+    def test_not_ready_on_stale_count(self):
+        """计数必须是**本拍**测的。_do_attack 每个 10Hz 拍都跑,而计数只在检测拍
+        写;没有这一道门,怪清光后的非检测拍会拿着上一个检测拍的旧计数放空群攻
+        (实测:t=100.0 发群攻,t=101.5 检测拍计数=3,t=101.6 怪清光,
+        t=102.0 非检测拍读到 0.5s 前的 3 又发一次)。这正是 farm_logic.crowd_present
+        的 docstring 里说「不加保持窗」要避免的那件事,逐拍求值把它从后门放了回来。"""
+        task = _ready_task()
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.1))
+
+    def test_not_ready_within_attack_interval(self):
+        """与单体共用 攻击间隔:节拍未到不放群攻(不再有独立的 群攻间隔)。"""
+        task = _ready_task()
+        task._last_attack = 99.0            # 距 100.0 只过了 1.0 < 攻击间隔 1.5
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+        task._last_attack = 98.0            # 2.0 >= 1.5
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
 
     def test_not_ready_in_fixed_rate_mode(self):
         """定频模式没有找怪信息,群攻整段不适用。"""
-        task = _aoe_task()
-        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        task = _ready_task()
         task.config['攻击模式'] = '定频'
         self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
 
     def test_not_ready_while_stunned(self):
         """硬直抑制窗内不发任何技能键,群攻同样受它管。"""
-        task = _aoe_task(**{'硬直抑制窗(秒)': 0.8})
-        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        task = _ready_task(**{'硬直抑制窗(秒)': 0.8})
         task._last_hit = 99.9
         self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
 
@@ -3196,36 +3222,69 @@ class TestAoeAttack(unittest.TestCase):
         self.assertTrue(set(sent) <= set(KEYS.values()) - {''},
                         f'出现了 KEYS 之外的按键: {sent}')
 
-    def test_aoe_pushes_single_attack_cadence(self):
-        """群攻发出时同时推进 _last_attack(spec §3.7)。
+    def test_aoe_advances_shared_cadence(self):
+        """群攻走的就是单体那一条节拍:发出时推进 _last_attack,下一拍不再出键。
 
         鉴别力在「实现漏写 self._last_attack = now」那一档:漏写时 _last_attack
-        停在 0.0 哨兵,第二拍 100.3 - 0.0 >= 攻击间隔(1.5) 会补发单体攻击键,
-        正好落在自己的群攻施法中间。注意本用例在**实现之前**是绿的
-        (那时第一拍走单体路径,同样把 _last_attack 推到 100.0)——它是回归守卫,
-        不是 red-first 用例。"""
+        停在 0.0 哨兵,100.3 那拍 100.3 - 0.0 >= 攻击间隔(1.5) 会再出一次键。"""
         task = _aoe_task()
         mobs = [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)]
         _run_with_mobs(task, mobs, now=100.0)
-        self.assertEqual(task._last_aoe, 100.0)     # 这一拍真发了群攻(这条实现前会红)
-        self.assertEqual(task._last_attack, 100.0)  # 单体节拍被一起推进
+        self.assertIn('f', _sent(task))             # 这一拍真发了群攻
+        self.assertEqual(task._last_attack, 100.0)  # 节拍被推进
         task.send_key.reset_mock()
         _run_with_mobs(task, mobs, now=100.3)   # 未满 攻击间隔 1.5
-        self.assertNotIn('shift', _sent(task))
+        self.assertEqual(_sent(task), [])
 
-    def test_single_resumes_while_aoe_on_cooldown(self):
-        """群攻节拍未到但攻击间隔已过 → 照常单体输出(不整段停手)。
+    def test_aoe_never_lands_inside_single_attack_cadence(self):
+        """共用节拍的核心收益:群攻与单体永远落在同一张节拍格上,间距恒 = 攻击间隔。
 
-        攻击间隔显式设 0.7 而不是吃默认值:默认 1.5 与 群攻间隔 2.0 太近,
-        留给「群攻还冷着、单体已放行」的窗口只有 0.5 秒,用例会贴着边界走。"""
+        独立 群攻间隔(2.0)时两个节拍互质地各走各的,群攻会落在上次单体后 0.6s
+        (< 攻击间隔 0.7),即落在用户自己声明的单体施法时长之内。攻击间隔取 0.7
+        是实机常用值,也正是原实现暴露该相位差的那一档。"""
         task = _aoe_task(**{'攻击间隔(秒)': 0.7})
-        mobs = [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)]
-        _run_with_mobs(task, mobs, now=100.0)   # 这一拍放群攻
+        task._facing = 'RIGHT'
+        mobs = [_aoe_mob(1330), _aoe_mob(1430), _aoe_mob(1530)]   # 面朝侧,不触发转向
+        fired = []
+        for i in range(60):                       # 6 秒,10Hz 逐拍
+            now = round(100.0 + i * 0.1, 1)
+            task.send_key.reset_mock()
+            _run_with_mobs(task, mobs, now=now)
+            fired += [(now, k) for k in _sent(task) if k in ('f', 'shift')]
+        gaps = [round(b - a, 1) for (a, _), (b, _) in zip(fired, fired[1:])]
+        self.assertTrue(fired, '整整 6 秒一个键都没发,用例失去鉴别力')
+        self.assertTrue(all(g >= 0.7 for g in gaps),
+                        f'有出键落在攻击间隔之内: {fired}')
+
+    def test_aoe_replaces_single_while_crowded(self):
+        """区内一直够阈值 → 每个节拍都是群攻,单体整段不出场(二选一,群攻优先)。"""
+        task = _aoe_task(**{'攻击间隔(秒)': 0.7})
+        task._facing = 'RIGHT'
+        mobs = [_aoe_mob(1330), _aoe_mob(1430), _aoe_mob(1530)]
+        sent = []
+        for i in range(30):
+            task.send_key.reset_mock()
+            _run_with_mobs(task, mobs, now=round(100.0 + i * 0.1, 1))
+            sent += _sent(task)
+        self.assertIn('f', sent)
+        self.assertNotIn('shift', sent)
+
+    def test_no_aoe_on_stale_zone_count(self):
+        """怪清光后的非检测拍不许拿旧计数放空群攻(见 test_not_ready_on_stale_count)。
+
+        时间线全部踩在实现的真实节流上:怪放在面朝侧不触发转向 —— 转向会把
+        _last_detect 清成 0.0 哨兵,反而让 102.0 变回检测拍、把陈旧计数刷掉,
+        用例就测不到东西了。"""
+        task = _aoe_task()                       # 攻击间隔 1.5 → 检测拍 100.0 / 101.5
+        task._facing = 'RIGHT'
+        mobs = [_aoe_mob(1330), _aoe_mob(1430), _aoe_mob(1530)]
+        _run_with_mobs(task, mobs, now=100.0)    # 检测拍:放群攻
+        _run_with_mobs(task, mobs, now=101.5)    # 检测拍:计数刷成 3,节拍未到不出键
+        task.find_mobs = MagicMock(return_value=[])   # 怪在 101.6 被清光
         task.send_key.reset_mock()
-        _run_with_mobs(task, mobs, now=101.0)   # 群攻间隔 2.0 未到,攻击间隔 0.7 已过
-        sent = _sent(task)
-        self.assertIn('shift', sent)
-        self.assertNotIn('f', sent)
+        _run_with_mobs(task, [], now=102.0)      # 非检测拍(102.0-101.5=0.5 < 1.5)
+        self.assertEqual(task._last_zone_count, 3, '前提:这一拍确实没跑检测')
+        self.assertNotIn('f', _sent(task))
 
     def test_no_aoe_in_fixed_rate_mode(self):
         """定频模式:照常按单体攻击键,不按群攻键。"""
@@ -3285,11 +3344,12 @@ class TestAoeSkipsTurn(unittest.TestCase):
         self.assertIn('left', _sent(task))
         self.assertEqual(task._facing, 'LEFT')
 
-    def test_turns_normally_while_aoe_on_cooldown(self):
-        """群攻节拍未到 → 转向照常(不许整段禁转向,否则冷却那 2 秒面朝空处挨打)。"""
+    def test_turns_normally_between_attack_beats(self):
+        """节拍未到 → 转向照常(不许「区内够阈值就整段禁转向」,否则节拍间隙里
+        怪全在背侧时,单体攻击区是空的,角色面朝空处站着挨打)。"""
         task = _aoe_task()
         task._facing = 'RIGHT'
-        task._last_aoe = 99.5          # 群攻间隔 2.0 未到
+        task._last_attack = 99.5       # 距 100.0 只过了 0.5 < 攻击间隔 1.5
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1130), _aoe_mob(1230)],
                        now=100.0)
         sent = _sent(task)
@@ -3301,7 +3361,7 @@ class TestAoeSkipsTurn(unittest.TestCase):
         将来有人改 seek_hold 的算法,这条会红(spec §3.8)。"""
         task = _aoe_task()
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)], now=100.0)
-        self.assertEqual(task._last_aoe, 100.0)   # 这一拍确实放了群攻
+        self.assertIn('f', _sent(task))           # 这一拍确实放了群攻
         self.assertIsNone(task._seek_dir)         # 同一拍不可能在寻怪
 
 
