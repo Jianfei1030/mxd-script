@@ -195,6 +195,27 @@ class TestAnchorTiming(unittest.TestCase):
         self.assertEqual(fl.anchor_vx_update(0.0, dx=20, dt=3, dy=0), 0.0)
 
 
+class TestExtrapolateVx(unittest.TestCase):
+    """外推速度裁决(spec 2026-08-10 §3.1):击退漂移几乎恒与寻怪反向,
+    学来的反向 vx 会把外推往真人反方向推(丢失逃逸根因,08-10 19:56 钳位铁证)。"""
+
+    def test_same_direction_uses_learned(self):
+        self.assertEqual(fl.extrapolate_vx(120.0, 'right', 250), 120.0)
+
+    def test_reverse_falls_back_to_config_speed(self):
+        # 学习到 +75(击退向右),寻怪向左 → 不用学习值,用配置速度×方向
+        self.assertEqual(fl.extrapolate_vx(75.0, 'left', 250), -250.0)
+
+    def test_zero_learned_uses_config_speed(self):
+        self.assertEqual(fl.extrapolate_vx(0.0, 'right', 200), 200.0)
+        self.assertEqual(fl.extrapolate_vx(0.0, 'left', 200), -200.0)
+
+    def test_none_seek_dir_returns_zero(self):
+        # 契约外输入显式不外推(唯一调用点在 _seek_dir is None 时提前返回,
+        # 这里防未来调用点踩坑——None 绝不能被静默当成 left)
+        self.assertEqual(fl.extrapolate_vx(120.0, None, 250), 0.0)
+
+
 class TestWarriorZone(unittest.TestCase):
     """战士巡逻/近战攻击区纯函数(T1.1, spec §3.3)。"""
 

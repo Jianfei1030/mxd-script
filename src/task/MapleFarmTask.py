@@ -92,6 +92,7 @@ ANCHOR_VX_MAX_AGE = 2.0           # 实测速度在此窗口内可信,超时退�
 ANCHOR_VX_MAX_SPEED = 600         # 实测速度上限(像素/秒):跳变 = 回退/误检,不学
 ANCHOR_VX_PLATFORM_DY = 30        # 名字牌 y 位移超此值视为换平台,不学速度
 ANCHOR_DEFAULT_SPEED = 250        # 无实测速度时的水平外推速度(像素/秒)
+ANCHOR_EXTRAPOLATE_MAX_DX = 500   # 外推位移上限(px)≈2s 行走量:拆丢锚期外推↔寻怪振荡回路
 NAMETAG_TEMPLATE_DIR = 'screenshots/nametag_templates'  # 名字牌模板持久化目录(白字二值化)
 NAMETAG_TEMPLATE_HALF_H = 18   # 模板裁剪半高:名字牌文字高 ~26px
 NAMETAG_TEMPLATE_PAD = 12      # 模板裁剪两侧边距(文字框外留白)
@@ -344,19 +345,22 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         只在"正在寻怪(角色在走动)"时推:站桩外推只会把攻击区推离原地;
         锚点新鲜(年龄 < 0.5s)不推——刚命中过,位置就是真值,推了反而引入误差;
         已过期(年龄 > 保鲜)不推——位置本身已不可信,交给回退分支。
-        返回值钳在 [0, 2560] 内,极端外推不出帧。
+        位移钳在 ±ANCHOR_EXTRAPOLATE_MAX_DX:丢锚期外推随年龄线性放大会与寻怪决策
+        形成振荡反馈(2026-08-10 21:18 日志,pred 每拍跳 ±1250px);反向学习速度由
+        farm_logic.extrapolate_vx 拦截。返回值再钳在 [0, 2560] 内,极端外推不出帧。
         """
         if self._seek_dir is None or self._anchor is None or self._anchor_time is None:
             return self._anchor[0] if self._anchor is not None else None
         age = now - self._anchor_time
         if age < ANCHOR_EXTRAPOLATE_MIN_AGE or age > cfg['锚点保鲜(秒)']:
             return self._anchor[0]
-        if now - self._last_anchor_hit <= ANCHOR_VX_MAX_AGE and self._anchor_vx != 0.0:
-            vx = self._anchor_vx
-        else:
-            speed = cfg.get('寻怪外推速度(像素/秒)', ANCHOR_DEFAULT_SPEED)
-            vx = speed if self._seek_dir == 'right' else -speed
-        return max(0.0, min(CALIBRATED_SIZE[0], self._anchor[0] + vx * age))
+        learned = (self._anchor_vx
+                   if now - self._last_anchor_hit <= ANCHOR_VX_MAX_AGE else 0.0)
+        speed = cfg.get('寻怪外推速度(像素/秒)', ANCHOR_DEFAULT_SPEED)
+        vx = farm_logic.extrapolate_vx(learned, self._seek_dir, speed)
+        dx = max(-ANCHOR_EXTRAPOLATE_MAX_DX,
+                 min(ANCHOR_EXTRAPOLATE_MAX_DX, vx * age))
+        return max(0.0, min(CALIBRATED_SIZE[0], self._anchor[0] + dx))
 
     def _capture_nametag_template(self, frame, hit):
         """OCR 完整命中 → 裁名字牌区域做白字二值化模板,供模板分片匹配快通道用。

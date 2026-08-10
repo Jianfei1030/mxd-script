@@ -1256,10 +1256,10 @@ class TestAnchorExtrapolation(unittest.TestCase):
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
             got, source = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
         self.assertEqual(source, 'cached')
-        self.assertEqual(got.x, 1280 + 200 * 3)  # 3s × 配置速度
+        self.assertEqual(got.x, 1280 + 500.0)                     # 600 → 钳 500
         self.assertEqual(got.y, 800.0)           # y 不推(同平台稳定)
         window.assert_called_once()
-        self.assertEqual(window.call_args[0][2], (1280 + 600.0, 800.0))  # 小窗跟外推位置
+        self.assertEqual(window.call_args[0][2], (1280 + 500.0, 800.0))  # 小窗跟外推位置
 
     def test_cached_anchor_uses_measured_velocity_when_fresh(self):
         """近 2s 内有实测速度(低通后)→ 优先用它,而不是配置速度。"""
@@ -1386,6 +1386,68 @@ class TestAnchorExtrapolation(unittest.TestCase):
         self.assertIsNone(task._seek_dir)
         self.assertIsNone(task._seek_key)
         self.assertIn(call('shift'), task.send_key.call_args_list)
+
+    def test_reverse_learned_vx_does_not_escape(self):
+        """回归(08-10 19:56 钳位铁证):学到 +vx(击退向右)但寻怪向左 →
+        外推不许往右逃,退回配置速度×寻怪方向。
+        速度取 150:150*3=450 < 500 不触帽——这条只测方向,与
+        test_extrapolation_capped_at_max_dx 职责分离。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 150})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._anchor_vx = 75.0           # 击退残余(向右)
+        task._last_anchor_hit = 102.0    # 实测速度仍新鲜
+        task._seek_dir = 'left'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(got.x, 1280 - 150 * 3)  # 830;旧逻辑会给 1280+75*3=1505
+
+    def test_extrapolation_capped_at_max_dx(self):
+        """丢锚期外推位移封顶 ±500(拆振荡回路,08-10 21:18 外推↔寻怪反馈):
+        年龄再大,位移也不超 2s 行走量。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'right'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 108.0, task.config)
+        self.assertEqual(got.x, 1280 + 500.0)  # 250*8=2000 → 钳 500
+
+    def test_extrapolation_clamped_to_frame_edge(self):
+        """封顶与帧边界 [0,2560] 的复合(spec §6):锚点在 x=100、寻怪 left →
+        dx 钳 -500 后 x=-400,再钳到 0,绝不出负坐标。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (100.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'left'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 106.0, task.config)
+        self.assertEqual(got.x, 0.0)
+
+    def test_oscillation_bounded_when_seek_flips(self):
+        """回归(spec §6 振荡剧本,08-10 21:18):丢锚期寻怪方向每拍翻转,
+        相邻 cached 拍 |Δbody_x| ≤ 2×500=1000(旧逻辑外推位移随年龄无界,
+        实测单拍跳 ±1250px+,门中心跟着瞬移,YOLO 关联被主动压死)。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        xs = []
+        for i, d in enumerate(['right', 'left', 'right', 'left']):
+            task._seek_dir = d
+            with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                    patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+                got, source = task._resolve_anchor(_synthetic_frame(), 106.0 + i, task.config)
+            self.assertEqual(source, 'cached')
+            xs.append(got.x)
+        self.assertTrue(all(abs(b - a) <= 1000 for a, b in zip(xs, xs[1:])),
+                        xs)
 
 
 class TestTemplateSplitMatch(unittest.TestCase):

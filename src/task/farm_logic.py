@@ -177,6 +177,22 @@ def anchor_vx_update(old_vx, dx, dt, dy,
     return 0.7 * v + 0.3 * old_vx
 
 
+def extrapolate_vx(learned_vx, seek_dir, cfg_speed):
+    """外推速度(像素/秒):学习值与寻怪方向**同向**才用,反向/无学习值用配置速度×方向。
+
+    击退方向几乎恒与寻怪方向相反(朝怪走、被怪打回来),学来的反向 vx 是击退残余,
+    不是行走速度——直接外推会把 pred 往真人反方向推,1s 内逃出所有关联门
+    (2026-08-10 19:56 日志铁证:cached 拍 x=2560 钳位而 寻怪=left)。
+    学习点(anchor_vx_update)不动:残余会在下一次真实行走观测时被低通自然替换。
+    """
+    if seek_dir not in ('left', 'right'):
+        return 0.0   # 契约外输入:不外推(调用点已保证非 None,这里防御)
+    sign = 1.0 if seek_dir == 'right' else -1.0
+    if learned_vx != 0.0 and learned_vx * sign > 0:
+        return learned_vx
+    return cfg_speed * sign
+
+
 def should_pickup(now, last_pickup_time, interval, enabled):
     return enabled and now - last_pickup_time >= interval
 
