@@ -135,7 +135,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 ..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=<名>
 ```
 - `yolov8m.pt` 用裸名，ultralytics 自动联网下载；离线用 `model=..\yolov8n.pt` 退级
-- **注意**：mob.onnx（12MB）**已入库**（spec §M3），训练新模型后记得提交；备份 `.onnx.bak_*` 在 .gitignore 不入库
+- **注意**：mob.onnx 已入库（spec §M3），训练新模型后记得提交；备份 `.onnx.bak_*` 在 .gitignore 不入库
 
 **共同要求**：
 - `python -m ultralytics` **报 No module named ultralytics.__main__**，必须用 `yolo.exe`
@@ -151,6 +151,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - 实机加载路径：`assets/mob_model/mob.onnx`（`src/globals.py:21`）
 - 部署前**备份旧模型**：`Copy-Item "assets\mob_model\mob.onnx" "assets\mob_model\mob.onnx.bak_<日期>"`
 - 训练产物在 `dataset/runs/detect/runs/<名>/weights/`
+- **当前部署**（2026-08-10）：v8s 双类 45MB（东部岩山6 训练，mob+player），备份见 §7.7
 
 ---
 
@@ -287,6 +288,42 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - **为什么置 None 而非直接猜朝向**：对"击退翻不翻朝向"两种机制同时正确——翻了补 tap 是纠错；没翻，朝怪 tap 50ms 是 no-op（已面朝该侧按方向键零代价）
 - **受击检测放 run() 高频路径**（每拍 10Hz，不等 1.5s 检测拍节流），位置在保命之后、喝药之前
 - **WarriorDebugTask `_auto_facing` 两拍确认**（历史，任务已移除）：连续 2 拍同向位移(>15px)才翻转，单拍位移/OCR 噪声(±5px)不翻——避免调试 overlay 朝向抖动
+
+### 7.7 双类模型（mob + player，2026-08-10 引入）
+
+**背景**：master 分支引入「YOLO 关联锚点级」（名字牌被遮挡时用 player 框接管角色定位，spec
+`docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`），模型必须是 2 类：
+class0=mob（怪）/ class1=player（玩家角色框）。旧 1 类模型跑 master 代码会退化成"player 框永为空"。
+
+**2 类基建三件套**（从 master 检出，当前分支已合入）：
+- `dataset/mobs.yaml`：`names: {0: mob, 1: player}`
+- `scripts/label_boxes.py`：`c` 键切换类别（0=mob 红框 / 1=player 绿框），txt 类别保真（重存不丢 player）
+- `src/OpenVinoYolo8Detect.py`：`dic_labels = {0: 'mob', 1: 'player'}`；`detect(label=-1)` 返回全类别
+
+**标注关键规则（"只标自己"策略，2026-08-10 实测有效）**：
+- 每帧**只框自己**（名字牌正下方角色），其他玩家/宠物一律不框（当背景）——框了路人模型就学会认"任意玩家"
+- 分两轮标：第一轮标 mob（预标注 344 框人工校对），第二轮切 `c` 标自己（100 帧 100 框）
+- player 框高 ≈0.15-0.17 归一化（比 mob 高，符合角色身形），可据此抽查校验
+- 效果：player mAP50=0.995 / Recall=1.0——"只标自己"策略有效，模型 100% 找回验证集的自己
+
+**v8s 混合训练（5 地图 511 帧 mob，2026-08-10）**：
+- 数据源：东部岩山2(151) + 岩山3(100) + 岩山4(100) + 野猪领地(100) + 巡逻(60)，共 511 帧 / 2031 框 / 37 负样本
+- 切分：每地图前 90% 入 train（459 帧），后 10% 入 val（52 帧），地图内时序不重叠
+- 命令（从 dataset 目录）：
+  ```powershell
+  ..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=..\yolov8s.pt imgsz=1280 epochs=100 batch=8 device=0 project=runs name=<名>
+  ```
+- **v8s vs v8n 同口径对照**（同 459/52 划分、同 100 epochs、同 COCO 起点）：v8s mAP50=0.984 vs v8n 0.975（**+0.9%**）、Precision +3.3%（误检更少）、Recall -2.7%（略保守）。v8s 收益集中在少误检，挂机场景更优
+- **训练中断恢复**：bash 调用超时（600s）会连带杀掉通过它启动的 yolo 子进程。**必须 OS 级后台启动**：
+  ```powershell
+  $cmd = '$env:YOLO_OFFLINE="true"; C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe train ...'; Start-Process powershell -ArgumentList "-EncodedCommand", $([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))) -WindowStyle Hidden
+  ```
+  中断后用 `yolo train resume model=<last.pt> ...` 续训
+- **权重下载**：`yolov8s.pt` 首次需联网下载（21.5MB），代理生效时正常；`YOLO_OFFLINE=true` + 本地权重绝对路径可跳过下载
+
+**4090 硬件边界**（24GB 显存）：v8n batch8=4G / v8s batch8=10-12G / v8m 需 batch≤4 / v8l 勉强 / v8x 1280 下 OOM。数据量无硬上限（线性吃时间不吃显存），多样性 > 数量
+
+**部署**：`assets/mob_model/mob.onnx` 当前为 v8s 双类（45MB，master 仓库版为 mob_player_v1 12.7MB）。部署后 GUI 的 `find_all` 一拍推理全类别 → `find_mobs` 按 `b.name=='mob'` 过滤（BaseMapleTask.py）
 
 ---
 
