@@ -166,7 +166,7 @@ def aoe_log_line(count, threshold):
     return f'群攻 区内={count} 阈值={threshold}'
 
 
-DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
+DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key(WarriorDebugTask 已移除,原 'warrior_debug' key 不复存在)
 PLAYER_COLOR = QColor(0, 255, 0)
 ZONE_IDLE_COLOR = QColor(0, 128, 255)
 ZONE_HOT_COLOR = QColor(255, 0, 0)
@@ -633,8 +633,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     aoe_ready=False, search_region=None, feet_y=None, frame_w=None):
         """画玩家框(绿)/接敌区框(细,蓝=无怪红=有怪)/攻击区框(粗,同色)/怪物框(黄)+脚底点(青)。
         群攻就绪时接敌区框加粗(1→3)且标签改 接敌区(群攻),给 E2E 判据 D 一个可视对象。
-        画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
-        用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
+        画法照抄已移除的 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算(见 git 历史),
+        用独立 key(DEBUG_OVERLAY_KEY)。"""
         overlay = self.get_overlay_view()
         if overlay is None:
             return
