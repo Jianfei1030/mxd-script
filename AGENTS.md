@@ -2,17 +2,22 @@
 
 > **本文件汇总自 2026-08-06 ~ 08-07 实战中积累的所有坑与正确做法。**  
 > **每个 agent 会话启动前必读，避免重复踩坑。**  
-> 路径：`C:\projects\mxd-script\AGENTS.md`（项目根目录）
+> 路径：`C:\projects\mxd-script\AGENTS.md`（旧机器）；当前机器（2026-08-10 实机验证）为 `G:\projects\MyDocs\projects\mxd_script`，见 §1.1
 
 ---
 
 ## 1. 环境与运行
 
-### 1.1 Python 版本
+### 1.1 Python 版本与环境（2026-08-10 实机确认）
 - 本项目 **要求 Python 3.12**（`pyside6==6.9.1` 限制 Requires-Python <3.13）
 - 系统 Python 3.14 **不能用**，会装不上 pyside6
-- 本机已装独立 **Python 3.12.10**：`C:\Users\40759\AppData\Local\Programs\Python\Python312\python.exe`
-- 项目 venv：`C:\projects\mxd-script\.venv-warrior`（3.12 重建）
+- **旧机器**（AGENTS.md 原文）：独立 Python 3.12.10 `C:\Users\40759\AppData\Local\Programs\Python\Python312\python.exe` + 项目 venv `C:\projects\mxd-script\.venv-warrior`
+- **当前机器（本机 jianfei）**：项目在 `G:\projects\MyDocs\projects\mxd_script`，**无 .venv-warrior**，直接用系统 Python 3.12：`C:\Users\jianfei\AppData\Local\Programs\Python\Python312\python.exe`
+- **依赖缺失会直接崩溃**：本机缺 `onnxocr` 等依赖时，GUI 启动秒退且报 `ModuleNotFoundError: No module named 'onnxocr'`（`MapleFarmTask.on_create → potions.prewarm → get_ocr`）。**换机器首次跑必须先**：
+  ```
+  & "C:\Users\jianfei\AppData\Local\Programs\Python\Python312\python.exe" -m pip install -r requirements.txt
+  ```
+  （requirements.txt 含 `onnxocr-ppocrv5==0.0.18`、`pyside6==6.9.1` 等全部钉版依赖）
 - `.venv-warrior/` 已加入 `.gitignore`
 
 ### 1.2 GPU / PyTorch
@@ -29,10 +34,17 @@
   ```
   Start-Process -FilePath ".\.venv-warrior\Scripts\python.exe" -ArgumentList "main_debug.py" -WorkingDirectory "C:\projects\mxd-script" -Verb RunAs
   ```
+- ⚠️ **agent 会话里 `-Verb RunAs` 可能静默失败（2026-08-10 实机踩坑）**：本机 UAC 策略 `ConsentPromptBehaviorAdmin=0`（管理员自动提权、**不弹 UAC 对话框**），加上由 `mimo.exe serve` 后台服务派生的 shell 运行在受限窗口站，`Start-Process -Verb RunAs` 与 `schtasks /RL HIGHEST` 都会失败且**无任何弹窗/报错可见**——进程根本没起来。**正确做法：用 ShellExecute `runas` 动词**（返回 42=成功，进程独立提权启动，父进程随即退出）：
+  ```powershell
+  Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class SHExec{[DllImport("shell32.dll", CharSet=CharSet.Unicode)]public static extern int ShellExecute(IntPtr hwnd, string op, string file, string args, string dir, int show);}'
+  $r = [SHExec]::ShellExecute([IntPtr]::Zero, "runas", "C:\Users\jianfei\AppData\Local\Programs\Python\Python312\python.exe", "main_debug.py", "G:\projects\MyDocs\projects\mxd_script", 1)
+  # $r <= 32 才是错误；42 或更大 = 成功（ShellExecute 返回句柄值域）
+  ```
+  注意：`-Verb RunAs` 与 `-RedirectStandardOutput/Error` 参数集互斥，提权进程也没有日志重定向——**判断提权 GUI 是否活着看 MainWindowTitle**（`OK-MXD v0.1.0 开发工具`）+ WorkingSet>100MB + Responding=True。
 - `pythonw.exe` 启动 GUI 会**静默崩溃**（进程秒退无输出），用 `python.exe` + 重定向捕获错误
 - GUI 可能产生**双进程**（stub + 真实 GUI），判断真实 GUI 看 WorkingSet 大小（>100MB 才是真身）
 - stderr `RefreshAdb pydirect:You must be an admin to use Win32Interaction` **无害**（只影响按键任务，检测是只读的）
-- `configs/WarriorDebugTask.json` 等配置文件是合法 UTF-8——PowerShell `Get-Content` 显示乱码是 **GBK 显示假象**，`json.loads` 正常
+- `configs/MapleFarmTask.json` 等配置文件是合法 UTF-8——PowerShell `Get-Content` 显示乱码是 **GBK 显示假象**，`json.loads` 正常
 
 ### 1.4 WGC 抓帧（capture_frame.py / build_capture）
 - **前台直跑可能无限挂起**（WGC 初始化等游戏窗口前台）
@@ -142,15 +154,20 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 
 ---
 
-## 4. WarriorDebugTask（Phase 1 调试可视化）
+## 4. 调试可视化（已内化进 MapleFarmTask，2026-08-10 移除独立任务）
+
+> ⚠️ **2026-08-10 变更**：独立任务 `WarriorDebugTask`（「战士调试」）**已移除**（代码/注册/测试/标定脚本一并删除）。
+> 调试可视化已内化进 `MapleFarmTask`：勾选 Start 页「启用标记框」（use_overlay）即画框，
+> 任务配置里的「显示玩家框/显示攻击区/显示名字搜索范围/显示寻怪同层带/显示怪物框」控制各元素。
+> 历史实现（drawPoint 崩溃、overlay 残留等修复记录）见 git 历史与 §5。
 
 ### 4.1 GUI 操作流程（精确，勿凭印象！）
 1. 启动 `main_debug.py` → 等 GUI 弹出
 2. 切到**「截图方式」tab** → 打开「**调试悬浮窗**」卡片 → 打开「**启用标记框**」（use_overlay）
    - ⚠️ **必须先开「启用标记框」再启动**——否则 overlay 窗口不创建，即使任务跑了也无框
-3. 切到**「实时触发」tab** → 找到**「战士调试」任务卡片**→ 下拉展开区：
+3. 切到**「实时触发」tab** → 找到**「自动打怪」任务卡片**→ 下拉展开区：
    - 填「**角色名**」（必须与游戏内名字牌一字不差）
-   - 打开「**调试开关**」（debug switch，run() 首行 gate）
+   - 确认「显示玩家框/显示攻击区/显示怪物框」等开关（默认全开）
 4. 点 **Start 按钮**（在 StartCard 右侧，与截图/刷新按钮并排）
    - 按钮变「Pause」+ 状态栏显示 "Running: 1 Trigger Tasks" = 成功
 5. **退出时**：先点 Stop 或关闭游戏窗口，再关 GUI（避免 overlay 残影）
@@ -163,20 +180,19 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 | `Disable Boxes` 开关 | 「禁用标记框」 |
 | `Start` 按钮 | 「Start」或快捷键后缀 |
 
-### 4.3 双开关机制
+### 4.3 开关机制（MapleFarmTask 画框）
 - **任务 toggle**（卡片右侧开关）= `_enabled`，标记可调度
-- **「调试开关」**（下拉展开区）= run() 首行 gate
 - **「启用标记框」**（StartTab）= `use_overlay`，控制 overlay 窗口创建
 - **Start 按钮** = 启动 executor 执行循环（`og.executor.start()`）
-- **四个都要开，run() 才执行、overlay 才显示**
+- **三个都要开，run() 才执行、overlay 才显示**（原「调试开关」随 WarriorDebugTask 移除，MapleFarmTask 无此 gate）
 
 ### 4.4 标记含义
 | 颜色 | 含义 |
 |---|---|
 | 🟡 黄框 | 检测到的怪物（新模型） |
 | 🟢 绿框 | 玩家角色（名字牌锚定） |
-| 🔵 蓝框 | 攻击区（无怪进入） |
-| 🔴 红框 | 攻击区（**有怪进入攻击距离**） |
+| 🔵 蓝框 | 接敌区/攻击区（无怪进入） |
+| 🔴 红框 | 接敌区/攻击区（**有怪进入攻击距离**） |
 | ⚪ 青点 | 怪物脚底点 |
 
 ---
@@ -198,9 +214,9 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - **证据**：200ms 内产生 40+ 条 `WarriorDebug mob rect` 日志（实测 01:56:33 时间段）
 - **规则**：paint 回调**禁止 logger.info/重活**，调试日志放 run() 等低频调用点或直接移除
 
-### 5.4 「调试开关/角色名没反应」
-- 调试开关（`调试开关=False`）默认关，run() 首行 `if not cfg.get('调试开关'): return` 静默退出
-- 角色名填在「实时触发」tab 任务卡片下拉展开区（**不是**设置页）
+### 5.4 「调试开关/角色名没反应」（历史，WarriorDebugTask 已移除）
+- 调试开关（`调试开关=False`）默认关，run() 首行 `if not cfg.get('调试开关'): return` 静默退出（该配置与 gate 随任务移除）
+- 角色名填在「实时触发」tab 任务卡片下拉展开区（**不是**设置页）——MapleFarmTask 同样如此
 
 ---
 
@@ -208,7 +224,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 
 ### 6.1 overlay 创建条件
 - `use_overlay=True` 或 `blur_area` callable 时才预建 overlay 窗口（`ok/__init__.py:354`）
-- `use_overlay=False`（默认）→ overlay 窗口不创建 → WarriorDebugTask 的 custom painter 无法绘制
+- `use_overlay=False`（默认）→ overlay 窗口不创建 → custom painter 无法绘制
 - ⚠️ **懒创建时序坑**：overlay 可由 `get_overlay_view()` 懒创建，但 `communicate.window` 信号只在创建时连接一次——如果创建发生在窗口 geometry 更新事件之后，overlay 不会收到 `_source_visible=True`，窗口永远不会 show()。**必须先开「启用标记框」再启动 executor**
 
 ### 6.2 overlay 两通道
@@ -236,8 +252,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - `sort_boxes`（`ok/feature/Box.py:314`）就地 sort 返回 **list**（非生成器），`any()` 不会消费迭代器
 
 ### 7.3 绘制刷新节奏
-- `调试刷新间隔(秒)` 配置（默认 0.3s）控制 `_last_draw` 节流 → 内容更新频率
-- 降低到 0.1~0.03 可消除延迟感（paint 回调本身每帧 GUI repaint 执行，~10ms）
+- 画框跟随检测拍节流（MapleFarmTask 检测模式：在打→攻击间隔 / 在追→寻怪刷新间隔 / 空闲→空闲刷新间隔），paint 回调本身每帧 GUI repaint 执行，~10ms
 - 检测耗时：1280 推理 ~22ms + 名字牌 OCR ~118ms（首次）→ 后续快通道小窗 <50ms
 
 ### 7.4 击退受击检测（朝向信念修复，2026-08-07 实测）
@@ -247,31 +262,34 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - **修复**：`farm_logic.knockback_detected(hp, prev_hp, ...)` 检测受击（HP 掉 >2% 主信号 + 锚点位移辅助），触发时 `_facing = None` + `_last_turn = 0.0`（重置转向冷却），下一检测拍 `attack_turn_direction(None,...)` 按最近怪定向重建朝向
 - **为什么置 None 而非直接猜朝向**：对"击退翻不翻朝向"两种机制同时正确——翻了补 tap 是纠错；没翻，朝怪 tap 50ms 是 no-op（已面朝该侧按方向键零代价）
 - **受击检测放 run() 高频路径**（每拍 10Hz，不等 1.5s 检测拍节流），位置在保命之后、喝药之前
-- **WarriorDebugTask `_auto_facing` 两拍确认**：连续 2 拍同向位移(>15px)才翻转，单拍位移/OCR 噪声(±5px)不翻——避免调试 overlay 朝向抖动
+- **WarriorDebugTask `_auto_facing` 两拍确认**（历史，任务已移除）：连续 2 拍同向位移(>15px)才翻转，单拍位移/OCR 噪声(±5px)不翻——避免调试 overlay 朝向抖动
 
 ---
 
-## 8. 标定（calibrate_warrior_zone.py）
+## 8. 标定（calibrate_attack_zone.py）
+
+> 原 `calibrate_warrior_zone.py`（交互式攻击距离标定）随 WarriorDebugTask 移除（2026-08-10），
+> 现用 `calibrate_attack_zone.py`（画标注图看图调参）。
 
 ### 8.1 标定流程
 1. **先停 GUI**（GUI 持有游戏窗口 WGC 会话，抓帧会无限挂起）
 2. 抓帧：`scripts/_capture_calib.py` → 后台运行 → `screenshots/calib_frame.png`
-3. 运行标定：`.\.venv-warrior\Scripts\python.exe scripts\calibrate_warrior_zone.py screenshots\calib_frame.png --name <角色名>`
-4. 交互输入：攻击距离/攻击区高/名字牌偏移/玩家宽高
-5. 画框图 → 对照游戏实际挥刀范围 → `y` 写配置 / `n+20` 调整重画
+3. 运行标定：`.\.venv-warrior\Scripts\python.exe scripts\calibrate_attack_zone.py --frame screenshots\calib_frame.png --name <角色名>`
+4. 看输出图 `screenshots/calibrate_attack_zone.png`：搜索区/名字牌/身体中心/攻击区/怪框一目了然
+5. 调整 `--width/--height/--offset` 直到攻击区黄框贴合实际挥刀范围，把值填进 GUI「自动打怪」配置
 
-### 8.2 写入路径（已修正）
-- **正确**：`configs/WarriorDebugTask.json` 顶层键（与 GUI `Config(name)` 加载一致）
-- **错误（旧）**：`configs/config.json` 的 `task_configs['战士调试']`（GUI 读不到）
+### 8.2 写入路径
+- MapleFarmTask 配置：`configs/MapleFarmTask.json` 顶层键（与 GUI `Config(name)` 加载一致）
+- ⚠️ 旧版 `calibrate_warrior_zone.py` 写 `configs/WarriorDebugTask.json` 或 `configs/config.json` 的 `task_configs['战士调试']`——**均已随任务移除失效**
 
-### 8.3 需标定的参数
+### 8.3 需标定的参数（MapleFarmTask 配置键）
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `名字牌到身体偏移` | 90 | 名字牌中心 → 角色身体中心的 Y 偏移（像素，上移） |
-| `玩家宽` | 60 | 玩家 bbox 宽度 |
-| `玩家高` | 120 | 玩家 bbox 高度 |
-| `攻击距离` | 120 | 攻击区宽度（武器距离不一，**必须标定**） |
-| `攻击区高` | 200 | 攻击区高度 |
+| `名字牌到身体偏移(像素)` | 90 | 名字牌中心 → 角色身体中心的 Y 偏移（像素，上移） |
+| `玩家宽(像素)` | 60 | 玩家 bbox 宽度（仅调试画框用，不影响判定） |
+| `玩家高(像素)` | 120 | 玩家 bbox 高度（仅调试画框用，不影响判定） |
+| `攻击区宽(像素)` | 600 | 攻击区宽度（武器距离不一，**必须标定**） |
+| `攻击区高(像素)` | 200 | 攻击区高度 |
 
 ---
 
@@ -287,8 +305,8 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 | `r`/`d` 删框无效 | cv2 窗口没焦点 | 先单击窗口；或用右键删框 |
 | WGC 抓帧超时 | 前台直跑 / GUI 占 WGC 会话 | 后台化 + 停 GUI |
 | `python -m ultralytics` 报错 | 无 `__main__` | 用 `yolo.exe` |
-| 标定结果读不到 | 写了 config.json 而非 WarriorDebugTask.json | 检查写入路径 |
-| 绿框/攻击区偏移 | 名字牌锚点偏移/参数不对 | 用 `calibrate_warrior_zone.py` 标定 |
+| 标定结果读不到 | 写了 config.json 而非 MapleFarmTask.json | 检查写入路径 |
+| 绿框/攻击区偏移 | 名字牌锚点偏移/参数不对 | 用 `calibrate_attack_zone.py` 标定 |
 | paint 日志爆炸 | paint 回调每帧执行 | 回调内禁日志 |
 | **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配** | **⛔ 必须关闭组队血量显示（UI 设置里关）** |
 
@@ -303,13 +321,13 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 | `scripts/draw_yolo_boxes.py` | 单帧画框抽查 |
 | `scripts/prelabel_from_onnx.py` | 用旧模型批量预标注 |
 | `scripts/final_split.py` | 切分 train/val |
-| `scripts/calibrate_warrior_zone.py` | 攻击区/玩家框标定 |
+| `scripts/calibrate_attack_zone.py` | 攻击区/玩家框标定（画标注图看图调参） |
 | `scripts/_capture_calib.py` | 后台抓帧 helper |
 | `scripts/_diag_anchor.py` | 锚点定位诊断 |
 | `src/OpenVinoYolo8Detect.py` | YOLO OpenVINO 推理 |
 | `src/detect/anchor.py` | 名字牌 OCR 锚点定位 |
 | `src/detect/ocr_engine.py` | OCR 引擎（onnxocr 封装） |
-| `src/task/WarriorDebugTask.py` | Phase 1 调试可视化任务 |
+| `src/task/MapleFarmTask.py` | 自动打怪任务（含调试可视化） |
 | `src/task/BaseMapleTask.py` | 任务基类（find_mobs 入口） |
 | `src/task/farm_logic.py` | 战士攻击区/怪物脚底点纯函数 |
 | `src/globals.py` | 全局配置/模型加载 |
@@ -368,20 +386,21 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 
 ```powershell
 # 全量单测(排除重型 live/yolo 测试;它们只做编译检查)
-$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic tests.test_warrior_debug_offline tests.test_farm_task_offline tests.test_bars tests.test_guards tests.test_calibrate_offline tests.test_anchor_offline tests.test_potions tests.test_anchor tests.test_ocr_engine
+$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic tests.test_farm_task_offline tests.test_bars tests.test_guards tests.test_anchor_offline tests.test_potions tests.test_anchor tests.test_ocr_engine tests.test_analyze_anchor tests.test_analyze_facing tests.test_analyze_seek tests.test_analyze_turn tests.test_facing tests.test_label_boxes tests.test_yolo
 # 编译检查(全源码)
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for base in ['src','scripts','tests','ok'] for p in pathlib.Path(base).rglob('*.py')]; print('OK')"
 ```
 
-### 11.7 当前基线（2026-08-07）
+### 11.7 当前基线（2026-08-07 / 2026-08-10 更新）
 
-- 单测：10 个测试模块全绿（146+ 用例），7 个显式 skip（存档帧缺失 ×5、OCR 限制 ×2）
+- 单测：全模块全绿（2026-08-10 实测 518 用例 → 移除 WarriorDebugTask 相关 3 个测试模块后约 470+ 用例），
+  显式 skip（存档帧缺失、OCR 限制、val 数据缺失）
 - 编译：src/ scripts/ tests/ ok/ 全源码 + 入口脚本 py_compile 通过
 - E2E（2026-08-07 本机验收）：
   - **通过**：`main_debug.py` 启动 GUI 成功，主窗口「OK-MXD v0.1.0 开发工具」完整渲染
     （标题栏/左侧 6 项导航/截图方式卡片/交互方式/调试悬浮窗开关），无崩溃无错误弹窗
-  - **通过**：两个 trigger task（MapleFarmTask / WarriorDebugTask）在 GUI 内成功注册加载，
-    含本次新增受击检测代码——证明新代码在真实 GUI 运行路径无导入/编译错误
+  - **通过**：trigger task（MapleFarmTask）在 GUI 内成功注册加载，
+    含受击检测/调试可视化代码——证明新代码在真实 GUI 运行路径无导入/编译错误
   - **通过**：截图经视觉模型验收 PASS（`screenshots/e2e/gui_launch/gui_main_20260807.png`，
     1200x800 与日志 geometry 一致）
   - 已知无害 stderr：`pydirect:You must be an admin`（非管理员按键限制，检测只读不受影响）、

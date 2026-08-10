@@ -18,7 +18,7 @@ class BaseMapleTask(BaseTask):
     def find_mobs(self, frame=None, threshold=0.5, boxes=None):
         """boxes= 传入同拍已推理的全类别结果时只做类别过滤,不再推理
         (一拍一次推理,spec §3.2;detect 的 label 参数是事后过滤,分两次调用
-        会白付一倍推理)。不传 = 旧行为,WarriorDebugTask 等调用方不变。"""
+        会白付一倍推理)。不传 = 旧行为(自行推理)。"""
         if boxes is not None:
             return [b for b in boxes if b.name == 'mob']
         from ok import og

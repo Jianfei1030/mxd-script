@@ -69,7 +69,6 @@ config = {
     'onetime_tasks': [],
     'trigger_tasks': [
         ["src.task.MapleFarmTask", "MapleFarmTask"],
-        ["src.task.WarriorDebugTask", "WarriorDebugTask"],
     ],
     'scene': ["src.scene.MapleScene", "MapleScene"],
 }

@@ -155,7 +155,7 @@ def template_captured_line(direction, min_dx):
     return f'朝向模板已采集 方向={direction} (寻怪走动确认 ≥{min_dx}px)'
 
 
-DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
+DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key(WarriorDebugTask 已移除,原 'warrior_debug' key 不复存在)
 PLAYER_COLOR = QColor(0, 255, 0)
 ZONE_IDLE_COLOR = QColor(0, 128, 255)
 ZONE_HOT_COLOR = QColor(255, 0, 0)
@@ -617,8 +617,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
     def _draw_debug(self, cfg, body, zone, attack_area, mobs, mob_present, attack_present,
                     search_region=None, feet_y=None, frame_w=None):
         """画玩家框(绿)/接敌区框(细,蓝=无怪红=有怪)/攻击区框(粗,同色)/怪物框(黄)+脚底点(青)。
-        画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
-        用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
+        画法照抄已移除的 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算(见 git 历史),
+        用独立 key(DEBUG_OVERLAY_KEY)。"""
         overlay = self.get_overlay_view()
         if overlay is None:
             return
