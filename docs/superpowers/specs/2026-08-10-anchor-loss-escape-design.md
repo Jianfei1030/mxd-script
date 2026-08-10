@@ -109,7 +109,10 @@ x = anchor[0] + clamp(vx * age, -MAX_DX, +MAX_DX)
 
 - 接受拍:同现状 + 全屏数;
 - 拒绝拍(0 候选 / 多候选身份过期):记 (len(gated), None, len(players));
-- 未到达(模板/快窗命中、无 players、开关关):保持 None。
+- 全屏 0 框(推理了但没检出 player):记 (0, None, 0)——`_resolve_anchor`
+  签名默认值 `players=()` 改 `players=None`,None=定频/旧调用(本拍无推理)
+  保持短路不记,[] 正常走完 YOLO 级。「没检出 vs 未到达」必须分得开;
+- 未到达(模板/快窗命中、开关关、players=None 无推理):保持 None。
 
 `decision_log_line` 行尾追加可选字段 `yolo全屏=N`(默认 None → `-`)。
 追加在行尾不动既有字段:analyze 脚本前缀匹配、绑定测试用关键字参数构造,
@@ -121,7 +124,7 @@ x = anchor[0] + clamp(vx * age, -MAX_DX, +MAX_DX)
 YOLO 级内、常规门裁决失败后再走一级:
 
 ```
-锚点年龄 > ANCHOR_LOST_UNIQUE_AGE(1.0s)
+锚点年龄 > LOST_UNIQUE_MIN_AGE(1.0s)
 且 全屏恰好 1 个 player 框
 且 该框换算后的 y 落在 pred_y ± LOST_UNIQUE_GATE_Y(300)
 → 直接接受,不看横向门、不看身份保鲜
@@ -161,9 +164,9 @@ def select_lost_unique_box(players, pred_y, anchor_age,
 |---|---|---|
 | 丢锚唯一框接管开关 | True | 修法 4 总开关;关掉退回既有阶梯 |
 
-常量(不改配置):`ANCHOR_EXTRAPOLATE_MAX_DX=500`、`ANCHOR_LOST_UNIQUE_AGE=1.0`、
-`LOST_UNIQUE_GATE_Y=300`。前两者改错方向的影响面大(外推/接管时机),先常量
-跑着,实测要调再升配置。
+常量(不改配置):`ANCHOR_EXTRAPOLATE_MAX_DX=500`(MapleFarmTask)、
+`LOST_UNIQUE_MIN_AGE=1.0`、`LOST_UNIQUE_GATE_Y=300`(farm_logic)。改错方向的
+影响面大(外推/接管时机),先常量跑着,实测要调再升配置。
 
 ## 5. 风险与回退
 
@@ -171,6 +174,14 @@ def select_lost_unique_box(players, pred_y, anchor_age,
   名字牌下次可读 + 复验间隔(3s 级),且攻击区跟错人期间打怪逻辑照常
   (怪是 YOLO 检的,与锚点身份无关),代价是攻击区位置错,不会打错人。
   回退:配置开关关掉即回滚。
+- 修法 4 已知副作用(接受):接管瞬移会被 `anchor_vx_update` 评估——年龄
+  >2s 被 dt 门挡、换层(|dy|≥30)被平台门挡,但丢锚 1.0~2.0s 且同层的横向
+  逃逸(正是主场景)两道门都拦不住,dx/dt ≤ 600 就会被低通学进去
+  (例:age 1.5s、横向 600px → 学到 280px/s)。若恰与寻怪同向,修法 1 的
+  反向防护拦不住;影响由修法 2 的 ±500 封顶兜住(外推最多偏 500px,下一
+  真实观测即被低通汰换)。测试双锁定:age=3s 换层剧本断言不学(0.0),
+  age=1.5s 同层剧本断言在学(280)——锁「知道它学不学、学多少」。
+  「不改学习点」的前提因此修订为:不为它加过滤,但知晓并兜底新的跳变来源。
 - 修法 2 外推封顶偏紧(500px) → 丢失期攻击区跟不上快走真人。可接受:
   封顶内 YOLO/唯一框接管环境更稳,找回概率上升;实测不够再调。
 - 修法 1 极边缘:寻怪方向刚翻转、学习 vx 还是旧方向 → 退回配置速度,
@@ -188,12 +199,16 @@ farm_logic 单测(test_farm_logic.py):
 
 任务层离线测试(test_farm_task_offline.py,沿用既有假帧/假 OCR 惯例):
 - 反向逃逸剧本:yolo 追踪→转向→漏检,cached 拍 pred 不再反向逃离;
-- 振荡剧本:丢锚 + 寻怪方向交替,cached 拍 |Δbody_x| ≤ 500;
-- 唯一框接管:丢锚 2s + 全屏 1 框 → src=yolo 一拍接管;多框 → 不接管。
+- 帧边界复合:锚点 x=100 寻怪 left → dx 钳 -500 后再钳到 0,不出负坐标;
+- 振荡剧本:丢锚 + 寻怪方向交替,相邻 cached 拍 |Δbody_x| ≤ 1000
+  (=2×500 封顶摆幅,与 §3.5 口径一致);
+- 唯一框接管:丢锚 2s + 全屏 1 框 → src=yolo 一拍接管;多框 → 不接管;
+  接管拍不刷 `_last_identity_hit`(复验慢扫兜底的根基,必须断言)。
 
 ## 7. 不做什么
 
-- 不改 `anchor_vx_update` 学习点(击退残余由低通自然汰换);
+- 不改 `anchor_vx_update` 学习点(击退残余由低通自然汰换;接管瞬移的
+  已知学习由封顶兜底,见 §5,不加过滤);
 - 不放宽 `player_gate_size` 封顶(2026-08-09 spec 的明确决策);
 - 不动模板分片匹配、身份复验慢扫、丢锚立即重扫的既有行为;
 - 多人图(全屏 ≥2 框)不做任何接管放宽。
