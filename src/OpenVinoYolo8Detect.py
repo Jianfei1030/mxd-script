@@ -12,7 +12,7 @@ logger = Logger.get_logger(__name__)
 class OpenVinoYolo8Detect:
 
     def __init__(self, weights='echo.onnx', model_h=1280, model_w=1280, iou_thres=0.45):
-        self.dic_labels = {0: 'mob'}
+        self.dic_labels = {0: 'mob', 1: 'player'}
         self.weights = weights
         self.model_size = (model_w, model_h)
         self.iou_threshold = iou_thres

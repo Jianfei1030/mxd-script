@@ -4,9 +4,10 @@
     python scripts/label_boxes.py <图片文件夹> [--check]
 
 操作:
-    鼠标左键拖拽  = 添加一个 mob 框
+    鼠标左键拖拽  = 添加一个框（当前类别,见下）
     鼠标右键点击  = 删除点到的框（任意位置，含预标）
     r / d          = 删除最后一个框
+    c              = 切换标注类别（0=mob 红框, 1=player 绿框）
     n / 空格       = 保存当前图标注并进入下一张（0 个框会存空 txt，作为负样本）
     p / Backspace  = 返回上一张（自动保存当前图）
     q / Esc        = 退出
@@ -24,12 +25,31 @@ import sys
 import cv2
 
 
+CLASS_NAMES = {0: 'mob', 1: 'player'}
+CLASS_COLORS = {0: (0, 0, 255), 1: (0, 255, 0)}   # BGR:mob 红,player 绿
+
+
+def parse_label_line(line):
+    """YOLO txt 行 → [cls, cx, cy, w, h];非法行 → None。旧行(0 开头)原样读回。"""
+    parts = line.strip().split()
+    if len(parts) != 5:
+        return None
+    return [int(float(parts[0]))] + list(map(float, parts[1:]))
+
+
+def format_label_line(box):
+    """[cls, cx, cy, w, h] → YOLO txt 行(类别保真——旧版写死 '0 ',
+    重存一次会把标好的 player 全改回 mob)。"""
+    return f"{int(box[0])} {box[1]:.6f} {box[2]:.6f} {box[3]:.6f} {box[4]:.6f}"
+
+
 def print_usage():
     print("""
 YOLO 标注工具
 操作:
-  鼠标左键拖拽  = 添加 mob 框
+  鼠标左键拖拽  = 添加框（当前类别;c 切换 0=mob 红 / 1=player 绿）
   r / d          = 删除最后一个框
+  c              = 切换标注类别（0=mob 红框, 1=player 绿框）
   n / 空格       = 保存并下一张（0 框则保存空 txt 作为负样本）
   p / Backspace  = 保存并返回上一张
   q / Esc        = 退出
@@ -49,6 +69,7 @@ def label_folder(folder):
     img = None
     orig = None
     current_path = None
+    current_cls = 0
 
     def txt_path_for(path):
         base, _ = os.path.splitext(path)
@@ -66,9 +87,9 @@ def label_folder(folder):
         if os.path.exists(txt_path):
             with open(txt_path, encoding='utf-8') as f:
                 for line in f:
-                    parts = line.strip().split()
-                    if len(parts) == 5:
-                        boxes.append(list(map(float, parts[1:])))
+                    box = parse_label_line(line)
+                    if box is not None:
+                        boxes.append(box)
         redraw()
 
     def redraw():
@@ -76,12 +97,13 @@ def label_folder(folder):
         img = orig.copy()
         h, w = img.shape[:2]
         for box in boxes:
-            cx, cy, bw, bh = box
+            cls, cx, cy, bw, bh = box
             x1 = int((cx - bw / 2) * w)
             y1 = int((cy - bh / 2) * h)
             x2 = int((cx + bw / 2) * w)
             y2 = int((cy + bh / 2) * h)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.rectangle(img, (x1, y1), (x2, y2),
+                          CLASS_COLORS.get(cls, (0, 0, 255)), 2)
 
     def save_current():
         if current_path is None:
@@ -89,7 +111,7 @@ def label_folder(folder):
         txt_path = txt_path_for(current_path)
         with open(txt_path, 'w', encoding='utf-8') as f:
             for box in boxes:
-                f.write(f"0 {box[0]:.6f} {box[1]:.6f} {box[2]:.6f} {box[3]:.6f}\n")
+                f.write(format_label_line(box) + "\n")
         print(f'saved {txt_path} ({len(boxes)} boxes)')
 
     def mouse(event, x, y, flags, param):
@@ -101,7 +123,7 @@ def label_folder(folder):
         elif event == cv2.EVENT_MOUSEMOVE and drawing:
             img = orig.copy()
             redraw()
-            cv2.rectangle(img, start, (x, y), (0, 255, 0), 2)
+            cv2.rectangle(img, start, (x, y), (255, 255, 255), 2)
         elif event == cv2.EVENT_LBUTTONUP:
             drawing = False
             x1, y1 = start
@@ -113,13 +135,13 @@ def label_folder(folder):
                 cy = ((y1 + y2) / 2) / h
                 bw = (x2 - x1) / w
                 bh = (y2 - y1) / h
-                boxes.append([cx, cy, bw, bh])
+                boxes.append([current_cls, cx, cy, bw, bh])
                 redraw()
         elif event == cv2.EVENT_RBUTTONDOWN:
             # 右键删除包含点击点的框（可删预标/中间任意框）
             px, py = x / w, y / h
             hit = None
-            for i, (cx, cy, bw, bh) in enumerate(boxes):
+            for i, (cls, cx, cy, bw, bh) in enumerate(boxes):
                 if abs(px - cx) <= bw / 2 and abs(py - cy) <= bh / 2:
                     hit = i
                     break
@@ -140,6 +162,9 @@ def label_folder(folder):
         key = cv2.waitKey(50) & 0xFF
         if key in (ord('q'), 27):  # q or Esc
             break
+        elif key == ord('c'):
+            current_cls = 1 - current_cls
+            print(f"当前类别: {current_cls} ({CLASS_NAMES[current_cls]})")
         elif key in (ord('r'), ord('d')) and boxes:
             boxes.pop()
             redraw()
