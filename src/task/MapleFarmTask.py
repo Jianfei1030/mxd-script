@@ -631,8 +631,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._debug_drawn = False
 
     def _draw_debug(self, cfg, body, zone, attack_area, mobs, mob_present, attack_present,
-                    search_region=None, feet_y=None, frame_w=None):
+                    aoe_ready=False, search_region=None, feet_y=None, frame_w=None):
         """画玩家框(绿)/接敌区框(细,蓝=无怪红=有怪)/攻击区框(粗,同色)/怪物框(黄)+脚底点(青)。
+        群攻就绪时接敌区框加粗(1→3)且标签改 接敌区(群攻),给 E2E 判据 D 一个可视对象。
         画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
         用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
         overlay = self.get_overlay_view()
@@ -641,6 +642,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         pw, ph = cfg['玩家宽(像素)'], cfg['玩家高(像素)']
         zx0, zy0, zx1, zy1 = zone
         zone_color = ZONE_HOT_COLOR if mob_present else ZONE_IDLE_COLOR
+        # 群攻态在闭包外定死:paint 是 Qt 重绘时才执行的,那时 now 早过去了,
+        # 在闭包里现调 _aoe_ready 会画出与本拍决策不一致的框(spec §4)。
+        zone_pen_width = 3 if aoe_ready else 1
+        zone_label = '接敌区(群攻)' if aoe_ready else '接敌区'
         ax0, ay0, ax1, ay1 = attack_area
         attack_color = ZONE_HOT_COLOR if attack_present else ZONE_IDLE_COLOR
 
@@ -673,9 +678,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
             # 接敌区（细线）+ 攻击区（粗线）
             if c.get('显示攻击区', True):
-                painter.setPen(QPen(zone_color, 1))
+                painter.setPen(QPen(zone_color, zone_pen_width))
                 painter.drawRect(rect(zx0, zy0, zx1 - zx0, zy1 - zy0))
-                painter.drawText(rect(zx0, zy0 - 20, 100, 20), '接敌区')
+                painter.drawText(rect(zx0, zy0 - 20, 140, 20), zone_label)
 
                 painter.setPen(QPen(attack_color, 4))
                 painter.drawRect(rect(ax0, ay0, ax1 - ax0, ay1 - ay0))
@@ -875,6 +880,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._draw_debug(cfg, body=body, zone=zone, attack_area=draw_area,
                              mobs=mobs, mob_present=mob_present,
                              attack_present=self._last_attack_present,
+                             aoe_ready=aoe_ready,
                              search_region=region, feet_y=anchor_hit.y, frame_w=w)
         else:
             self._clear_debug()

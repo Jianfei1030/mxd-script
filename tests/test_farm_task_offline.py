@@ -3303,3 +3303,23 @@ class TestAoeSkipsTurn(unittest.TestCase):
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)], now=100.0)
         self.assertEqual(task._last_aoe, 100.0)   # 这一拍确实放了群攻
         self.assertIsNone(task._seek_dir)         # 同一拍不可能在寻怪
+
+
+class TestAoeOverlay(unittest.TestCase):
+    """群攻就绪时接敌区框加粗 + 标签改名,给 E2E 判据 D 一个可视对象。"""
+
+    def _draw_kwargs(self, mobs):
+        task = _aoe_task()
+        task._boxes_enabled = MagicMock(return_value=True)
+        task._draw_debug = MagicMock()
+        _run_with_mobs(task, mobs)
+        self.assertTrue(task._draw_debug.called, '_draw_debug 没被调用')
+        return task._draw_debug.call_args.kwargs
+
+    def test_aoe_ready_passed_true(self):
+        kwargs = self._draw_kwargs([_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        self.assertIs(kwargs['aoe_ready'], True)
+
+    def test_aoe_ready_passed_false_below_threshold(self):
+        kwargs = self._draw_kwargs([_aoe_mob(1230), _aoe_mob(1530)])
+        self.assertIs(kwargs['aoe_ready'], False)
