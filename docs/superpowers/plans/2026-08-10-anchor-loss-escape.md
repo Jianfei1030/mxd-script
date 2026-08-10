@@ -52,6 +52,11 @@ class TestExtrapolateVx(unittest.TestCase):
     def test_zero_learned_uses_config_speed(self):
         self.assertEqual(fl.extrapolate_vx(0.0, 'right', 200), 200.0)
         self.assertEqual(fl.extrapolate_vx(0.0, 'left', 200), -200.0)
+
+    def test_none_seek_dir_returns_zero(self):
+        # 契约外输入显式不外推(唯一调用点在 _seek_dir is None 时提前返回,
+        # 这里防未来调用点踩坑——None 绝不能被静默当成 left)
+        self.assertEqual(fl.extrapolate_vx(120.0, None, 250), 0.0)
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -72,6 +77,8 @@ def extrapolate_vx(learned_vx, seek_dir, cfg_speed):
     (2026-08-10 19:56 日志铁证:cached 拍 x=2560 钳位而 寻怪=left)。
     学习点(anchor_vx_update)不动:残余会在下一次真实行走观测时被低通自然替换。
     """
+    if seek_dir not in ('left', 'right'):
+        return 0.0   # 契约外输入:不外推(调用点已保证非 None,这里防御)
     sign = 1.0 if seek_dir == 'right' else -1.0
     if learned_vx != 0.0 and learned_vx * sign > 0:
         return learned_vx
@@ -90,9 +97,11 @@ Expected: PASS(4 个用例)
 ```python
     def test_reverse_learned_vx_does_not_escape(self):
         """回归(08-10 19:56 钳位铁证):学到 +vx(击退向右)但寻怪向左 →
-        外推不许往右逃,退回配置速度×寻怪方向。"""
+        外推不许往右逃,退回配置速度×寻怪方向。
+        速度取 150:150*3=450 < 500 不触帽——这条只测方向,与
+        test_extrapolation_capped_at_max_dx 职责分离。"""
         task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
-                            '寻怪外推速度(像素/秒)': 200})
+                            '寻怪外推速度(像素/秒)': 150})
         task._anchor = (1280.0, 800.0)
         task._anchor_time = 100.0
         task._anchor_vx = 75.0           # 击退残余(向右)
@@ -101,7 +110,7 @@ Expected: PASS(4 个用例)
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
             got, _ = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
-        self.assertEqual(got.x, 1280 - 200 * 3)  # 配置速度×左,不是 1280+75*3
+        self.assertEqual(got.x, 1280 - 150 * 3)  # 830;旧逻辑会给 1280+75*3=1505
 
     def test_extrapolation_capped_at_max_dx(self):
         """丢锚期外推位移封顶 ±500(拆振荡回路,08-10 21:18 外推↔寻怪反馈):
@@ -115,6 +124,38 @@ Expected: PASS(4 个用例)
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
             got, _ = task._resolve_anchor(_synthetic_frame(), 108.0, task.config)
         self.assertEqual(got.x, 1280 + 500.0)  # 250*8=2000 → 钳 500
+
+    def test_extrapolation_clamped_to_frame_edge(self):
+        """封顶与帧边界 [0,2560] 的复合(spec §6):锚点在 x=100、寻怪 left →
+        dx 钳 -500 后 x=-400,再钳到 0,绝不出负坐标。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (100.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'left'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 106.0, task.config)
+        self.assertEqual(got.x, 0.0)
+
+    def test_oscillation_bounded_when_seek_flips(self):
+        """回归(spec §6 振荡剧本,08-10 21:18):丢锚期寻怪方向每拍翻转,
+        相邻 cached 拍 |Δbody_x| ≤ 2×500=1000(旧逻辑外推位移随年龄无界,
+        实测单拍跳 ±1250px+,门中心跟着瞬移,YOLO 关联被主动压死)。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        xs = []
+        for i, d in enumerate(['right', 'left', 'right', 'left']):
+            task._seek_dir = d
+            with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                    patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+                got, source = task._resolve_anchor(_synthetic_frame(), 106.0 + i, task.config)
+            self.assertEqual(source, 'cached')
+            xs.append(got.x)
+        self.assertTrue(all(abs(b - a) <= 1000 for a, b in zip(xs, xs[1:])),
+                        xs)
 ```
 
 **改既有用例** `test_cached_anchor_extrapolates_with_seek_speed`(封顶改变了它的旧契约):
@@ -180,7 +221,9 @@ git commit -m "feat: 反向外推防护 + 外推位移封顶——治丢锚逃�
 - Consumes: 无(独立改动)。
 - Produces: `self._last_yolo_info` 改为 **3 元组** `(门内候选数, 关联距 or None, 全屏 player 框数)`,
   None=本拍 YOLO 级未到达;`decision_log_line(..., yolo_full=None)` 新可选参数,
-  行尾追加 ` yolo全屏=N`(None → `-`)。Task 3 依赖此三元素结构。
+  行尾追加 ` yolo全屏=N`(None → `-`);`_resolve_anchor` 签名默认值
+  `players=()` → `players=None`(None=无推理短路,[]=推理了但全屏 0 框,照常走完 YOLO 级)。
+  Task 3 依赖此三元素结构;players=None 语义 Task 3 的接管同样受 guard 约束。
 
 - [ ] **Step 1: 写格式层失败测试 + 改行尾断言**
 
@@ -220,8 +263,9 @@ Expected: FAIL — `TypeError: unexpected keyword argument 'yolo_full'`;行尾�
 ```
 
 docstring 中「yolo候选 / 关联距 是 YOLO 关联级(spec §3.6)的观测」一段末尾补:
-`yolo全屏 = 同拍全屏 player 框数(含门外):候选=0 全屏=1 = 检出被门拒,
-候选=0 全屏=0 = 真没检出,全=- = 本拍 YOLO 级未到达(2026-08-10 spec §3.3)。`
+`yolo全屏 = 同拍全屏 player 框数(含门外):候选=0 全屏≥1 = 检出被门拒,
+候选=0 全屏=0 = YOLO 跑了但全屏无 player 框,全=- = YOLO 级未到达
+(模板/快窗命中)或定频无推理(2026-08-10 spec §3.3)。`
 
 - [ ] **Step 4: 跑确认通过**
 
@@ -243,9 +287,16 @@ Expected: PASS
         self.assertTrue(any('yolo候选=2 关联距=- yolo全屏=2' in l
                             for l in lines), lines)
 
+    def test_empty_screen_records_zero_not_dash(self):
+        # YOLO 跑了但全屏 0 个 player 框 → 候选=0 全屏=0(可达状态:
+        # 「推理了没框」与「YOLO 级未到达」必须分得开,这正是排查被挡两次的盲区)
+        lines = self._beat(self._task([]))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=0 关联距=- yolo全屏=0' in l
+                            for l in lines), lines)
+
     def test_window_beat_yolo_fields_all_dash(self):
-        # YOLO 级未到达(模板/快窗命中)→ 三个字段全 '-'
-        from src.task.MapleFarmTask import decision_log_line  # noqa: F401  (格式事实源)
+        # YOLO 级未到达(快窗命中)→ 三个字段全 '-'
         task = self._task([self._player(1180, 880)])
         hit = AnchorHit(1200.0, 900.0, 130, 'Yufeng咕咕')
         frame = _synthetic_frame()
@@ -263,23 +314,45 @@ Expected: PASS
 - [ ] **Step 6: 跑确认失败**
 
 Run: `python -m pytest tests/test_farm_task_offline.py::TestYoloAnchorFusion -v`
-Expected: `test_rejected_beat_records_full_screen_count` FAIL(现在拒绝拍记 `-`)
+Expected: `test_rejected_beat_records_full_screen_count` 与
+`test_empty_screen_records_zero_not_dash` FAIL(现在拒绝拍/空屏拍都记 `-`)
 
-- [ ] **Step 7: `_last_yolo_info` 三元素化 + 拒绝拍留痕**
+- [ ] **Step 7: `_last_yolo_info` 三元素化 + 到达即留痕**
 
 `src/task/MapleFarmTask.py`:
 
-① `:291` 与 `:472` 的注释改为 `(门内候选数, 关联距 or None, 全屏框数);None=本拍 YOLO 级未到达`(赋值仍是 None,不用改)。
+① 签名 `:454` 改为 `def _resolve_anchor(self, frame, now, cfg, players=None):`,
+docstring 中「players 为空(旧 3 参调用/定频模式)时 YOLO 级短路」改为:
+`players=None(旧 3 参调用/定频模式,本拍无推理)时 YOLO 级短路、行为完全退回
+旧阶梯;players=[](推理了但全屏无 player 框)正常走完 YOLO 级并记 yolo全屏=0。
+生产唯一调用点(:725)恒传真实 list,None 默认值只服务旧测试调用。`
+（用 None/[] 区分「没推理」与「推理了没框」——全屏=0 要可达,否则
+「YOLO 到底有没有看见人」仍是盲区。)
 
-② YOLO 关联级(`:539` 块内,`gated = ...` 之后、`pbox = ...` 之前)插入:
+② `:291` 与 `:471` 的注释改为 `(门内候选数, 关联距 or None, 全屏框数);None=本拍 YOLO 级未到达`(赋值仍是 None,不用改)。
+
+③ YOLO 关联级(`:538` 的 guard 与 `:543-546` 的 gated/pbox 段)改为**到达即留痕、
+拒绝拍更新门内数**:
 
 ```python
-                # 拒绝拍也留痕(spec §3.3):「没检出 vs 检出被拒」不再是盲区;
-                # 接受拍在下面用真实关联距覆盖这条
+            if cfg.get('YOLO角色定位开关') and players is not None:
+                # 到达即留痕(spec §3.3):全屏数含 0——「没检出 vs 未到达」不再盲区;
+                # 门内数算出后更新,接受拍再用真实关联距覆盖
+                self._last_yolo_info = (0, None, len(players))
+                # 门随「距上次真观测的时长」缩放(位移合理性,spec §3.3):相邻拍
+                # 收到 ~170px,路人挤不进来;久未观测再放回固定上限
+                gate_w, gate_h = farm_logic.player_gate_size(
+                    now - self._last_anchor_hit if self._last_anchor_hit else None)
+                gated = farm_logic.gate_player_boxes(players, center, gate_w, gate_h)
                 self._last_yolo_info = (len(gated), None, len(players))
+                pbox = farm_logic.select_player_box(
+                    gated, center, identity_fresh, gate_w, gate_h)
 ```
 
-③ 接受分支现 `:555-556` 改为三元素:
+（guard 从 `and players` 改为 `and players is not None`:players=[] 时
+gated=[]、select 返回 None,行为与旧短路一致,只多了留痕。)
+
+④ 接受分支现 `:555-556` 改为三元素:
 
 ```python
                     self._last_yolo_info = (len(gated),
@@ -287,7 +360,7 @@ Expected: `test_rejected_beat_records_full_screen_count` FAIL(现在拒绝拍记
                                             len(players))
 ```
 
-④ `:919` 解包与 `:926` 传参改为:
+⑤ `:919` 解包与 `:926` 传参改为:
 
 ```python
         yolo_cands, yolo_dist, yolo_full = self._last_yolo_info or (None, None, None)
@@ -422,6 +495,12 @@ Expected: PASS(6 个用例)
         lines = self._beat(task)
         self.assertTrue(any('src=yolo' in l for l in lines), lines)
         self.assertTrue(any('body_x=2000' in l for l in lines), lines)
+        # 接管不刷身份时间戳:认错路人靠复验慢扫兜底,整条风险章都押在这行上
+        self.assertEqual(task._last_identity_hit, 70.0)
+        # 已知且接受:接管瞬移会被 anchor_vx_update 学习(dx=800/dt=3=267px/s,
+        # 在 600 跳变门内)——由外推 ±500 封顶与反向防护兜底(spec §5 已记),
+        # 这条断言锁的是「我们知道它在学」,不是「它不该学」
+        self.assertAlmostEqual(task._anchor_vx, 0.7 * 800 / 3, places=5)
 
     def test_lost_unique_box_respects_switch_off(self):
         task = self._task([self._player(2000, 880)], identity_age=30.0,
@@ -476,8 +555,12 @@ Expected: `test_lost_unique_box_takes_over_beyond_gate` FAIL(现逻辑门外拒�
 - [ ] **Step 8: 全量跑确认通过**
 
 Run: `python -m pytest tests/test_farm_logic.py tests/test_farm_task_offline.py -x -q`
-Expected: PASS(注意 `test_two_players_stale_identity_falls_to_cached` 等既有
-多框用例必须保持绿:多框不接管)
+Expected: PASS。重点盯三条既有用例必须保持绿:
+- `test_two_players_stale_identity_falls_to_cached`(多框不接管);
+- `test_gate_narrows_with_fresh_observation`(:2815,单框在门外 200px 拒收——
+  它只凭 anchor_age=0.2 < LOST_UNIQUE_MIN_AGE 躲过接管,是「接管是否过于
+  激进」的金丝雀,它红 = 接管条件太松);
+- `test_gate_widens_after_long_loss`(久丢宽门收人,与末级接管不冲突)。
 
 - [ ] **Step 9: Commit**
 
@@ -488,13 +571,20 @@ git commit -m "feat: 丢锚唯一框接管——全屏唯一玩家框+同层直�
 
 ---
 
-## 自审记录(写计划时已做)
+## 自审记录(写计划时已做;评审后修订)
 
-- spec 覆盖:§3.1→Task 1 Steps 1-4;§3.2→Task 1 Steps 5-9;§3.3→Task 2;§3.4→Task 3;
-  §4 配置键→Task 3 Step 7;§6 测试→各 Task 的 TDD 步骤;§3.5 可观测性验收为实测项,
-  不进代码任务。
+- spec 覆盖:§3.1→Task 1 Steps 1-4;§3.2→Task 1 Steps 5-9(含帧边界复合与振荡
+  剧本两个用例);§3.3→Task 2(含全屏=0 可达化);§3.4→Task 3;§4 配置键→
+  Task 3 Step 7;§6 测试→各 Task 的 TDD 步骤;§3.5 可观测性验收为实测项,不进代码任务。
 - 既有契约变更只有两处,都已显式列入步骤:`test_cached_anchor_extrapolates_with_seek_speed`
   (封顶 600→500,Task 1 Step 5)、`test_fields_appended_at_line_end`(行尾新增字段,
   Task 2 Step 1)。
 - 类型一致性:`_last_yolo_info` 三元素在 Task 2 定义、Task 3 复用;
   `select_lost_unique_box` 签名在 Task 3 的测试/实现/接线三处一致。
+- 评审修订(2026-08-10):①反向逃逸用例速度 200→150,与封顶用例职责分离
+  (原断言 680 会被 ±500 帽钳成 780,自相矛盾);②`players=()` 改 `players=None`,
+  全屏=0 状态可达化,docstring 三态语义同步;③接管用例补「不刷身份」与
+  「vx 瞬移学习已知且接受」两条断言;④Step 8 金丝雀名单补
+  `test_gate_narrows_with_fresh_observation`/`test_gate_widens_after_long_loss`;
+  ⑤`extrapolate_vx` 补 None 防御与显式测试;⑥常量名统一
+  LOST_UNIQUE_MIN_AGE/LOST_UNIQUE_GATE_Y(spec §4 已回改)。
