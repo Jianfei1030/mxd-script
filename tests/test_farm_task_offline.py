@@ -2982,6 +2982,16 @@ class TestYoloAnchorFusion(unittest.TestCase):
         self.assertTrue(any('yolo候选=0 关联距=- yolo全屏=0' in l
                             for l in lines), lines)
 
+    def test_yolo_exception_marks_level_not_reached(self):
+        # 推理异常 ≠ 全屏无框:异常拍 players=None,YOLO 级按未到达处理记 '-',
+        # 与「跑了没框」(全屏=0) 在日志里可区分(评审 Minor 1 修复)
+        task = self._task([])
+        task.find_all = MagicMock(side_effect=RuntimeError('boom'))
+        lines = self._beat(task)
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=- 关联距=- yolo全屏=-' in l
+                            for l in lines), lines)
+
     def test_window_beat_yolo_fields_all_dash(self):
         # YOLO 级未到达(快窗命中)→ 三个字段全 '-'
         task = self._task([self._player(1180, 880)])

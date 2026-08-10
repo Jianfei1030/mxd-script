@@ -757,10 +757,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 别 1 = 任意玩家角色,身份判别完全在融合层(spec §3.3),这里只按名字筛。
         try:
             all_boxes = self.find_all(frame)
+            players = [b for b in all_boxes if getattr(b, 'name', None) == 'player']
         except Exception as e:
             all_boxes = []
+            players = None   # 推理异常 ≠ 全屏无框:YOLO 级按未到达处理,日志记 '-'(与全屏=0 可区分)
             self._log_detect_error(now, 'YOLO 检测', e)
-        players = [b for b in all_boxes if getattr(b, 'name', None) == 'player']
         anchor_hit, source = self._resolve_anchor(frame, now, cfg, players)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
         self._last_body_x = body[0]          # 走动确认要用
