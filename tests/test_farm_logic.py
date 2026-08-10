@@ -116,6 +116,17 @@ class TestFarmLogic(unittest.TestCase):
         self.assertFalse(fl.walk_confirmed(None, 1000.0, 1045.0, 40))
         self.assertFalse(fl.walk_confirmed('right', None, 1045.0, 40))
 
+    def test_crowd_present(self):
+        # 等于阈值算命中:阈值语义是「达到就用群攻」,与 should_attack 的 >= 同口径
+        self.assertTrue(fl.crowd_present(3, 3))
+        self.assertTrue(fl.crowd_present(4, 3))
+        self.assertFalse(fl.crowd_present(2, 3))
+        self.assertFalse(fl.crowd_present(0, 3))
+        # 阈值 <= 0 = 功能关闭,不许因为「0 只怪 >= 0」而恒真
+        self.assertFalse(fl.crowd_present(5, 0))
+        self.assertFalse(fl.crowd_present(5, -1))
+        self.assertFalse(fl.crowd_present(0, 0))
+
 
 class TestAttackZone(unittest.TestCase):
 

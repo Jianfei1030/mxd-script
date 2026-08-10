@@ -573,3 +573,18 @@ def select_player_box(players, pred, identity_fresh,
         return (bx - px) ** 2 + (by - py) ** 2
 
     return min(gated, key=_d2)
+
+
+def crowd_present(mob_count, threshold):
+    """接敌区内怪数达到阈值 → 该用群攻(前后双向命中,不需要朝向)。
+
+    计数用**原始**区内怪数,不做去抖:YOLO 单帧 recall 0.886,4 只可能读成 3 只,
+    但那只会晚一个检测拍放群攻;反过来加保持窗会在怪清光后仍按旧计数
+    多放一发空群攻,浪费的是蓝。与 丢怪保持/寻怪保持 取舍方向不同,是因为那两处
+    的失败代价是「停手/停步」,这里只是「晚一拍」(spec §3.10)。
+
+    threshold <= 0 视为功能关闭,恒 False —— 否则 0 只怪 >= 0 会恒真,
+    没绑群攻键时每拍都判成「该群攻」。边界取 >=(等于阈值算命中),与
+    should_attack / turn_allowed 同口径。
+    """
+    return threshold > 0 and mob_count >= threshold
