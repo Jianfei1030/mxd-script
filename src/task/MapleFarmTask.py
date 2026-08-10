@@ -261,6 +261,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_attack_seen = None     # 上次有向攻击区内真检测到怪的时刻;None=从未见过(去抖用)
         self._detect_attacking = None     # 检测节拍用的「在打」快照(短宽限去抖);只有 should_detect 读它
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
+        self._last_aoe = 0.0          # 上次按下群攻键的时刻;0.0 哨兵=从未群攻,天然放行节拍
+        self._last_zone_count = 0     # 最近一次检测拍接敌区内怪数(群攻判据用);0=还没检测过
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
         self._last_hit = 0.0          # 上次受击(作废朝向)时刻;受击防抖用,0.0 哨兵=从未受击
         self._facing = None           # 角色面朝方向;None=未知(首次走位前),配置 左/右 时走位前由配置定
@@ -771,6 +773,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # (攻击间隔)本就大于宽限,现算会让攻击档整个塌成空闲档,负载回归。
         self._detect_attacking = farm_logic.mob_present_debounced(
             raw_attack, now, self._last_attack_seen, cfg['寻怪起步宽限(秒)'])
+        # 群攻计数:接敌区内怪数(原始值,不去抖,见 farm_logic.crowd_present)。
+        # 这一份 in_zone 同时喂给决策日志——同一个数算两遍是将来漂移的种子。
+        in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
+        self._last_zone_count = len(in_zone)
         # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种
         # 变化(A=纠正前、B=本拍结束),分歧行也据它判(spec §3.4)。
         facing_before, turn = belief_before_obs, None
@@ -852,12 +858,13 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         else:
             self._clear_debug()
         if cfg.get('决策日志开关'):
-            self._log_decision(source, anchor_hit, body, zone, attack_area, centres, mobs,
+            self._log_decision(source, anchor_hit, body, zone, attack_area, centres,
+                               in_zone, mobs,
                                raw_present, mob_present, self._last_attack_present,
                                facing_before, turn, observed, obs_s, obs_flip)
 
-    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres, mobs,
-                      raw_present, mob_present, attack_present, facing_before, turn,
+    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres, in_zone,
+                      mobs, raw_present, mob_present, attack_present, facing_before, turn,
                       observed, obs_s, obs_flip):
         """逐拍决策留痕(默认关,见配置 决策日志开关)。
 
@@ -869,7 +876,6 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         同层脚/同层心/近怪 三项见 decision_log_line 的说明:它们是 Task 6
         改同层口径之前唯一的观测手段(spec §2.3)。
         """
-        in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
         left = sum(1 for x in in_zone if x < body[0])
         attack_in = [x for x, y in centres
                      if farm_logic.point_in_zone((x, y), attack_area)]
@@ -944,6 +950,29 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         长按的攻击键/方向键会带角色起身,下一轮闲置需重新按键坐下)。"""
         self._last_busy = now
         self._sitting = False
+
+    def _aoe_ready(self, cfg, keys, now):
+        """本拍要不要放群攻 —— 转向门(_detect_and_act)与攻击门(_do_attack)的
+        唯一判据,两处必须调同一个方法。
+
+        分头写就会出现「以为要群攻所以没转向、结果群攻没发」的两头落空拍:
+        那一拍既不转向也不输出,比不做这个功能还差(spec §3.4)。
+
+        同一 tick 内 run() 的顺序是 _detect_and_act → _do_attack,期间没有任何
+        代码写 _last_aoe / _last_zone_count / _last_hit,所以两次求值必然同值。
+        改动这三个状态的写入位置前,先确认这个前提还成立。
+
+        群攻键留空 = 功能关闭(同 椅子键(可留空) 的约定);阈值在这里现读,
+        GUI 里改 群攻怪数阈值 立刻生效,不用等下一个检测拍。
+        """
+        return bool(
+            cfg['攻击模式'] == '检测'
+            and keys.get('群攻键(可留空)', '')
+            and farm_logic.crowd_present(self._last_zone_count,
+                                         cfg['群攻怪数阈值'])
+            and farm_logic.should_attack(now, self._last_aoe, cfg['群攻间隔(秒)'])
+            and not farm_logic.stun_suppressed(
+                now, self._last_hit, cfg['硬直抑制窗(秒)']))
 
     def _do_attack(self, cfg, keys, now):
         """攻击:检测模式且最近一次检测拍「有向攻击区」内有怪 → 按 攻击间隔 轻点攻击键。

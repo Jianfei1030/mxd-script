@@ -3078,3 +3078,87 @@ class TestAoeConfig(unittest.TestCase):
         """GUI 上没有说明的按键槽等于没有:用户不知道该往里填什么。"""
         from config import key_config_option
         self.assertIn('群攻键(可留空)', key_config_option.config_description)
+
+
+AOE_KEYS = {**KEYS, '群攻键(可留空)': 'f'}
+
+
+def _aoe_mob(cx, cy=650):
+    """按中心点造怪:width=60 / height=50 → bbox 左上角 (cx-30, cy-25)。
+    cy=650 落在接敌区纵向范围 y∈[530,730] 内(锚点走画面中心回退,见计划开头
+    的几何前提:角色名为空 → _resolve_anchor 直接返回画面中心)。"""
+    return MagicMock(x=cx - 30, y=cy - 25, width=60, height=50)
+
+
+def _aoe_task(**cfg_overrides):
+    """检测模式 + 绑好群攻键 + 关走位(走位有独立 120s 节奏,会给按键序列加噪声)。"""
+    task = make_task(**{'攻击模式': '检测', '走位开关': False, **cfg_overrides})
+    task.get_global_config = MagicMock(return_value=dict(AOE_KEYS))
+    return task
+
+
+def _run_with_mobs(task, mobs, now=100.0):
+    """跑一拍。锚点走回退路径(角色名为空)→ 身体 (1280,630)、
+    接敌区 x∈[980,1580] y∈[530,730]。不 patch find_in_region:
+    空 角色名 下它压根不会被调用,patch 了只会给读代码的人错误暗示。"""
+    task.find_mobs = MagicMock(return_value=mobs)
+    run_with_frame(task, now=now)
+
+
+def _sent(task):
+    """本次 run 里真正送出去的按键名(丢掉 down_time 等 kwargs)。"""
+    return [c.args[0] for c in task.send_key.call_args_list if c.args]
+
+
+class TestAoeReady(unittest.TestCase):
+    """群攻判据 _aoe_ready:转向门与攻击门的唯一事实源(spec §3.4)。"""
+
+    def test_zone_count_snapshot(self):
+        """检测拍把接敌区内怪数记进 _last_zone_count(原始计数,不去抖)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        self.assertEqual(task._last_zone_count, 3)
+
+    def test_zone_count_excludes_mobs_outside_zone(self):
+        """区外的怪不计数:接敌区 x∈[980,1580],2000 与 500 都在区外。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(2000), _aoe_mob(500)])
+        self.assertEqual(task._last_zone_count, 1)
+
+    def test_ready_when_count_reaches_threshold(self):
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_below_threshold(self):
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230)])
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_when_key_unbound(self):
+        """群攻键留空 = 功能关闭,计数够也不 ready。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        self.assertFalse(task._aoe_ready(task.config, dict(KEYS), 100.0))
+
+    def test_not_ready_within_interval(self):
+        """群攻节拍未到:上次群攻 100.0,群攻间隔 2.0 → 101.0 不放行,102.0 放行。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        task._last_aoe = 100.0
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 101.0))
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 102.0))
+
+    def test_not_ready_in_fixed_rate_mode(self):
+        """定频模式没有找怪信息,群攻整段不适用。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        task.config['攻击模式'] = '定频'
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_while_stunned(self):
+        """硬直抑制窗内不发任何技能键,群攻同样受它管。"""
+        task = _aoe_task(**{'硬直抑制窗(秒)': 0.8})
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        task._last_hit = 99.9
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
