@@ -3260,3 +3260,46 @@ class TestAoeAttack(unittest.TestCase):
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
         lines = [c.args[0] for c in task.log_debug.call_args_list if c.args]
         self.assertEqual([ln for ln in lines if ln.startswith('群攻 ')], [])
+
+
+class TestAoeSkipsTurn(unittest.TestCase):
+    """群攻双向命中,那一拍转向零收益却要付一次方向键 tap + 作废检测节拍
+    (self._last_detect = 0.0)。只跳过真发群攻的那一拍(spec §3.6)。"""
+
+    def test_no_turn_on_aoe_tick(self):
+        """面朝右 + 区内 3 只全在左(本该转向) + 群攻就绪 → 不发方向键,只发群攻键。"""
+        task = _aoe_task()
+        task._facing = 'RIGHT'
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1130), _aoe_mob(1230)])
+        sent = _sent(task)
+        self.assertIn('f', sent)
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+        self.assertEqual(task._facing, 'RIGHT')   # 朝向信念不动,不产生新分叉
+
+    def test_turns_normally_below_threshold(self):
+        """对照组:同样面朝右、怪在左,但只有 1 只 → 照常转向(转向逻辑没被改坏)。"""
+        task = _aoe_task()
+        task._facing = 'RIGHT'
+        _run_with_mobs(task, [_aoe_mob(1030)])
+        self.assertIn('left', _sent(task))
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_turns_normally_while_aoe_on_cooldown(self):
+        """群攻节拍未到 → 转向照常(不许整段禁转向,否则冷却那 2 秒面朝空处挨打)。"""
+        task = _aoe_task()
+        task._facing = 'RIGHT'
+        task._last_aoe = 99.5          # 群攻间隔 2.0 未到
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1130), _aoe_mob(1230)],
+                       now=100.0)
+        sent = _sent(task)
+        self.assertNotIn('f', sent)
+        self.assertIn('left', sent)
+
+    def test_seek_and_aoe_are_mutually_exclusive(self):
+        """隐式不变量:crowd 成立 ⇒ 接敌区有怪 ⇒ 走接战分支,不可能同时在寻怪。
+        将来有人改 seek_hold 的算法,这条会红(spec §3.8)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)], now=100.0)
+        self.assertEqual(task._last_aoe, 100.0)   # 这一拍确实放了群攻
+        self.assertIsNone(task._seek_dir)         # 同一拍不可能在寻怪

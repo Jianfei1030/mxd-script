@@ -787,6 +787,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # 这一份 in_zone 同时喂给决策日志——同一个数算两遍是将来漂移的种子。
         in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
         self._last_zone_count = len(in_zone)
+        # 本拍会不会放群攻:转向门与 overlay 都用这一份,不各自再调一次 ——
+        # 判据必须与 _do_attack 那次求值同值,否则会出现「以为要群攻所以没转向、
+        # 结果群攻没发」的两头落空拍(spec §3.4)。
+        aoe_ready = self._aoe_ready(cfg, keys, now)
         # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种
         # 变化(A=纠正前、B=本拍结束),分歧行也据它判(spec §3.4)。
         facing_before, turn = belief_before_obs, None
@@ -806,7 +810,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 硬直抑制:受击后 硬直抑制窗(秒) 内不按转向键——击退硬直中 tap 会被
             # 游戏吞掉,但下面的盲写 _facing 照常执行,键没生效信念却已翻转 → 打空。
             # 抑制窗把转向与盲写整块跳过,等硬直过了再补转(见 farm_logic.stun_suppressed)。
+            # 群攻拍不转向:双向命中不需要朝向,转向在这一拍是纯支出 ——
+            # 一次方向键 tap + 下面那句 self._last_detect = 0.0 作废检测节拍。
+            # 只跳过「真发群攻」的这一拍;群攻冷却中的拍照常转向,否则冷却那
+            # 2 秒里怪全在背侧时,单体攻击区(面朝侧半区)是空的,角色站着挨打
+            # (spec §3.6)。_facing 在群攻拍完全不动,也就不会有「盲写了朝向、
+            # 下一拍单体按着错朝向打空」的新分叉。
             if (turn is not None
+                    and not aoe_ready
                     and farm_logic.turn_allowed(now, self._last_turn, cfg['转向冷却(秒)'])
                     and not farm_logic.stun_suppressed(
                         now, self._last_hit, cfg['硬直抑制窗(秒)'])
