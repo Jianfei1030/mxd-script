@@ -3060,3 +3060,21 @@ class TestForcedRescanWiring(unittest.TestCase):
         run_with_frame(task, hp=1.0, now=100.0)
         run_with_frame(task, hp=0.9, now=100.3)
         self.assertTrue(task._force_rescan)
+
+
+class TestAoeConfig(unittest.TestCase):
+    """群攻的三个配置键:默认值 + 「留空=关闭」约定 + 说明文案。"""
+
+    def test_task_defaults(self):
+        self.assertEqual(DEFAULT_CONFIG['群攻怪数阈值'], 3)
+        self.assertEqual(DEFAULT_CONFIG['群攻间隔(秒)'], 2.0)
+
+    def test_global_key_defaults_to_empty(self):
+        """群攻键默认留空 = 功能关闭,与 椅子键(可留空) 同一约定。"""
+        from config import key_config_option
+        self.assertEqual(key_config_option.default_config['群攻键(可留空)'], '')
+
+    def test_global_key_has_description(self):
+        """GUI 上没有说明的按键槽等于没有:用户不知道该往里填什么。"""
+        from config import key_config_option
+        self.assertIn('群攻键(可留空)', key_config_option.config_description)
