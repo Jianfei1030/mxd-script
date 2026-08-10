@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel
 from qfluentwidgets import FluentIcon, ExpandSettingCard, PushButton
 
 from ok import og
@@ -13,6 +13,9 @@ class ConfigContentMixin:
         self.config_widgets = []
         self.config_widget_by_key = {}
         self.config_keys = []
+        self.group_headers = []                 # 组标题 QLabel 列表(搜索过滤时显隐)
+        self.group_header_by_group = {}         # 组名 → 组标题 QLabel
+        self._last_config_group = None          # 渲染中的当前组名
         self.default_config = default_config
         self.config_description = config_description
         self.config_type = config_type
@@ -103,11 +106,33 @@ class ConfigContentMixin:
         adding_keys.remove(key)
 
     def __addConfig(self, key: str, value):
+        self.__maybe_add_group_header(key)
         widget = config_widget(self.config_type, self.config_description, self.config, key, value, self.task)
         self.config_widgets.append(widget)
         self.config_widget_by_key[key] = widget
         self.config_keys.append(key)
         self.viewLayout.addWidget(widget)
+
+    def __config_groups(self):
+        groups = getattr(self.task, 'config_groups', None) if self.task is not None else None
+        return groups or []
+
+    def __maybe_add_group_header(self, key: str):
+        groups = self.__config_groups()
+        if not groups:
+            return
+        from src.task.config_groups import group_of, should_insert_header
+        group = group_of(key, groups)
+        if should_insert_header(self._last_config_group, group):
+            header = QLabel(group)
+            header.setObjectName('configGroupHeader')
+            header.setStyleSheet(
+                'color: #009faa; font-weight: 600;'
+                'padding: 6px 4px 2px 4px; background: transparent;')
+            self.viewLayout.addWidget(header)
+            self.group_headers.append(header)
+            self.group_header_by_group[group] = header
+            self._last_config_group = group
 
     def __add_sub_configs_divider(self, key, position):
         divider = QFrame()
