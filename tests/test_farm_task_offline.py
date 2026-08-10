@@ -9,6 +9,7 @@ import numpy as np
 
 from src.detect import anchor
 from src.detect.anchor import AnchorHit
+from src.task import farm_logic
 from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmTask)
 
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
@@ -34,6 +35,7 @@ def make_task(**cfg_overrides):
     task.log_info = MagicMock()
     task.log_debug = MagicMock()
     task.find_mobs = MagicMock(return_value=[])
+    task.find_all = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
     task._executor = SimpleNamespace(interaction=MagicMock())
     return task
@@ -1181,6 +1183,8 @@ class TestDetectModeAnchor(unittest.TestCase):
         task._anchor = (1400.0, 900.0)
         task._anchor_time = 99.0        # 时间被固定在 100.0,锚点年龄 1s,未过期
         task._last_anchor_scan = 99.5   # 距上次扫描 0.5s < 锚点刷新间隔 2s,慢通道被节流
+        task._last_identity_hit = 99.9  # 身份新鲜:身份复验(§3.7)会绕过常规节流,
+                                        # 断言"慢通道没被调用"必须先把这个维度钉住
         with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None) as window, \
                 patch('src.task.MapleFarmTask.anchor.find_in_region') as region:
             got, source = task._resolve_anchor(_synthetic_frame(), 100.0, task.config)
@@ -2726,3 +2730,711 @@ class TestSeekPersistWiring(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestDecisionLineYoloFields(unittest.TestCase):
+    """yolo候选/关联距 字段(spec §3.6):没有 yolo 命中时写 '-',绝不写 0
+    (0 会被判据脚本当真值,同 near 字段的既有纪律)。"""
+
+    def _line(self, **kw):
+        from src.task.MapleFarmTask import decision_log_line
+        return decision_log_line(
+            'yolo', 1230.0, 866.0, [(1.0, 2.0)], [], 0, 0, 0, None,
+            False, False, [], False, 'LEFT', 'LEFT', None, None, True,
+            None, 0.0, 0.0, **kw)
+
+    def test_fields_dash_when_absent(self):
+        self.assertIn('yolo候选=- 关联距=-', self._line())
+
+    def test_fields_rendered_when_present(self):
+        self.assertIn('yolo候选=2 关联距=35', self._line(yolo_cands=2, yolo_dist=35.4))
+
+    def test_fields_appended_at_line_end(self):
+        # 追加在行尾:analyze_anchor/analyze_seek 的前缀正则不受影响
+        self.assertTrue(self._line().endswith('关联距=-'))
+
+
+class TestFindMobsBoxesParam(unittest.TestCase):
+    """find_mobs(boxes=) 纯过滤路径:一拍一次推理(spec §3.2)的接缝。
+    不碰 og/模型,boxes 路径必须完全离线可测。"""
+
+    def _fake(self, name):
+        return SimpleNamespace(x=0, y=0, width=10, height=10, name=name)
+
+    def test_boxes_param_filters_mobs_without_inference(self):
+        from src.task.BaseMapleTask import BaseMapleTask
+        m, p = self._fake('mob'), self._fake('player')
+        out = BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[m, p, m])
+        self.assertEqual(out, [m, m])
+
+    def test_empty_boxes_gives_empty_not_inference(self):
+        from src.task.BaseMapleTask import BaseMapleTask
+        # boxes=[] 也是「已推理过」:绝不能落回自推理分支(那会二次推理)
+        self.assertEqual(BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[]), [])
+
+
+class TestYoloAnchorFusion(unittest.TestCase):
+    """YOLO 关联级(spec §3.3/§3.4):名字牌两级都失效时接管位置;
+    身份规则、冷启动、开关、伪锚点换算全在这里锁死。
+    OCR 两条通道一律 patch 成 None——测的是阶梯裁决,不是 OCR。"""
+
+    def _player(self, cx, cy, w=60, h=120):
+        return SimpleNamespace(x=cx - w / 2, y=cy - h / 2,
+                               width=w, height=h, name='player')
+
+    def _task(self, players, identity_age=1.0, anchored=True, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '决策日志开关': True, **cfg})
+        task.find_all = MagicMock(return_value=list(players))
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        if anchored:
+            task._anchor = (1200.0, 900.0)
+            task._anchor_time = 99.8      # 新鲜(<0.5s),不外推:搜索中心就是 1200
+            task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.9     # 慢扫节流窗内 → 慢扫不参战
+        task._last_identity_hit = 100.0 - identity_age
+        return task
+
+    def _beat(self, task, now=100.0):
+        frame = _synthetic_frame()
+        with patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region', return_value=None), \
+                patch('time.time', return_value=now):
+            task._detect_and_act(frame, now, task.config,
+                                 task.get_global_config())
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if '决策 ' in c.args[0]]
+
+    def test_occluded_nametag_yolo_takes_over(self):
+        # 名字牌两级全失,门内一个 player 框 → src=yolo,伪锚点=框中心+偏移
+        lines = self._beat(self._task([self._player(1180, 880)]))
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        # body_x = 框中心 x(伪锚点往返,spec §3.4);关联距 = |1180-1200| = 20
+        self.assertTrue(any('body_x=1180' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=1 关联距=20' in l for l in lines), lines)
+
+    def test_yolo_hit_recenters_next_window(self):
+        # 伪锚点喂 _update_anchor:遮挡一散名字牌在正确位置重新咬住(spec §3.4)
+        task = self._task([self._player(1180, 880)])
+        self._beat(task)
+        self.assertEqual(task._anchor,
+                         (1180.0, 880.0 + farm_logic.PLAYER_BOX_TO_NAMETAG))
+        self.assertEqual(task._last_anchor_hit, 100.0)
+
+    def test_yolo_pseudo_anchor_lands_on_real_nametag_height(self):
+        # 伪锚点存进 _anchor 的必须是**名字牌**坐标(下一拍 OCR 小窗、关联门都按它
+        # 定心)。框中心 → 名字牌是实测 64px,不是身体偏移 88px:用 88 会让 yolo 拍
+        # 的 anchor_y 比名字牌拍系统性低 24px(实测 403 组配对,中位 24/p10 21/p90 27),
+        # 攻击区随来源翻拍上下抖 24px,关联门也整体偏 64px
+        lines = self._beat(self._task([self._player(1180, 880)]))
+        self.assertTrue(any(f'anchor_y={880 + farm_logic.PLAYER_BOX_TO_NAMETAG}'
+                            in l for l in lines), lines)
+
+    def test_yolo_does_not_refresh_identity(self):
+        # yolo 不验名,不许刷新身份时间戳(spec §3.4)
+        task = self._task([self._player(1180, 880)], identity_age=5.0)
+        self._beat(task)
+        self.assertEqual(task._last_identity_hit, 95.0)
+
+    def test_two_players_stale_identity_falls_to_cached(self):
+        lines = self._beat(self._task(
+            [self._player(1180, 880), self._player(1300, 880)],
+            identity_age=30.0))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertFalse(any('src=yolo' in l for l in lines))
+
+    def test_two_players_fresh_identity_picks_nearest(self):
+        lines = self._beat(self._task(
+            [self._player(1300, 880), self._player(1180, 880),
+             self._player(2000, 880)],   # 第三个在门外(|2000-1200|>240):不参与,也不计入候选数
+            identity_age=1.0))
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        # 候选数 = 门内 2,不是全屏 3(gate_player_boxes 口径)
+        self.assertTrue(any('yolo候选=2' in l for l in lines), lines)
+        self.assertTrue(any('body_x=1180' in l for l in lines), lines)
+
+    def test_cold_start_never_uses_yolo(self):
+        # 从未有过名字牌命中:没有先验位置就没有门,首个身份必须由慢扫建立
+        task = self._task([self._player(1180, 880)], anchored=False)
+        task._last_anchor_scan = 0.0   # 让慢扫真的跑(mock 返回 None → miss)
+        lines = self._beat(task)
+        self.assertTrue(any('src=fallback' in l for l in lines), lines)
+        self.assertFalse(any('src=yolo' in l for l in lines))
+
+    def test_switch_off_restores_old_ladder(self):
+        lines = self._beat(self._task([self._player(1180, 880)],
+                                      **{'YOLO角色定位开关': False}))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+
+    def test_gate_narrows_with_fresh_observation(self):
+        # 上一拍刚命中(0.2s 前),路人在 200px 外:固定 ±240 会认它,位移门不认。
+        # _last_anchor_hit 才是「上次真观测到位置」的时刻(yolo 命中也刷新它)
+        task = self._task([self._player(1400, 880)])
+        task._last_anchor_hit = 99.8
+        lines = self._beat(task)
+        self.assertFalse(any('src=yolo' in l for l in lines), lines)
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+
+    def test_gate_widens_after_long_loss(self):
+        # 久未观测(2s):门放大到固定上限,远处的自己还认得回来
+        task = self._task([self._player(1400, 880)])
+        task._last_anchor_hit = 98.0
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_mobs_come_from_find_mobs_filter_players_from_find_all(self):
+        # 分流接线:mob 走 find_mobs(boxes=find_all结果),player 走 find_all(spec §3.2)
+        mob = SimpleNamespace(x=1400, y=850, width=60, height=50, name='mob')
+        task = self._task([self._player(1180, 880), mob])
+        task.find_mobs = MagicMock(return_value=[mob])
+        lines = self._beat(task)
+        task.find_mobs.assert_called_once()
+        _, kwargs = task.find_mobs.call_args
+        # 同一对象:分流必须吃 find_all 的结果,不许自己再推理
+        self.assertIs(kwargs.get('boxes'), task.find_all.return_value)
+        self.assertTrue(any('怪=1' in l for l in lines), lines)
+
+
+class TestTemplateDriftGuard(unittest.TestCase):
+    """模板棘轮漂移(spec §3.8):模板通道拿自己上一拍的输出当下一拍搜索中心,
+    一次误匹配就一路上飘 62px/拍 直到飞出屏幕,且因为它会刷身份时间戳,
+    §3.7 的复验永远不触发 —— 实测全天 11.6% 的拍锚点飘在平台上方 >80px,
+    其中 90% 由 template 持有。"""
+
+    def _task(self, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '决策日志开关': True, **cfg})
+        task.find_all = MagicMock(return_value=[])
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        task._nametag_template = np.zeros((36, 153), np.uint8)
+        task._anchor = (1200.0, 887.0)
+        task._anchor_time = 99.8
+        task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.9      # 慢扫节流窗内:不参战
+        task._last_identity_hit = 99.9
+        return task
+
+    def _beat(self, task, tpl_hit, now=100.0):
+        with patch.object(anchor, 'split_match', return_value=tpl_hit), \
+                patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region', return_value=None), \
+                patch('time.time', return_value=now):
+            task._detect_and_act(_synthetic_frame(), now, task.config,
+                                 task.get_global_config())
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if '决策 ' in c.args[0]]
+
+    def test_ratchet_step_is_refused_and_anchor_held(self):
+        # 恰好 62px 的棘轮步长:不许被采纳,锚点必须留在原处(落到 cached)
+        task = self._task()
+        lines = self._beat(task, AnchorHit(1200.0, 887.0 - 62, 153, ''))
+        self.assertFalse(any('src=template' in l for l in lines), lines)
+        self.assertEqual(task._anchor, (1200.0, 887.0))
+
+    def test_normal_template_hit_still_accepted(self):
+        # 正常的小幅移动照常走模板快通道(它是怪堆遮挡的主解,不能连带废掉)
+        task = self._task()
+        lines = self._beat(task, AnchorHit(1240.0, 890.0, 153, ''))
+        self.assertTrue(any('src=template' in l for l in lines), lines)
+        self.assertEqual(task._anchor, (1240.0, 890.0))
+
+    def test_template_hit_does_not_refresh_identity(self):
+        # 模板是**像素**匹配,命中的 text 是空串,根本没验名 —— 它刷新身份时间戳
+        # 就等于「误匹配把复验永久锁死」。只有真读到名字的 window/region 才算验名
+        task = self._task()
+        task._last_identity_hit = 90.0
+        self._beat(task, AnchorHit(1240.0, 890.0, 153, ''))
+        self.assertEqual(task._last_identity_hit, 90.0)
+
+    def test_window_hit_still_refreshes_identity(self):
+        task = self._task()
+        task._last_identity_hit = 90.0
+        with patch.object(anchor, 'split_match', return_value=None), \
+                patch.object(anchor, 'find_in_window',
+                             return_value=AnchorHit(1240.0, 890.0, 153, 'Yufeng咕咕')), \
+                patch('time.time', return_value=100.0):
+            task._detect_and_act(_synthetic_frame(), 100.0, task.config,
+                                 task.get_global_config())
+        self.assertEqual(task._last_identity_hit, 100.0)
+
+
+class TestIdentityRecheckScan(unittest.TestCase):
+    """身份复验慢扫(spec §3.7):身份过期时慢扫必须排在 YOLO 之前。
+
+    YOLO 级一命中就 return,慢扫那段根本走不到——实测慢扫占比被饿到 0.6%
+    (8-08 基线 2.2%),而慢扫是唯一验名、也是唯一能在任意位置找回角色的通道。
+    没有它,YOLO 认错人之后 `_update_anchor` 还会刷新 `_anchor_time`、清掉
+    `_force_rescan`,丢锚立即重扫也不会触发,锚点就永久钉在路人身上。"""
+
+    def _player(self, cx, cy, w=60, h=120):
+        return SimpleNamespace(x=cx - w / 2, y=cy - h / 2,
+                               width=w, height=h, name='player')
+
+    def _task(self, identity_age, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '决策日志开关': True, **cfg})
+        task.find_all = MagicMock(return_value=[self._player(1180, 880)])
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        task._anchor = (1200.0, 900.0)
+        task._anchor_time = 99.8
+        task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.9      # 常规节流窗内:慢扫本来轮不到
+        task._last_identity_hit = 100.0 - identity_age
+        task._last_identity_scan = 0.0
+        return task
+
+    def _beat(self, task, region_hit=None, now=100.0):
+        frame = _synthetic_frame()
+        with patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region',
+                             return_value=region_hit) as scan, \
+                patch('time.time', return_value=now):
+            task._detect_and_act(frame, now, task.config,
+                                 task.get_global_config())
+        return [c.args[0] for c in task.log_debug.call_args_list
+                if '决策 ' in c.args[0]], scan
+
+    def test_stale_identity_runs_scan_before_yolo(self):
+        # 身份过期 + 慢扫命中 → src=region,锚点被拉回真实位置,身份时间戳刷新
+        hit = AnchorHit(700.0, 890.0, 80, 'Yufeng咕咕')
+        lines, scan = self._beat(self._task(identity_age=30.0), region_hit=hit)
+        self.assertTrue(scan.called)
+        self.assertTrue(any('src=region' in l for l in lines), lines)
+
+    def test_stale_identity_scan_miss_still_falls_to_yolo(self):
+        # 慢扫没找到 → 照常让 YOLO 接管:复验只加验名机会,绝不新增丢锚
+        lines, scan = self._beat(self._task(identity_age=30.0), region_hit=None)
+        self.assertTrue(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_fresh_identity_does_not_scan(self):
+        # 身份还新鲜:不花这 118-235ms,维持原阶梯
+        lines, scan = self._beat(self._task(identity_age=1.0))
+        self.assertFalse(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_recheck_is_throttled(self):
+        # 复验自身限频:刚扫过就不再扫(慢扫最坏 235ms,不许每拍都跑)
+        task = self._task(identity_age=30.0)
+        task._last_identity_scan = 99.0     # 1s 前扫过 < 身份复验间隔(3s)
+        lines, scan = self._beat(task)
+        self.assertFalse(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_switch_off_restores_old_ladder(self):
+        lines, scan = self._beat(self._task(identity_age=30.0,
+                                            **{'身份复验开关': False}))
+        self.assertFalse(scan.called)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+
+    def test_shares_one_scan_per_beat_with_forced_rescan(self):
+        # 受击 + 身份过期同拍撞上:慢扫最坏 235ms,只许跑一次。复验那次就算数,
+        # 悬着的强制重扫按已消费处理(否则同拍扫两次,主循环直接被打满)
+        task = self._task(identity_age=30.0)
+        task._force_rescan = True
+        _, scan = self._beat(task)
+        scan.assert_called_once()
+        self.assertFalse(task._force_rescan)
+        self.assertEqual(task._last_forced_rescan, 100.0)
+
+class TestForcedRescanWiring(unittest.TestCase):
+    """事件触发即时慢扫(spec §3.5):三级全失 +(受击 或 锚点超龄)→ 绕过 2s 节流。"""
+
+    def _task(self, **cfg):
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕', **cfg})
+        task.find_all = MagicMock(return_value=[])
+        task._boxes_enabled = MagicMock(return_value=False)
+        task._key_sendable = MagicMock(return_value=True)
+        task._anchor = (1200.0, 900.0)
+        task._anchor_time = 99.8
+        task._last_anchor_hit = 99.8
+        task._last_anchor_scan = 99.4   # 常规 2s 节流窗内:0.6s 前刚扫过
+        task._last_identity_hit = 99.9  # 身份新鲜:本类只测强制重扫,不让身份复验
+                                        # (§3.7,同样会绕过常规节流)插进来抢这次慢扫
+        return task
+
+    def _beat(self, task, now=100.0):
+        with patch.object(anchor, 'find_in_window', return_value=None), \
+                patch.object(anchor, 'find_in_region', return_value=None) as region, \
+                patch('time.time', return_value=now):
+            task._detect_and_act(_synthetic_frame(), now, task.config,
+                                 task.get_global_config())
+        return region
+
+    def test_knockback_flag_forces_immediate_rescan(self):
+        task = self._task()
+        task._force_rescan = True
+        region = self._beat(task)
+        region.assert_called_once()          # 节流窗内照样扫了
+        self.assertFalse(task._force_rescan)  # 消费即清
+        self.assertEqual(task._last_forced_rescan, 100.0)
+
+    def test_forced_rescan_rate_limited(self):
+        task = self._task()
+        task._force_rescan = True
+        task._last_forced_rescan = 99.7      # 0.3s 前刚强制扫过
+        self._beat(task).assert_not_called()
+
+    def test_stale_anchor_age_forces_rescan_without_knockback(self):
+        task = self._task()
+        task._anchor_time = 97.0             # 超龄 3s > 锚点刷新间隔 2s
+        task._last_anchor_hit = 97.0
+        self._beat(task).assert_called_once()
+
+    def test_cold_start_not_forced(self):
+        # 从未有锚点:保持旧 2s 节奏,不许 0.5s 高频扫(spec §3.5 冷启动例外)
+        task = self._task()
+        task._anchor = None
+        task._anchor_time = None
+        self._beat(task).assert_not_called()
+
+    def test_switch_off_restores_throttle(self):
+        task = self._task(**{'丢锚立即重扫开关': False})
+        task._force_rescan = True
+        self._beat(task).assert_not_called()
+
+    def test_any_hit_clears_pending_force(self):
+        # 位置重新观测到(此处 yolo 命中)→ 跳变已消化,悬着的强制扫描作废
+        task = self._task()
+        task._force_rescan = True
+        task.find_all = MagicMock(return_value=[SimpleNamespace(
+            x=1150, y=820, width=60, height=120, name='player')])
+        self._beat(task)
+        self.assertFalse(task._force_rescan)
+
+    def test_knockback_sets_flag_via_run(self):
+        # run() 级接线:HP 掉 2%+(受击)→ 置 _force_rescan。
+        # 角色名留空:锚点通道全程短路(_scan 空目标直接 None),
+        # 不 patch OCR 也绝不会真的加载 OCR 引擎(本用例只测受击接线)
+        task = make_task(**{'攻击模式': '检测', '角色名': ''})
+        task.find_all = MagicMock(return_value=[])
+        task._boxes_enabled = MagicMock(return_value=False)
+        run_with_frame(task, hp=1.0, now=100.0)
+        run_with_frame(task, hp=0.9, now=100.3)
+        self.assertTrue(task._force_rescan)
+
+
+class TestAoeConfig(unittest.TestCase):
+    """群攻的两个配置键:默认值 + 「留空=关闭」约定 + 说明文案。"""
+
+    def test_task_defaults(self):
+        self.assertEqual(DEFAULT_CONFIG['群攻怪数阈值'], 3)
+
+    def test_no_separate_aoe_interval(self):
+        """群攻不再有独立节拍:与单体共用 攻击间隔(秒),按怪数二选一。
+
+        原设计给了 群攻间隔(秒)=2.0,理由是「群攻耗蓝是单体数倍」。该理由被
+        用户否掉(耗蓝不是问题);剩下的「群攻施法约 1 秒、独立节拍保护施法窗」
+        经查是站不住的——单体自己就在 攻击间隔=0.7 下自断施法(实测施法时长
+        0.7-1.0s,见 2026-08-08-facing-observer-design.md:66),群攻并不特殊。
+        独立节拍还引入了相位差:两个节拍互质地各走各的,群攻会落在上次单体后
+        0.6s(< 攻击间隔 0.7)。共用一个节拍从构造上消掉这一整类问题。"""
+        self.assertNotIn('群攻间隔(秒)', DEFAULT_CONFIG)
+
+    def test_global_key_defaults_to_empty(self):
+        """群攻键默认留空 = 功能关闭,与 椅子键(可留空) 同一约定。"""
+        from config import key_config_option
+        self.assertEqual(key_config_option.default_config['群攻键(可留空)'], '')
+
+    def test_global_key_has_description(self):
+        """GUI 上没有说明的按键槽等于没有:用户不知道该往里填什么。"""
+        from config import key_config_option
+        self.assertIn('群攻键(可留空)', key_config_option.config_description)
+
+
+AOE_KEYS = {**KEYS, '群攻键(可留空)': 'f'}
+
+
+def _aoe_mob(cx, cy=650):
+    """按中心点造怪:width=60 / height=50 → bbox 左上角 (cx-30, cy-25)。
+    cy=650 落在接敌区纵向范围 y∈[530,730] 内(锚点走画面中心回退,见计划开头
+    的几何前提:角色名为空 → _resolve_anchor 直接返回画面中心)。"""
+    return MagicMock(x=cx - 30, y=cy - 25, width=60, height=50)
+
+
+def _aoe_task(**cfg_overrides):
+    """检测模式 + 绑好群攻键 + 关走位(走位有独立 120s 节奏,会给按键序列加噪声)。"""
+    task = make_task(**{'攻击模式': '检测', '走位开关': False, **cfg_overrides})
+    task.get_global_config = MagicMock(return_value=dict(AOE_KEYS))
+    return task
+
+
+def _run_with_mobs(task, mobs, now=100.0):
+    """跑一拍。锚点走回退路径(角色名为空)→ 身体 (1280,630)、
+    接敌区 x∈[980,1580] y∈[530,730]。不 patch find_in_region:
+    空 角色名 下它压根不会被调用,patch 了只会给读代码的人错误暗示。"""
+    task.find_mobs = MagicMock(return_value=mobs)
+    run_with_frame(task, now=now)
+
+
+def _sent(task):
+    """本次 run 里真正送出去的按键名(丢掉 down_time 等 kwargs)。"""
+    return [c.args[0] for c in task.send_key.call_args_list if c.args]
+
+
+def _ready_task(**cfg_overrides):
+    """把 _aoe_ready 的输入直接摆好:计数快照(值 + 测得时刻)、单体节拍、受击时刻。
+
+    判据现在有四项状态输入,用「真跑一拍」去摆它们会让「这条测的是哪一项」不可读,
+    而且真跑的那一拍自己就会发群攻、把 _last_attack 推到 now,断言时点被迫漂移。
+    快照有没有被正确写进去,由 test_zone_count_snapshot 单独盯着。"""
+    task = _aoe_task(**cfg_overrides)
+    task._last_zone_count = 3
+    task._last_zone_count_time = 100.0
+    task._last_attack = 0.0        # 0.0 哨兵=从未攻击,节拍天然放行
+    return task
+
+
+class TestAoeReady(unittest.TestCase):
+    """群攻判据 _aoe_ready:转向门与攻击门的唯一事实源(spec §3.4)。"""
+
+    def test_zone_count_snapshot(self):
+        """检测拍把接敌区内怪数记进 _last_zone_count(原始计数,不去抖)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        self.assertEqual(task._last_zone_count, 3)
+
+    def test_zone_count_excludes_mobs_outside_zone(self):
+        """区外的怪不计数:接敌区 x∈[980,1580],2000 与 500 都在区外。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(2000), _aoe_mob(500)])
+        self.assertEqual(task._last_zone_count, 1)
+
+    def test_ready_when_count_reaches_threshold(self):
+        task = _ready_task()
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_below_threshold(self):
+        task = _ready_task()
+        task._last_zone_count = 2
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_when_key_unbound(self):
+        """群攻键留空 = 功能关闭,计数够也不 ready。"""
+        task = _ready_task()
+        self.assertFalse(task._aoe_ready(task.config, dict(KEYS), 100.0))
+
+    def test_not_ready_on_stale_count(self):
+        """计数必须是**本拍**测的。_do_attack 每个 10Hz 拍都跑,而计数只在检测拍
+        写;没有这一道门,怪清光后的非检测拍会拿着上一个检测拍的旧计数放空群攻
+        (实测:t=100.0 发群攻,t=101.5 检测拍计数=3,t=101.6 怪清光,
+        t=102.0 非检测拍读到 0.5s 前的 3 又发一次)。这正是 farm_logic.crowd_present
+        的 docstring 里说「不加保持窗」要避免的那件事,逐拍求值把它从后门放了回来。"""
+        task = _ready_task()
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.1))
+
+    def test_not_ready_within_attack_interval(self):
+        """与单体共用 攻击间隔:节拍未到不放群攻(不再有独立的 群攻间隔)。"""
+        task = _ready_task()
+        task._last_attack = 99.0            # 距 100.0 只过了 1.0 < 攻击间隔 1.5
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+        task._last_attack = 98.0            # 2.0 >= 1.5
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_in_fixed_rate_mode(self):
+        """定频模式没有找怪信息,群攻整段不适用。"""
+        task = _ready_task()
+        task.config['攻击模式'] = '定频'
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+    def test_not_ready_while_stunned(self):
+        """硬直抑制窗内不发任何技能键,群攻同样受它管。"""
+        task = _ready_task(**{'硬直抑制窗(秒)': 0.8})
+        task._last_hit = 99.9
+        self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+
+class TestAoeAttack(unittest.TestCase):
+    """群攻按键路径:优先、二选一、节拍、日志(spec §3.5/§3.7/§4)。"""
+
+    def test_fires_aoe_and_skips_single_attack(self):
+        """区内 3 只 → 按群攻键,且本拍不按单体攻击键(二选一)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('f', sent)
+        self.assertNotIn('shift', sent)
+
+    def test_single_attack_below_threshold(self):
+        """区内 2 只 → 原样走单体,不按群攻键。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+
+    def test_unbound_key_behaves_as_before(self):
+        """群攻键留空 → 与改动前逐键一致:照常单体输出,不出现任何新键。"""
+        task = make_task(**{'攻击模式': '检测', '走位开关': False})  # KEYS 无群攻键
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+        self.assertTrue(set(sent) <= set(KEYS.values()) - {''},
+                        f'出现了 KEYS 之外的按键: {sent}')
+
+    def test_aoe_advances_shared_cadence(self):
+        """群攻走的就是单体那一条节拍:发出时推进 _last_attack,下一拍不再出键。
+
+        鉴别力在「实现漏写 self._last_attack = now」那一档:漏写时 _last_attack
+        停在 0.0 哨兵,100.3 那拍 100.3 - 0.0 >= 攻击间隔(1.5) 会再出一次键。"""
+        task = _aoe_task()
+        mobs = [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)]
+        _run_with_mobs(task, mobs, now=100.0)
+        self.assertIn('f', _sent(task))             # 这一拍真发了群攻
+        self.assertEqual(task._last_attack, 100.0)  # 节拍被推进
+        task.send_key.reset_mock()
+        _run_with_mobs(task, mobs, now=100.3)   # 未满 攻击间隔 1.5
+        self.assertEqual(_sent(task), [])
+
+    def test_aoe_never_lands_inside_single_attack_cadence(self):
+        """共用节拍的核心收益:群攻与单体永远落在同一张节拍格上,间距恒 = 攻击间隔。
+
+        独立 群攻间隔(2.0)时两个节拍互质地各走各的,群攻会落在上次单体后 0.6s
+        (< 攻击间隔 0.7),即落在用户自己声明的单体施法时长之内。攻击间隔取 0.7
+        是实机常用值,也正是原实现暴露该相位差的那一档。"""
+        task = _aoe_task(**{'攻击间隔(秒)': 0.7})
+        task._facing = 'RIGHT'
+        mobs = [_aoe_mob(1330), _aoe_mob(1430), _aoe_mob(1530)]   # 面朝侧,不触发转向
+        fired = []
+        for i in range(60):                       # 6 秒,10Hz 逐拍
+            now = round(100.0 + i * 0.1, 1)
+            task.send_key.reset_mock()
+            _run_with_mobs(task, mobs, now=now)
+            fired += [(now, k) for k in _sent(task) if k in ('f', 'shift')]
+        gaps = [round(b - a, 1) for (a, _), (b, _) in zip(fired, fired[1:])]
+        self.assertTrue(fired, '整整 6 秒一个键都没发,用例失去鉴别力')
+        self.assertTrue(all(g >= 0.7 for g in gaps),
+                        f'有出键落在攻击间隔之内: {fired}')
+
+    def test_aoe_replaces_single_while_crowded(self):
+        """区内一直够阈值 → 每个节拍都是群攻,单体整段不出场(二选一,群攻优先)。"""
+        task = _aoe_task(**{'攻击间隔(秒)': 0.7})
+        task._facing = 'RIGHT'
+        mobs = [_aoe_mob(1330), _aoe_mob(1430), _aoe_mob(1530)]
+        sent = []
+        for i in range(30):
+            task.send_key.reset_mock()
+            _run_with_mobs(task, mobs, now=round(100.0 + i * 0.1, 1))
+            sent += _sent(task)
+        self.assertIn('f', sent)
+        self.assertNotIn('shift', sent)
+
+    def test_no_aoe_on_stale_zone_count(self):
+        """怪清光后的非检测拍不许拿旧计数放空群攻(见 test_not_ready_on_stale_count)。
+
+        时间线全部踩在实现的真实节流上:怪放在面朝侧不触发转向 —— 转向会把
+        _last_detect 清成 0.0 哨兵,反而让 102.0 变回检测拍、把陈旧计数刷掉,
+        用例就测不到东西了。"""
+        task = _aoe_task()                       # 攻击间隔 1.5 → 检测拍 100.0 / 101.5
+        task._facing = 'RIGHT'
+        mobs = [_aoe_mob(1330), _aoe_mob(1430), _aoe_mob(1530)]
+        _run_with_mobs(task, mobs, now=100.0)    # 检测拍:放群攻
+        _run_with_mobs(task, mobs, now=101.5)    # 检测拍:计数刷成 3,节拍未到不出键
+        task.find_mobs = MagicMock(return_value=[])   # 怪在 101.6 被清光
+        task.send_key.reset_mock()
+        _run_with_mobs(task, [], now=102.0)      # 非检测拍(102.0-101.5=0.5 < 1.5)
+        self.assertEqual(task._last_zone_count, 3, '前提:这一拍确实没跑检测')
+        self.assertNotIn('f', _sent(task))
+
+    def test_no_aoe_in_fixed_rate_mode(self):
+        """定频模式:照常按单体攻击键,不按群攻键。"""
+        task = _aoe_task(**{'攻击模式': '定频'})
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+
+    def test_no_aoe_while_stunned(self):
+        """硬直抑制窗内:群攻键和单体攻击键都不按。"""
+        task = _aoe_task(**{'硬直抑制窗(秒)': 0.8})
+        task._last_hit = 99.9
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)],
+                       now=100.0)
+        sent = _sent(task)
+        self.assertNotIn('f', sent)
+        self.assertNotIn('shift', sent)
+
+    def test_logs_aoe_line(self):
+        """决策日志开着时,每次真按下群攻键写一行 群攻 区内=N 阈值=M(N >= M)。"""
+        task = _aoe_task(**{'决策日志开关': True})
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        lines = [c.args[0] for c in task.log_debug.call_args_list if c.args]
+        aoe_lines = [ln for ln in lines if ln.startswith('群攻 ')]
+        self.assertEqual(len(aoe_lines), 1, f'期望一行群攻日志,实得 {aoe_lines}')
+        self.assertEqual(aoe_lines[0], '群攻 区内=3 阈值=3')
+
+    def test_no_log_when_switch_off(self):
+        """决策日志关着 → 不写群攻行(10Hz 下不限频会刷爆日志)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        lines = [c.args[0] for c in task.log_debug.call_args_list if c.args]
+        self.assertEqual([ln for ln in lines if ln.startswith('群攻 ')], [])
+
+
+class TestAoeSkipsTurn(unittest.TestCase):
+    """群攻双向命中,那一拍转向零收益却要付一次方向键 tap + 作废检测节拍
+    (self._last_detect = 0.0)。只跳过真发群攻的那一拍(spec §3.6)。"""
+
+    def test_no_turn_on_aoe_tick(self):
+        """面朝右 + 区内 3 只全在左(本该转向) + 群攻就绪 → 不发方向键,只发群攻键。"""
+        task = _aoe_task()
+        task._facing = 'RIGHT'
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1130), _aoe_mob(1230)])
+        sent = _sent(task)
+        self.assertIn('f', sent)
+        self.assertNotIn('left', sent)
+        self.assertNotIn('right', sent)
+        self.assertEqual(task._facing, 'RIGHT')   # 朝向信念不动,不产生新分叉
+
+    def test_turns_normally_below_threshold(self):
+        """对照组:同样面朝右、怪在左,但只有 1 只 → 照常转向(转向逻辑没被改坏)。"""
+        task = _aoe_task()
+        task._facing = 'RIGHT'
+        _run_with_mobs(task, [_aoe_mob(1030)])
+        self.assertIn('left', _sent(task))
+        self.assertEqual(task._facing, 'LEFT')
+
+    def test_turns_normally_between_attack_beats(self):
+        """节拍未到 → 转向照常(不许「区内够阈值就整段禁转向」,否则节拍间隙里
+        怪全在背侧时,单体攻击区是空的,角色面朝空处站着挨打)。"""
+        task = _aoe_task()
+        task._facing = 'RIGHT'
+        task._last_attack = 99.5       # 距 100.0 只过了 0.5 < 攻击间隔 1.5
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1130), _aoe_mob(1230)],
+                       now=100.0)
+        sent = _sent(task)
+        self.assertNotIn('f', sent)
+        self.assertIn('left', sent)
+
+    def test_seek_and_aoe_are_mutually_exclusive(self):
+        """隐式不变量:crowd 成立 ⇒ 接敌区有怪 ⇒ 走接战分支,不可能同时在寻怪。
+        将来有人改 seek_hold 的算法,这条会红(spec §3.8)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)], now=100.0)
+        self.assertIn('f', _sent(task))           # 这一拍确实放了群攻
+        self.assertIsNone(task._seek_dir)         # 同一拍不可能在寻怪
+
+
+class TestAoeOverlay(unittest.TestCase):
+    """群攻就绪时接敌区框加粗 + 标签改名,给 E2E 判据 D 一个可视对象。"""
+
+    def _draw_kwargs(self, mobs):
+        task = _aoe_task()
+        task._boxes_enabled = MagicMock(return_value=True)
+        task._draw_debug = MagicMock()
+        _run_with_mobs(task, mobs)
+        self.assertTrue(task._draw_debug.called, '_draw_debug 没被调用')
+        return task._draw_debug.call_args.kwargs
+
+    def test_aoe_ready_passed_true(self):
+        kwargs = self._draw_kwargs([_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        self.assertIs(kwargs['aoe_ready'], True)
+
+    def test_aoe_ready_passed_false_below_threshold(self):
+        kwargs = self._draw_kwargs([_aoe_mob(1230), _aoe_mob(1530)])
+        self.assertIs(kwargs['aoe_ready'], False)

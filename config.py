@@ -14,12 +14,14 @@ key_config_option = ConfigOption('游戏按键', {
     '拾取键': 'z',
     '宠物食物键(可留空)': '',
     '椅子键(可留空)': '',
+    '群攻键(可留空)': '',
     '左移键': 'left',
     '右移键': 'right',
 }, description='冒险岛游戏内按键,与游戏内键盘设置保持一致', config_description={
     '回城卷键(可留空)': '低血保命用。留空则低血时只停止任务不逃跑',
     '宠物食物键(可留空)': '喂宠物用。先在游戏内把宠物食物拖到快捷键,再填对应按键;留空则不喂',
     '椅子键(可留空)': '坐椅用(检测模式没怪时自动坐椅子回血蓝)。先在游戏内把椅子拖到快捷键,再填对应按键;留空则不坐',
+    '群攻键(可留空)': '群攻(前后双向命中)技能键。接敌区内怪数达到「群攻怪数阈值」时改按它,那一拍不转向也不按单体攻击键。留空 = 功能关闭',
 }, show_at_tab=True, icon=FluentIcon.GAME)
 
 config = {
@@ -69,7 +71,6 @@ config = {
     'onetime_tasks': [],
     'trigger_tasks': [
         ["src.task.MapleFarmTask", "MapleFarmTask"],
-        ["src.task.WarriorDebugTask", "WarriorDebugTask"],
     ],
     'scene': ["src.scene.MapleScene", "MapleScene"],
 }

@@ -6,7 +6,7 @@
     e2e = E2EClient(port=12345)
     e2e.navigate("start")
     e2e.click("overlay_switch")
-    e2e.type_text("task_战士调试_角色名", "端侧大模型")
+    e2e.type_text("task_自动打怪_角色名", "端侧大模型")
     img = e2e.screenshot_game("screenshots/e2e/game.png")
 """
 import base64

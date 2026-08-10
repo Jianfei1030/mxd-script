@@ -4,7 +4,7 @@
 
 **Goal:** 把丢锚拍占比从 28.5% 压到 ≤10%——给现有 YOLO 检测加 player 类（同拍一次推理），锚点阶梯在名字牌两级之后插一级「YOLO 关联」，身份仍由名字牌校准；捎带丢锚事件触发即时慢扫。
 
-**Architecture:** 纯决策逻辑进 `farm_logic.py`（可离线单测），任务层只做接线；检测接缝保持 `find_mobs`（新增 `boxes=` 过滤参数 + `find_all` 一次全类别推理），~80 处现有测试 mock 零改动。模型侧 class 1 = 任意玩家角色，身份判别完全在融合层。
+**Architecture:** 纯决策逻辑进 `farm_logic.py`（可离线单测），任务层只做接线；检测接缝保持 `find_mobs`（新增 `boxes=` 过滤参数 + `find_all` 一次全类别推理），68 处现有测试 mock 零改动。模型侧 class 1 = 任意玩家角色，身份判别完全在融合层。
 
 **Tech Stack:** Python 3.12（`.venv-warrior`）、OpenVINO YOLOv8（onnx 1280）、cv2、unittest、yolo.exe（训练）。
 
@@ -36,7 +36,7 @@
 - Consumes: `src.task.MapleFarmTask.decision_log_line`（测试用它构造样本行——真绑定，格式一改测试立刻红；签名见 `MapleFarmTask.py:93`）
 - Produces: `analyze_anchor.parse(lines) -> [dict(t, src, can_atk)]`、`sessionize(rows, gap=10.0, min_rows=20)`、`loss_episodes(sessions) -> [float]`、`metrics(sessions) -> dict`；命令行 `python scripts/analyze_anchor.py [日志] [--since HH:MM:SS] [--until HH:MM:SS]`。Task 11 验收调它。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/test_analyze_anchor.py`（整文件）：
 
@@ -140,14 +140,14 @@ if __name__ == '__main__':
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_analyze_anchor -v
 ```
-预期：`ModuleNotFoundError: No module named 'scripts.analyze_anchor'`（若整个 `scripts` 包导入失败，先看 `tests/test_calibrate_offline.py` 是怎么导入 scripts 下模块的，照同一方式解决——`scripts/` 缺 `__init__.py` 就补一个空文件并纳入本次提交）。
+预期：`ModuleNotFoundError: No module named 'scripts.analyze_anchor'`（若整个 `scripts` 包导入失败，先看 `tests/test_calibrate_offline.py` 是怎么导入 scripts 下模块的，照同一方式解决——`scripts/` 缺 `__init__.py` 就补一个空文件并纳入本次提交）。实际报错与预期一致；namespace package 导入无需补 `__init__.py`。
 
-- [ ] **Step 3: 实现 `scripts/analyze_anchor.py`（整文件）**
+- [x] **Step 3: 实现 `scripts/analyze_anchor.py`（整文件）**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -288,21 +288,21 @@ if __name__ == '__main__':
     main(sys.argv[1:])
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_analyze_anchor -v
 ```
 预期：全绿。
 
-- [ ] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**
+- [x] **Step 5: 用真实日志核对基线（有 08-08 日志的机器上）**（执行代理在隔离环境跳过并误称"本机无日志"——日志在主检出存在（logs/ 被 gitignore，worktree 里看不到）；2026-08-09 执行评审已在主检出代跑通过：A=28.5%、B p90=2.16s 中位 0.69s，与 spec §1.2 吻合，尺子有效）
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py logs\ok-script.2026-08-08.log
 ```
 预期：A ≈ 28.5%、B p90 ≈ 2.2s（与 spec §1.2 手工统计一致，允许 ±0.5% 级别出入——正则口径差异要查明才许过）。日志缺失的机器跳过本步并在提交信息注明。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add scripts/analyze_anchor.py tests/test_analyze_anchor.py
@@ -319,9 +319,9 @@ git commit -m "feat: analyze_anchor 丢锚判据 A-E 度量工具——尺子先
 
 **Interfaces:**
 - Consumes: 无（纯函数；player 框是任意带 `.x/.y/.width/.height` 属性的对象，与 `ok/feature/Box.py` 的 Box 同形）
-- Produces: `PLAYER_GATE_HALF_W = 240`、`PLAYER_GATE_HALF_H = 120`、`select_player_box(players, pred, identity_fresh, half_w=..., half_h=...) -> box | None`。Task 7 在 `_resolve_anchor` 调用。
+- Produces: `PLAYER_GATE_HALF_W = 240`、`PLAYER_GATE_HALF_H = 120`、`gate_player_boxes(players, pred, half_w=..., half_h=...) -> [box]`（门口径的唯一事实源——决策日志的 `yolo候选` 记的就是它的长度）、`select_player_box(players, pred, identity_fresh, half_w=..., half_h=...) -> box | None`。Task 7 在 `_resolve_anchor` 调用两者。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
 
 ```python
 from types import SimpleNamespace
@@ -371,21 +371,40 @@ class TestSelectPlayerBox(unittest.TestCase):
 
     def test_empty_players_rejected(self):
         self.assertIsNone(fl.select_player_box([], (1200, 900), True))
+
+    def test_gate_player_boxes_returns_only_in_gate_as_list(self):
+        # 决策日志 yolo候选= 记门内候选数,不是全屏数——全屏数混着门外路人,
+        # 调关联门/查误认时会误导。返回列表(而非单个框),供 len() 计数
+        inside, outside = _pbox(1240, 900), _pbox(1500, 900)
+        self.assertEqual(fl.gate_player_boxes([inside, outside], (1200, 900)),
+                         [inside])
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic -v 2>&1 | Select-String "select_player|FAILED|Error"
 ```
-预期：`AttributeError: module ... has no attribute 'PLAYER_GATE_HALF_W'`（或 select_player_box）。
+预期：`AttributeError: module ... has no attribute 'PLAYER_GATE_HALF_W'`（或 select_player_box）。实际与预期一致（select_player_box/PLAYER_GATE_HALF_W/gate_player_boxes 三处 AttributeError，8 个用例全红）。
 
-- [ ] **Step 3: 实现（追加到 `src/task/farm_logic.py` 末尾）**
+- [x] **Step 3: 实现（追加到 `src/task/farm_logic.py` 末尾）**
 
 ```python
-PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W)
+PLAYER_GATE_HALF_W = 240   # YOLO 关联门半宽:与快通道搜索窗同宽(FAST_HALF_W,跨模块注释同步)
 PLAYER_GATE_HALF_H = 120   # 关联门半高:比快窗的 80 放宽——击退/跳跃纵向位移大,
                            # 快窗为 OCR 成本收窄的理由对免费的 YOLO 不成立(spec §3.3)
+
+
+def gate_player_boxes(players, pred, half_w=PLAYER_GATE_HALF_W,
+                      half_h=PLAYER_GATE_HALF_H):
+    """框中心落在 pred 的 ±half_w/±half_h 门内的候选(门口径唯一事实源)。
+
+    select_player_box 的裁决与决策日志的 yolo候选= 都从这里拿,
+    两处各写一遍迟早分叉。边界压线算门内,与 point_in_zone 口径一致。"""
+    px, py = pred
+    return [b for b in players
+            if abs(b.x + b.width / 2 - px) <= half_w
+            and abs(b.y + b.height / 2 - py) <= half_h]
 
 
 def select_player_box(players, pred, identity_fresh,
@@ -393,36 +412,34 @@ def select_player_box(players, pred, identity_fresh,
     """YOLO player 框 → 「哪个是我」的关联裁决(spec §3.3)。
 
     YOLO 只学「什么是玩家」,身份判别在这里:pred 是外推位置(与快窗 OCR 同一个
-    搜索中心),框中心落在 ±half_w/±half_h 门内才是候选。
+    搜索中心),门内候选由 gate_player_boxes 给出。
     - 恰 1 个 → 接受(不看身份新鲜度:门内只有一个玩家,几乎必是自己);
     - 多个 → identity_fresh(距上次名字牌真实命中还在保鲜窗内)才取合位移最近的,
       否则返回 None——路人贴身且身份过期,宁可退到慢扫/cached,不认错人;
     - 0 个 → None,落到阶梯下一级。
     最近取欧氏距离平方:两候选横向同距但隔层时,必须选同层那个(横向距离分不开)。
-    边界压线算门内,与 point_in_zone 口径一致。
+    传入已过门的列表也正确(门是幂等的,Task 7 先 gate 后 select 不改语义)。
     """
-    px, py = pred
-    gated = [b for b in players
-             if abs(b.x + b.width / 2 - px) <= half_w
-             and abs(b.y + b.height / 2 - py) <= half_h]
+    gated = gate_player_boxes(players, pred, half_w, half_h)
     if not gated:
         return None
     if len(gated) == 1:
         return gated[0]
     if not identity_fresh:
         return None
+    px, py = pred
     return min(gated, key=lambda b: (b.x + b.width / 2 - px) ** 2
                + (b.y + b.height / 2 - py) ** 2)
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic -v
 ```
 预期：全绿（含既有用例）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/farm_logic.py tests/test_farm_logic.py
@@ -441,7 +458,7 @@ git commit -m "feat: select_player_box 关联门——恰1接受/多候选看身
 - Consumes: 无
 - Produces: `FORCED_RESCAN_MIN_INTERVAL = 0.5`、`should_rescan_anchor(now, last_scan, interval, force=False, last_forced=0.0, forced_min_interval=FORCED_RESCAN_MIN_INTERVAL) -> bool`。Task 8 在 `_resolve_anchor` 传 `force=` 与 `last_forced=`。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_logic.py`）**
 
 ```python
 class TestForcedRescan(unittest.TestCase):
@@ -469,11 +486,11 @@ class TestForcedRescan(unittest.TestCase):
             102.0, 100.0, 2, force=True, last_forced=101.9))
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
-预期：`TypeError: should_rescan_anchor() got an unexpected keyword argument 'force'`。
+预期：`TypeError: should_rescan_anchor() got an unexpected keyword argument 'force'`。实际与预期一致（3 错,`test_no_force_keeps_old_behavior` 不传 force 自然过）。
 
-- [ ] **Step 3: 实现（替换 `farm_logic.py` 的 `should_rescan_anchor`，常量放函数上方）**
+- [x] **Step 3: 实现（替换 `farm_logic.py` 的 `should_rescan_anchor`，常量放函数上方）**
 
 ```python
 FORCED_RESCAN_MIN_INTERVAL = 0.5   # 强制慢扫自身限频:慢扫最坏 235ms,不许打满主循环
@@ -494,9 +511,9 @@ def should_rescan_anchor(now, last_scan, interval, force=False,
     return force and now - last_forced >= forced_min_interval
 ```
 
-- [ ] **Step 4: 跑测试确认通过（整个 test_farm_logic 全绿，含旧的 167-168 行）**
+- [x] **Step 4: 跑测试确认通过（整个 test_farm_logic 全绿，含旧的 167-168 行）**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/farm_logic.py tests/test_farm_logic.py
@@ -515,7 +532,7 @@ git commit -m "feat: should_rescan_anchor 加 force——事件触发绕过节�
 - Consumes: 无
 - Produces: `decision_log_line(..., yolo_cands=None, yolo_dist=None)`——两个新**关键字**参数追加在 `obs_flip` 之后；行尾追加 `yolo候选=N 关联距=D`（未提供时都写 `-`，绝不写 0）。Task 7 的 `_log_decision` 传值；Task 1 的正则是前缀匹配、天然兼容。既有调用方/测试不传新参数照常工作。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestDecisionLineYoloFields(unittest.TestCase):
@@ -540,14 +557,14 @@ class TestDecisionLineYoloFields(unittest.TestCase):
         self.assertTrue(self._line().endswith('关联距=-'))
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_task_offline.TestDecisionLineYoloFields -v
 ```
-预期：`TypeError ... unexpected keyword argument 'yolo_cands'`。
+预期：`TypeError ... unexpected keyword argument 'yolo_cands'`。实际与预期一致（1 错 + 2 字段断言失败）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `decision_log_line` 签名末尾加 `yolo_cands=None, yolo_dist=None`；docstring 补一段：
 
@@ -567,11 +584,11 @@ return 表达式最后一行 `f'分值=...'` 之后追加：
 
 （原最后一行 `f'分值={...}/{...:.2f}')` 去掉右括号改为续接上面两行。）
 
-- [ ] **Step 4: 跑测试确认通过 + 全量单测**
+- [x] **Step 4: 跑测试确认通过 + 全量单测**
 
-全量命令见 Global Constraints。既有 `tests.test_analyze_anchor`（Task 1 用 `decision_log_line` 构造样本行）必须仍绿——它证明前缀正则真的兼容新字段。
+全量命令见 Global Constraints。既有 `tests.test_analyze_anchor`（Task 1 用 `decision_log_line` 构造样本行）必须仍绿——它证明前缀正则真的兼容新字段。实测全量 402 绿,test_analyze_anchor 未动。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/MapleFarmTask.py tests/test_farm_task_offline.py
@@ -593,7 +610,7 @@ git commit -m "feat: 决策行追加 yolo候选/关联距 字段——先造观�
   - `find_mobs(self, frame=None, threshold=0.5, boxes=None) -> [Box]`——`boxes` 非 None 时**纯过滤**（`b.name == 'mob'`），不推理；None 时旧行为（自己推理，WarriorDebugTask 等调用方不变）。
   - **设计约束**：`_detect_and_act` 继续经 `find_mobs` 拿怪——`tests/test_farm_task_offline.py` 有 68 处 `task.find_mobs = MagicMock(...)`，接缝名一换全部报废；`boxes=` 过滤参数让 mock 与真实路径同时成立。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestFindMobsBoxesParam(unittest.TestCase):
@@ -615,11 +632,11 @@ class TestFindMobsBoxesParam(unittest.TestCase):
         self.assertEqual(BaseMapleTask.find_mobs(SimpleNamespace(), boxes=[]), [])
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
-预期：第二个用例 `find_mobs(boxes=[])` 走进旧分支 `from ok import og` 后 `AttributeError`（SimpleNamespace 无 frame）——或第一个用例 `TypeError: unexpected keyword 'boxes'`。
+预期：第二个用例 `find_mobs(boxes=[])` 走进旧分支 `from ok import og` 后 `AttributeError`（SimpleNamespace 无 frame）——或第一个用例 `TypeError: unexpected keyword 'boxes'`。实际为第一种（`TypeError: unexpected keyword 'boxes'`，2 错）。
 
-- [ ] **Step 3: 实现（替换 `BaseMapleTask.py:18-21`）**
+- [x] **Step 3: 实现（替换 `BaseMapleTask.py:18-21`）**
 
 ```python
     def find_mobs(self, frame=None, threshold=0.5, boxes=None):
@@ -639,13 +656,13 @@ class TestFindMobsBoxesParam(unittest.TestCase):
                                      threshold=threshold, label=-1)
 ```
 
-- [ ] **Step 4: 跑测试确认通过 + 全量单测全绿**
+- [x] **Step 4: 跑测试确认通过 + 全量单测全绿**
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/BaseMapleTask.py tests/test_farm_task_offline.py
-git commit -m "feat: find_all 一次全类别推理 + find_mobs(boxes=) 纯过滤——保留 80 处测试接缝"
+git commit -m "feat: find_all 一次全类别推理 + find_mobs(boxes=) 纯过滤——保留 68 处测试接缝"
 ```
 
 ---
@@ -666,7 +683,7 @@ git commit -m "feat: find_all 一次全类别推理 + find_mobs(boxes=) 纯过�
   - `label_boxes.parse_label_line(line) -> [cls, cx, cy, w, h] | None`、`label_boxes.format_label_line(box) -> str`（模块级纯函数，标注 GUI 与测试共用）；
   - 标注 GUI：`c` 键切换当前类别（0=mob 红框 / 1=player 绿框），txt 首列写类别，重存不丢类别。
 
-- [ ] **Step 1: 写失败测试 `tests/test_label_boxes.py`（整文件）**
+- [x] **Step 1: 写失败测试 `tests/test_label_boxes.py`（整文件）**
 
 ```python
 # -*- coding: utf-8 -*-
@@ -702,9 +719,9 @@ if __name__ == '__main__':
     unittest.main()
 ```
 
-- [ ] **Step 2: 跑测试确认失败**（ImportError：函数不存在）
+- [x] **Step 2: 跑测试确认失败**（ImportError：函数不存在）——实际 `ImportError: cannot import name 'format_label_line'`，与预期一致。
 
-- [ ] **Step 3: 改 `scripts/label_boxes.py`**
+- [x] **Step 3: 改 `scripts/label_boxes.py`**
 
 3a. 模块级纯函数（放在 `print_usage` 前）：
 
@@ -780,16 +797,16 @@ names:
   1: player
 ```
 
-- [ ] **Step 4: 跑测试 + 编译检查**
+- [x] **Step 4: 跑测试 + 编译检查**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_label_boxes -v
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for base in ['src','scripts','tests'] for p in pathlib.Path(base).rglob('*.py')]; print('OK')"
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dataset\raw\map1 --check
 ```
-预期：单测绿；编译 OK；`--check` 打印 sanity 通过。dic_labels 无独立单测（实例化要载模型，铁律 §11.4 环境依赖）——由 Task 10 部署验证覆盖。
+预期：单测绿；编译 OK；`--check` 打印 sanity 通过。dic_labels 无独立单测（实例化要载模型，铁律 §11.4 环境依赖）——由 Task 10 部署验证覆盖。实测全绿；`--check` 对 dataset/raw/map1 通过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/OpenVinoYolo8Detect.py dataset/mobs.yaml scripts/label_boxes.py scripts/prelabel_from_onnx.py tests/test_label_boxes.py
@@ -806,7 +823,7 @@ git commit -m "feat: 模型类别基建——class1=player(任意玩家),标注�
 - Consumes: `farm_logic.gate_player_boxes` / `select_player_box`（Task 2）、`find_all` / `find_mobs(boxes=)`（Task 5）、`decision_log_line(yolo_cands=, yolo_dist=)`（Task 4）
 - Produces: 锚点来源新标签 `'yolo'`；配置键 `'YOLO角色定位开关'`(True)、`'身份保鲜(秒)'`(10)；状态 `self._last_identity_hit`、`self._last_yolo_info`；`_resolve_anchor(self, frame, now, cfg, players=())` 新签名。**签名影响面**：src 内唯一调用点 `MapleFarmTask.py:561`；但 `tests/test_farm_task_offline.py:1118-1450` 另有 18 处 3 参直呼——`players=()` 默认值让它们不传新参照旧走老阶梯（空 players → YOLO 块短路），这些旧用例必须原样保持全绿，不许改。Task 8 在同函数内接慢扫强制门。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestYoloAnchorFusion(unittest.TestCase):
@@ -906,20 +923,20 @@ class TestYoloAnchorFusion(unittest.TestCase):
         self.assertTrue(any('怪=1' in l for l in lines), lines)
 ```
 
-- [ ] **Step 2: `make_task` 加 find_all 默认 mock（`tests/test_farm_task_offline.py:36` 的 `task.find_mobs = MagicMock(return_value=[])` 之后加一行,find_mobs 那行已存在勿重复）**
+- [x] **Step 2: `make_task` 加 find_all 默认 mock（`tests/test_farm_task_offline.py:36` 的 `task.find_mobs = MagicMock(return_value=[])` 之后加一行,find_mobs 那行已存在勿重复）**
 
 ```python
     task.find_all = MagicMock(return_value=[])
 ```
 
-- [ ] **Step 3: 跑测试确认失败**
+- [x] **Step 3: 跑测试确认失败**
 
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_task_offline.TestYoloAnchorFusion -v
 ```
-预期：`KeyError: 'YOLO角色定位开关'` 或 src=yolo 断言失败。
+预期：`KeyError: 'YOLO角色定位开关'` 或 src=yolo 断言失败。实际与预期一致：8 个用例中 4 个失败（src=yolo 缺失,决策行落 src=cached;锚点未重定位）,其余 4 个（冷启动/过期身份/关开关/分流接线）本就测回退阶梯,天然通过。
 
-- [ ] **Step 4: 实现**
+- [x] **Step 4: 实现**
 
 4a. `DEFAULT_CONFIG`（`'模板匹配阈值': 0.2,` 之后插入）：
 
@@ -1005,11 +1022,11 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
             yolo_cands=yolo_cands, yolo_dist=yolo_dist))
 ```
 
-- [ ] **Step 5: 跑新测试类 + 全量单测**
+- [x] **Step 5: 跑新测试类 + 全量单测**
 
-全量必须全绿：既有 68 处 `find_mobs` mock 用例与 18 处 `_resolve_anchor` 3 参直呼用例是「接缝未破坏」的回归证明。任何一个红都说明分流动了不该动的行为——修实现，不许改旧测试。
+全量必须全绿：既有 68 处 `find_mobs` mock 用例与 18 处 `_resolve_anchor` 3 参直呼用例是「接缝未破坏」的回归证明。任何一个红都说明分流动了不该动的行为——修实现，不许改旧测试。实际：8/8 新用例通过；12 模块离线全量 416 全绿（6 skipped）。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```powershell
 git add src/task/MapleFarmTask.py tests/test_farm_task_offline.py
@@ -1029,7 +1046,7 @@ git commit -m "feat: 锚点阶梯插 YOLO 关联级——名字牌失效拍由 p
 - Produces: 配置键 `'丢锚立即重扫开关'`(True)；状态 `self._force_rescan`、`self._last_forced_rescan`。
 - **对既有 18 处 `_resolve_anchor` 3 参直呼用例（tests:1118-1450）的影响已逐一核过为零**：`:1083` 一带角色名空短路、`:1135` 一带锚点年龄 1s < 刷新间隔 2s 不触发 force，其余慢扫用例 `_last_anchor_scan=0.0` 常规窗本就到点（force 与否同一结果）。全量绿灯的预期成立；红了修实现，不许改旧测试。
 
-- [ ] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
+- [x] **Step 1: 写失败测试（追加到 `tests/test_farm_task_offline.py`）**
 
 ```python
 class TestForcedRescanWiring(unittest.TestCase):
@@ -1107,9 +1124,9 @@ class TestForcedRescanWiring(unittest.TestCase):
         self.assertTrue(task._force_rescan)
 ```
 
-- [ ] **Step 2: 跑测试确认失败**（`KeyError: '丢锚立即重扫开关'` / assert_called 失败）
+- [x] **Step 2: 跑测试确认失败**（`KeyError: '丢锚立即重扫开关'` / assert_called 失败）实际与预期一致：`AttributeError: 'MapleFarmTask' object has no attribute '_force_rescan'` + 3 处 region.assert_called 失败（节流窗内该扫没扫）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 3a. `DEFAULT_CONFIG`（`'身份保鲜(秒)': 10,` 之后）：
 
@@ -1160,9 +1177,9 @@ class TestForcedRescanWiring(unittest.TestCase):
             self._force_rescan = True   # 击退=位置跳变:下一检测拍绕过慢扫节流立刻重扫(spec §3.5)
 ```
 
-- [ ] **Step 4: 跑新测试类 + 全量单测全绿**
+- [x] **Step 4: 跑新测试类 + 全量单测全绿**实际：7/7 新用例通过；12 模块离线全量 423 全绿（6 skipped）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add src/task/MapleFarmTask.py tests/test_farm_task_offline.py
@@ -1216,7 +1233,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\label_boxes.py dat
 ```powershell
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\final_split.py --train <既有train地图...> combat_<地图名> --val <既有val地图> --frames 50
 ```
-QC：抽 10 张 train/val 图用 label_boxes 打开目检（红=mob、绿=player），确认 player 绿框贴身、无宠物误标、mob 框未丢类别。
+QC 在 raw 做（不是 train/val——`images/` 旁没有 txt，对它开标注器一个框都看不到，正是 Step 3 的坑）：对每个参与切分的 `dataset/raw/<地图>/` 用 label_boxes 抽开 10 张目检（png+txt 同目录，红=mob、绿=player），确认 player 绿框贴身、无宠物误标、mob 框未丢类别；再抽 3 张核对切分产物——`dataset/labels/<split>/<地图>_frame_XXXX.txt` 与 raw 同名 txt 内容一致（`final_split` 是纯拷贝，`Compare-Object (Get-Content a) (Get-Content b)` 应为空）。
 
 - [ ] **Step 5: 完成判据（无 git 产物）**
 
@@ -1235,16 +1252,18 @@ QC：抽 10 张 train/val 图用 label_boxes 打开目检（红=mob、绿=player
 - Produces: 双类别 onnx 模型；Task 11 实机验收依赖它。
 - **产物路径实证**：`yolo train project=runs name=<名>`（从 dataset 目录执行）产物在 `dataset/runs/<名>/`——现有 `dataset/runs/mob_bootstrap/`（args.yaml、曲线图直接在内）就是这个结构；AGENTS.md §3.4 的 `runs/detect/runs/<名>/` 嵌套与实际不符，照抄会在 export/冒烟时找不到 best.pt。
 
-- [ ] **Step 1: 记录现役基线 + 备份模型**
+- [x] **Step 1: 记录现役基线 + 备份模型**
 
 ```powershell
 Get-Content dataset\runs\mob_bootstrap\results.csv -Tail 3   # 现役训练(目录名以 dataset\runs\ 下实际为准),抄下 mob mAP50/mAP50-95
 Copy-Item assets\mob_model\mob.onnx ("assets\mob_model\mob.onnx.bak_" + (Get-Date -Format yyyyMMdd))
 ```
 
-- [ ] **Step 2: 训练（必须从 dataset 目录执行；yolov8m 200ep，4090 约 8 分钟）**
+- [x] **Step 2: 训练（必须从 dataset 目录执行；yolov8m 200ep，4090 约 8 分钟）**
 
 **权重注意**：项目根只有 `yolov8n.pt`，**没有 yolov8m.pt**。`model=yolov8m.pt` 用裸名（不带路径前缀）——ultralytics 对裸官方名会自动联网下载到当前目录（dataset/）；带 `..\` 前缀则按本地文件找、直接报不存在。离线环境退用 `model=..\yolov8n.pt`（n 跑通全流程，回归门照跑；player mAP50 不过门再补 m 重训）。
+
+**mobs.yaml 路径注意**（2026-08-09 执行评审观察）：Task 6 已把 `path` 从 `.` 改为 `dataset`；ultralytics 对 data yaml 的相对 `path` 按其 settings 的 DATASETS_DIR 解析，旧值 `path: .` 曾成功训出 mob_bootstrap。若本步训练报 dataset not found，第一嫌疑就是这一行——改回 `path: .`（保持从 dataset 目录执行）再试。
 
 ```powershell
 Set-Location dataset
@@ -1252,14 +1271,14 @@ Set-Location dataset
 Set-Location ..
 ```
 
-- [ ] **Step 3: 回归门（spec §3.1，不过门不许部署）**
+- [x] **Step 3: 回归门（spec §3.1，不过门不许部署）**
 
 看 `dataset/runs/mob_player_v1/` 的 per-class 指标（results.csv 末行 + 训练输出的 per-class 表）：
 - mob：mAP50/mAP50-95 **不低于 Step 1 抄下的现役值**（怕加类别把找怪弄坏）；
 - player：**mAP50 ≥ 0.90**。
 不过 → 回 Task 9 补数据/纠标注重训。把两组数字记进提交信息。
 
-- [ ] **Step 4: 导出 + 部署 + 冒烟**
+- [x] **Step 4: 导出 + 部署 + 冒烟**
 
 ```powershell
 Set-Location dataset
@@ -1284,7 +1303,7 @@ assert 'unknown' not in names, 'dic_labels 缺映射'
 "
 ```
 
-- [ ] **Step 5: 修正 AGENTS.md 过时路径 + 提交（模型 99MB 在 .gitignore,不入库）**
+- [x] **Step 5: 修正 AGENTS.md 过时路径 + 提交（模型 99MB 在 .gitignore,不入库）**
 
 AGENTS.md 三处按实际布局修正（其余原样，`dataset/mobs.yaml` 已在 Task 6 提交过、此处无改动）：
 - §3.2 两条训练命令：`C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe` → `..\.venv-warrior\Scripts\yolo.exe`（从 dataset 执行）、`model=C:\projects\mxd-script\yolov8n.pt` → `model=..\yolov8n.pt`；
@@ -1321,7 +1340,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\analyze_anchor.py 
 
 - [ ] **Step 3: E2E 截图取证（按 AGENTS.md §11.5 流程,视觉模型验收）**
 
-三张必备：怪堆遮挡中绿框咬住角色本体、路人同屏绿框没跳、决策日志里 `src=yolo` 拍的同时刻画面。存 `screenshots/e2e/player-anchor-fusion/`，文件名带日期。误认抽查：`Select-String 'src=yolo' logs\ok-script.log`（全篇命令均为 PowerShell）看 `关联距=` 分布，>150 的拍逐个对截图。
+三张必备：怪堆遮挡中绿框咬住角色本体、路人同屏绿框没跳、决策日志里 `src=yolo` 拍的同时刻画面。存 `screenshots/e2e/player-anchor-fusion/`，文件名带日期。误认抽查：`Select-String 'src=yolo' logs\ok-script.log`（全篇命令均为 PowerShell）看 `关联距=` 分布，>150 的拍逐个对截图。另留意**跳跃拍**：关联门以名字牌 y 为中心，player 框中心常态在其上方约 90px，半高 120 的实际纵向余量为向上 ~30px / 向下 ~210px（评审观察）——若跳跃中 src 频繁从 yolo 退级到 cached，把现象记进执行记录，供后续决定是否把门改为以身体中心为基准。
 
 - [ ] **Step 4: 归档 + 提交**
 
@@ -1349,3 +1368,9 @@ git commit -m "docs: 丢锚治理实弹验收——判据 A-F 实测归档"
 5. `yolo候选` 语义从全屏数改为门内候选数：新增 `gate_player_boxes` 作为门口径唯一事实源（Task 2/4/7 三处同步）。
 6. `_resolve_anchor` 在 tests:1118-1450 有 18 处 3 参直呼：`players=()` 默认值保证兼容，Task 7/8 的 Interfaces 已写明影响面与 force 门零影响的逐条分析。
 7. Task 7 Step 2 只加 `find_all` 一行（`find_mobs` mock 已存在于 make_task:36）；另修正 mock 计数 ~80→68、Task 11 grep→Select-String、标注器拖拽预览色让位 player 绿。
+
+**第二轮（2026-08-09，阻断项）**：并行会话的合并 `ffc16a3` 把第一轮对 Task 2 的三处编辑（Produces/门测试/实现）与 Architecture 行盖回了旧版，导致 `gate_player_boxes` 全计划被引用却无定义——执行到 Task 7 必然 `AttributeError`。已重新打上：门控抽成 `gate_player_boxes` 独立函数（门口径唯一事实源）、`select_player_box` 首行改调它（幂等，Task 7 先 gate 后 select 语义不变）、补「返回列表」测试。同轮修正：Task 9 Step 4 的 QC 从 train/val 改到 raw 源头（旧坑复发——`images/` 旁没有 txt，标注器开了也看不到框），并补 labels/ 与 raw 同名 txt 的拷贝一致性核对；Architecture 行与 Task 5 提交信息的「80」→「68」。已知不改项：`copy_map_frames` 要求 val 地图前 N 帧连续存在（`final_split.py:55-59` 缺帧 raise），执行 Task 9 时留意 val 地图帧数 ≥ `--frames`。
+
+## 执行评审记录（2026-08-09，Task 1-8 完成后）
+
+独立评审（b796905..28dccad，8 提交）结论：**无 Critical，放行 Task 9**。代码与计划逐字一致、旧测试 0 行删除、接缝全数完好（boxes=[] 不落回推理 / 'YOLO 找怪' 上下文保留 / WarriorDebugTask 与 ok/ 零改动）；实跑 12 模块 **426 tests 全绿（2 skipped）**、编译 OK。已处理：Task 1 Step 5 的"本机无日志"声明不实（worktree 看不到 gitignored logs/）——评审在主检出代跑通过（A=28.5%、B p90=2.16s，spec §1.2 吻合），Step 5 注记已改为真实情况。遗留观察（不阻断）：新测试类追加在 `if __name__ == '__main__'` 之后（官方 `-m unittest` 不受影响，脚本式直跑会漏收——如需挪 main 块到文件末尾，单独小提交做）；mobs.yaml `path` 解析风险已记入 Task 10；关联门纵向非对称已记入 Task 11。工具重测基线补充：同日志 sessionize 口径 C=41.4 段/小时（spec §5 的 ≈33 是未切段的粗估——通过线 ≤6 不受影响，Task 11 以工具口径为准）。

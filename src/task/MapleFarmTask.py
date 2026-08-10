@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     '攻击区形状': '单体(面朝)',
     '攻击区宽(像素)': 600,
     '攻击区高(像素)': 200,
+    '群攻怪数阈值': 3,
     '名字牌到身体偏移(像素)': 90,
     '锚点搜索区宽(比例)': 0.30,
     '锚点搜索区高(比例)': 0.30,
@@ -59,6 +60,11 @@ DEFAULT_CONFIG = {
     '玩家高(像素)': 120,
     '模板分片匹配开关': True,
     '模板匹配阈值': 0.2,
+    'YOLO角色定位开关': True,
+    '身份保鲜(秒)': 10,
+    '身份复验开关': True,
+    '身份复验间隔(秒)': 3,
+    '丢锚立即重扫开关': True,
     '丢怪保持(秒)': 1.0,
     '寻怪起步宽限(秒)': 0.3,
     '寻怪保持(秒)': 0.5,
@@ -102,7 +108,7 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
                       same_feet, same_center, near,
                       raw_present, mob_present, attack_in, attack_present,
                       facing_before, facing_now, turn, seek_dir, key_sendable,
-                      observed, obs_s, obs_flip):
+                      observed, obs_s, obs_flip, yolo_cands=None, yolo_dist=None):
     """决策日志行(不含时间戳前缀)—— 格式的唯一事实源。
 
     scripts/analyze_facing.py 与 scripts/analyze_seek.py 的正则按它解析,
@@ -116,6 +122,11 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
     两个都写出来,是为了量出「攻击区罩得到却判不同层」那条带上到底有多少怪。
     near = 水平最近那只怪的 (dx, dy脚, dy心);屏幕无怪时 None → 三项写 '-',
     绝不写 0(0 会被判据脚本当成真值)。
+
+    yolo候选 / 关联距 是 YOLO 关联级(spec §3.6)的观测:候选 = **门内**候选数
+    (gate_player_boxes 口径——全屏数混着门外路人,调关联门/查误认会误导),
+    关联距 = 命中框中心与外推位置的水平距离。
+    非 yolo 来源的拍两项都写 '-',绝不写 0。追加在行尾:analyze 脚本前缀匹配。
     """
     near_s = ('近怪dx=- dy脚=- dy心=-' if near is None else
               f'近怪dx={near[0]:+.0f} dy脚={near[1]:+.0f} dy心={near[2]:+.0f}')
@@ -128,7 +139,9 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
             f'转向={turn or "-"} 寻怪={seek_dir or "-"} '
             f'可发键={key_sendable} '
             f'实测={_FACING_SHORT.get(observed, "?")} '
-            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}')
+            f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}'
+            f' yolo候选={yolo_cands if yolo_cands is not None else "-"}'
+            f' 关联距={f"{yolo_dist:.0f}" if yolo_dist is not None else "-"}')
 
 
 def divergence_log_line(facing_before, observed, obs_s, obs_flip,
@@ -145,7 +158,17 @@ def template_captured_line(direction, min_dx):
     return f'朝向模板已采集 方向={direction} (寻怪走动确认 ≥{min_dx}px)'
 
 
-DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
+def aoe_log_line(count, threshold):
+    """群攻触发行 —— 格式唯一事实源(同 decision_log_line)。
+
+    判据 A 直接 grep 「群攻」数行数,并核对每行的 区内 >= 阈值。
+    不塞进决策行是有意的:decision_log_line 被两个 analyze 脚本的正则和一批
+    绑定测试吃着,为一个偶发事件改它的格式不划算(spec §4)。
+    """
+    return f'群攻 区内={count} 阈值={threshold}'
+
+
+DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key(WarriorDebugTask 已移除,原 'warrior_debug' key 不复存在)
 PLAYER_COLOR = QColor(0, 255, 0)
 ZONE_IDLE_COLOR = QColor(0, 128, 255)
 ZONE_HOT_COLOR = QColor(255, 0, 0)
@@ -173,6 +196,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '角色名': '检测模式用它 OCR 定位角色(名字牌)。留空则攻击区锚在画面中心',
             '攻击区形状': '单体(面朝):只打面朝侧半区,射程 = 攻击区宽的一半。魔法箭/近战这类面朝向技能选它——对称区会在「怪在背侧且转向还在冷却」时按出空技能。群体(对称):打整个攻击区,行为等同于此功能上线前,作为安全退路保留',
             '攻击区宽(像素)': '2560x1440 下标定。用 scripts/calibrate_attack_zone.py 看图调',
+            '群攻怪数阈值': '接敌区内怪数达到此值就改用群攻(前后双向命中),那一拍不转向、也不按单体攻击键。群攻不另设节拍,和单体共用「攻击间隔(秒)」——到点了看区内怪数决定按哪个键。需要先在设置页「游戏按键」绑定「群攻键(可留空)」,留空则本项无效。注意数的是**接敌区内**(默认 600x200,即身体左右各 300px、上下各 100px)的怪,不是屏幕上的怪:2026-08-10 实测 359 个检测拍里 区内=0/1/2/3 各占 78.3%/16.4%/4.7%/0.6%,而「屏幕有怪但区内=0」的拍里 62% 是最近的怪根本在别的平台上。所以默认 3 实际几乎不触发(4.7 分钟只 2 拍),觉得「围了一圈却不放群攻」时先调成 2(覆盖率 0.6%→5.3%),别急着调大攻击区宽/高——那个同时改单体攻击区和转向/寻怪/坐椅。实跑后按决策日志里的 区内=N 分布回调',
             '名字牌到身体偏移(像素)': '名字牌在角色脚下,该值是牌子中心到身体中心的距离',
             '喝药判定间隔(秒)': 'HP 低于阈值时,两次喝药/判效的最小间隔。药水起效需要时间,间隔太短会误判"喝药无效"',
             '喝药开关': '总开关:关闭后不自动喝血/喝蓝;保命时也不按血药键(回城卷与停任务照常)',
@@ -190,6 +214,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             '玩家高(像素)': '同「玩家宽(像素)」,仅调试画框用',
             '模板分片匹配开关': '名字牌模板快通道:OCR 完整命中时自动把名字牌裁成白字二值化模板(存 screenshots/nametag_templates/),之后每帧先用模板竖切分片匹配定位角色——怪/宠的名字牌盖住一半也照样命中,且不跑 OCR;匹配失败自动落回 OCR。怪堆里"一直寻怪不攻击"(名字牌被盖 → OCR 失败 → 锚点冻结)的主要解法。命中后还会验证位置周围有暗底(名字牌有暗色半透明底框),拒绝云/天空误匹配',
             '模板匹配阈值': '模板分片匹配的接受阈值(归一化平方差,0=完全一致):越严(越小)误匹配越少,但遮挡/抗锯齿下越容易漏。默认 0.2 参考 MapleStoryAutoLevelUp',
+            'YOLO角色定位开关': '锚点阶梯第三级:名字牌模板与快窗 OCR 都没拿到时,用同一拍 YOLO 检出的 player 框接管角色位置(检测的是角色本体,任何名字牌遮挡都不影响;推理与找怪同拍共享,零额外开销)。身份仍由名字牌校准:该级只在已有锚点时参战,认错人风险由「身份保鲜(秒)」兜底。关掉 = 完全退回旧阶梯。丢锚拍占比 28.5%(2026-08-08 全天)的主解,详见 specs/2026-08-09-player-anchor-yolo-fusion-design.md',
+            '身份保鲜(秒)': '距上次名字牌真实命中(模板/快窗/慢扫)超过此时长后,若屏幕上有多个玩家框,YOLO 级拒绝裁决(宁可退到慢扫/缓存,不认错路人);恰好只有一个玩家框时不受此限。调小 = 收紧防误认,调大 = 怪堆重度遮挡下更少丢锚。绿框跳到别的玩家身上时,先调小它',
+            '身份复验开关': '身份过期(距上次名字牌真实命中超过「身份保鲜(秒)」)时,把慢扫提到 YOLO 级**之前**跑一次验名。为什么必须提前:YOLO 级一命中就返回,排在它后面的慢扫根本轮不到——2026-08-09 实测慢扫占比被饿到 0.6%(加 YOLO 前的基线是 2.2%),而慢扫是唯一验名、也是唯一能在上次锚点小窗之外找回角色的通道。没有它,YOLO 一旦认错人,伪锚点会继续刷新锚点时间戳、连「丢锚立即重扫」都不会触发,绿框就永久钉在路人身上。慢扫没找到照样落回 YOLO 级,只加验名机会,不新增丢锚。关掉 = 旧阶梯',
+            '身份复验间隔(秒)': '身份复验慢扫的限频(慢扫中位 118ms、最坏 235ms,不许每拍都跑)。它同时是「认错人最长持续时间」的上界:调小=纠错更快、CPU 更吃,调大=反之。只在身份已过期且名字牌两级都失效的拍才计次,正常打怪期间根本不会触发',
+            '丢锚立即重扫开关': '本拍模板/快窗OCR/YOLO 三级全没拿到位置,且(刚受击 或 锚点已超过「锚点刷新间隔」没更新)时,立刻跑一次慢扫,不等 2 秒节流——丢锚常由击退位置跳变引起,常规节流恰好卡在最需要慢扫的时刻(基线里慢扫只占 2.2%)。强制扫描自身限频 0.5 秒(慢扫最坏 235ms,不许打满主循环)。关掉 = 旧节流行为',
             '经验停滞上限(分钟)': '经验条这么久没涨就停任务(兜底"无效挂机")。屏幕上一只怪都没有的时段不计入——空图/刷新间隙本来就没收益,不该被判停;检测模式才有此豁免,定频模式没有找怪信息,照常计时',
             '丢怪保持(秒)': '攻击区里检测不到怪之后,还按"有怪"继续挥多久。YOLO 一拍漏检(单帧 recall 约 0.89,自己的攻击特效还会盖住目标)就松手的话,法师一次施法要 1 秒、技能根本放不出来。要大于一个攻击间隔才兜得住漏检。设 0 = 关掉,退回一拍空立刻停手',
             '寻怪起步宽限(秒)': '区内检测不到怪之后,还要再等多久才允许起步去追。**必须小于「丢怪保持(秒)」**,取等 = 退回修复前行为。为什么要分成两个值:丢怪保持是为 YOLO 漏检兜底的(单帧 recall 0.886,一拍漏检就松开攻击键,法师一次施法都放不出来),那个理由只对攻击键成立——多挥一刀空的代价,远小于多站一秒不动。2026-08-08 实测有 11.5% 的拍卡在丢怪保持窗里,其中 3310 拍屏幕上明明有怪却结构性禁止寻怪。攻击键本身不受此项影响(它由「有向攻击区内有没有怪」单独去抖)。寻怪方向一旦定下来,还被丢怪保持撑着的攻击信号会立刻作废,不会出现「一边追一边挥」',
@@ -243,6 +272,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_attack_seen = None     # 上次有向攻击区内真检测到怪的时刻;None=从未见过(去抖用)
         self._detect_attacking = None     # 检测节拍用的「在打」快照(短宽限去抖);只有 should_detect 读它
         self._last_any_mob = None     # 最近一次检测拍屏幕上有没有怪(不限攻击区);None=没跑过找怪(定频)
+        self._last_zone_count = 0     # 最近一次检测拍接敌区内怪数(群攻判据用);0=还没检测过
+        self._last_zone_count_time = None  # 上面那个计数是哪一拍测的;None=还没测过。
+                                           # 群攻只认「本拍现测」的计数,见 _aoe_ready
         self._last_turn = 0.0         # 上次转向轻点时刻;0.0 哨兵=从未转向,不受冷却限制
         self._last_centres = []       # 最近一次检测拍的怪中心列表(垫步定向用)
         self._last_zone = None        # 最近一次检测拍的接敌区(垫步定向用)
@@ -260,6 +292,11 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._facing_template = None      # 朝向模板(灰度 58x66);None=还没采到
         self._facing_template_dir = None  # 模板自身朝向 'LEFT'/'RIGHT';None=未知
         self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
+        self._last_identity_hit = 0.0  # 上次名字牌真实命中(template/window/region)时刻;0.0=从未。多候选裁决只在保鲜窗内放行;yolo 不刷新它(它不验名,spec §3.4)
+        self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
+        self._force_rescan = False        # 受击置位:下一检测拍绕过慢扫节流(spec §3.5);任一通道命中即清(跳变已消化)
+        self._last_forced_rescan = 0.0    # 上次强制慢扫时刻;0.0 哨兵=从未,配合 FORCED_RESCAN_MIN_INTERVAL 限频
+        self._last_identity_scan = 0.0    # 上次身份复验慢扫时刻;0.0 哨兵=从未,配合「身份复验间隔(秒)」限频
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -298,6 +335,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._anchor_vx = farm_logic.anchor_vx_update(self._anchor_vx, dx, dt, dy)
         self._anchor, self._anchor_time = (hit.x, hit.y), now
         self._last_anchor_hit = now
+        self._force_rescan = False   # 任一通道命中 = 位置重新观测到,悬着的强制扫描作废
 
     def _extrapolated_anchor_x(self, now, cfg):
         """寻怪中锚点超龄 → 角色此刻应在的水平 x(实测速度优先,无实测用配置速度 × 寻怪方向)。
@@ -395,14 +433,37 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._log_detect_error(time.time(), '朝向观测', e)
             return None, 0.0, 0.0
 
-    def _resolve_anchor(self, frame, now, cfg):
+    def _scan_region(self, frame, w, h, name, cfg, now):
+        """慢通道:中央搜索区分块 OCR。命中则更新锚点、刷新身份时间戳、按需裁模板。
+
+        节流由调用方决定(常规节流 / 丢锚立即重扫 / 身份复验),这里只管扫和记账 ——
+        两个调用点各抄一份"命中后要做什么"迟早分叉,身份时间戳漏刷一处就等于验名失效。
+        OCR 抛异常按"这一级没拿到"处理,绝不冒泡(见 _resolve_anchor 文档)。
+        """
+        region = anchor.search_region(w, h, cfg['锚点搜索区宽(比例)'], cfg['锚点搜索区高(比例)'],
+                                      cfg['锚点搜索区中心Y(比例)'])
+        try:
+            hit = anchor.find_in_region(frame, name, region)
+        except Exception as e:
+            hit = None
+            self._log_detect_error(now, '慢通道锚点 OCR', e)
+        if hit is None:
+            return None
+        self._update_anchor(hit, now)
+        self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
+        if (hit.text or '').strip() == name:
+            self._capture_nametag_template(frame, hit)
+        return hit
+
+    def _resolve_anchor(self, frame, now, cfg, players=()):
         """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
         模板分片快通道(白字二值化模板竖切分片匹配 + 暗底验证,零 OCR 开销;
         怪/宠的名字牌盖住一半也照样命中,命中后验证暗底拒绝云/天空误匹配)
-        → OCR 快通道(上次锚点附近小窗,寻怪中超龄时小窗跟外推位置) → 慢通道
-        (中央区分块,节流) → 沿用上次(寻怪中超龄则按外推位置回) → 回退
-        (屏幕中心 x + 最后已知层高 y)。
+        → OCR 快通道(上次锚点附近小窗,寻怪中超龄时小窗跟外推位置) → **YOLO 关联级**
+        (名字牌两级都没拿到时,用同拍检出的 player 框接管;身份保鲜兜底防认错路人,
+        spec §3.3/§3.4) → 慢通道(中央区分块,节流) → 沿用上次(寻怪中超龄则按外推
+        位置回) → 回退(屏幕中心 x + 最后已知层高 y)。
         名字牌被遮挡 OCR 连续失败时,攻击区不再冻在旧位置——有模板一帧咬住真实位置,
         没模板则边走路边外推,怪进区就能接战(2026-08-06 实测"身边很多怪时一直寻怪
         不攻击"根因,spec §4.2)。
@@ -410,7 +471,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         锚点"处理,绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的
         通用 except 抓住并直接 disable() 整个任务,连保命/喝药都会停,违反
         "无怪只停手,任务继续跑"的契约。
+        players 为空(旧 3 参调用/定频模式)时 YOLO 级短路,行为完全退回旧阶梯。
         """
+        self._last_yolo_info = None   # 本拍观测先清:非 yolo 来源时决策日志输出 '-'
         h, w = frame.shape[:2]
         centre = anchor.Anchor(w / 2.0, h / 2.0, 0)
         name = (cfg['角色名'] or '').strip()
@@ -439,8 +502,18 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 except Exception as e:
                     hit = None
                     self._log_detect_error(now, '模板分片匹配', e)
+                # 纵向合理性(spec §3.8):模板拿自己上一拍的输出当下一拍搜索中心,
+                # 一次误匹配就自我强化——匹配落在窗顶边时每拍恒定上移
+                # half_h - 模板高/2 = 62px,实测一路飘到屏幕顶再也回不来。
+                # 超帽子的当误匹配丢弃,落到验名的 OCR 通道去重建 y。
+                if hit is not None and not farm_logic.template_hit_plausible(
+                        hit.y, self._anchor[1]):
+                    hit = None
                 if hit is not None:
                     self._update_anchor(hit, now)
+                    # 模板**不**刷新身份时间戳:它是像素匹配,命中的 text 是空串,
+                    # 根本没验名。让它刷新 = 误匹配把 §3.7 的复验永久锁死,
+                    # 「飘到半空再也回不来」的另一半根因(spec §3.4 修正)
                     return hit, 'template'
             try:
                 hit = anchor.find_in_window(frame, name, center, FAST_HALF_W, FAST_HALF_H,
@@ -450,21 +523,70 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 self._log_detect_error(now, '快通道锚点 OCR', e)
             if hit is not None:
                 self._update_anchor(hit, now)
+                self._last_identity_hit = now   # 名字牌真实命中:身份保鲜从这刻起算
                 if (hit.text or '').strip() == name:  # 完整命中才裁模板
                     self._capture_nametag_template(frame, hit)
                 return hit, 'window'
+            identity_fresh = now - self._last_identity_hit <= cfg['身份保鲜(秒)']
+            # 身份复验慢扫(spec §3.7):身份过期时,慢扫必须排在 YOLO 之前。
+            # YOLO 级一命中就 return,下面那段慢扫根本走不到——实测慢扫占比被饿到
+            # 0.6%(8-08 基线 2.2%),而它是唯一验名、也是唯一能在任意位置(不限
+            # 上次锚点附近的小窗)找回角色的通道。没有它,YOLO 认错人之后
+            # _update_anchor 还会刷新 _anchor_time、清掉 _force_rescan,丢锚立即
+            # 重扫也不会触发,锚点就永久钉在路人身上。扫不到照样落到 YOLO 级,
+            # 只加验名机会,不新增丢锚。
+            if (cfg.get('身份复验开关') and not identity_fresh
+                    and now - self._last_identity_scan >= cfg['身份复验间隔(秒)']):
+                self._last_identity_scan = now
+                # 慢扫最坏 235ms,同一拍绝不扫第二次:两个节流都记上,底下常规/强制
+                # 两条路径本拍自然都不会再扫。受击/超龄想要的那次慢扫已经发生,
+                # 悬着的 _force_rescan 按已消费处理(spec §3.5「命中即清」的同源语义)
+                self._last_anchor_scan = now
+                self._last_forced_rescan = now
+                self._force_rescan = False
+                hit = self._scan_region(frame, w, h, name, cfg, now)
+                if hit is not None:
+                    return hit, 'region'
+            # YOLO 关联级(spec §3.3):名字牌两条通道都没拿到,用同拍 player 框接管。
+            # 放在 OCR 之后——名字牌可读时身份持续刷新;放最前快通道永远轮不到,
+            # 身份就再也不校准。冷启动(_anchor is None)不进本块:外层 if 已保证。
+            if cfg.get('YOLO角色定位开关') and players:
+                # 门随「距上次真观测的时长」缩放(位移合理性,spec §3.3):相邻拍
+                # 收到 ~170px,路人挤不进来;久未观测再放回固定上限
+                gate_w, gate_h = farm_logic.player_gate_size(
+                    now - self._last_anchor_hit if self._last_anchor_hit else None)
+                gated = farm_logic.gate_player_boxes(players, center, gate_w, gate_h)
+                pbox = farm_logic.select_player_box(
+                    gated, center, identity_fresh, gate_w, gate_h)
+                if pbox is not None:
+                    px_, py_ = farm_logic.player_box_anchor(pbox)
+                    pseudo = anchor.Anchor(px_, py_, pbox.width)
+                    # 伪锚点 = 框中心换算到**名字牌**坐标系(实测框中心比名字牌高
+                    # 64px)。_anchor 存的一直是名字牌位置,下一拍的 OCR 小窗、模板
+                    # 窗、关联门都按它定心——换算成身体坐标会让整条阶梯错位
+                    # 64px。body_center() 再减 88 得到的落点,与名字牌拍完全一致,
+                    # 下游(接敌区/同层/朝向)全部不用改(spec §3.4)
+                    self._last_yolo_info = (len(gated),
+                                            abs(pseudo.x - center[0]))
+                    self._update_anchor(pseudo, now)
+                    return pseudo, 'yolo'
 
-        if farm_logic.should_rescan_anchor(now, self._last_anchor_scan, cfg['锚点刷新间隔(秒)']):
+        # 丢锚立即重扫(spec §3.5):三级全失 + (受击 或 锚点超龄) → 绕过常规 2s 节流。
+        # 丢锚常由击退位置跳变引起,常规节流恰好卡在最需要慢扫的时刻(基线慢扫占 2.2%)。
+        # _anchor_time is None(冷启动)不参战:无锚常态保持旧 2s 节奏,不许 0.5s 高频扫。
+        force = (cfg.get('丢锚立即重扫开关')
+                 and (self._force_rescan
+                      or (self._anchor_time is not None
+                          and now - self._anchor_time > cfg['锚点刷新间隔(秒)'])))
+        if farm_logic.should_rescan_anchor(now, self._last_anchor_scan,
+                                           cfg['锚点刷新间隔(秒)'], force=force,
+                                           last_forced=self._last_forced_rescan):
             self._last_anchor_scan = now
-            try:
-                hit = anchor.find_in_region(frame, name, region)
-            except Exception as e:
-                hit = None
-                self._log_detect_error(now, '慢通道锚点 OCR', e)
+            if force:
+                self._last_forced_rescan = now
+            self._force_rescan = False   # 消费:这次扫描就是它要的那次
+            hit = self._scan_region(frame, w, h, name, cfg, now)
             if hit is not None:
-                self._update_anchor(hit, now)
-                if (hit.text or '').strip() == name:
-                    self._capture_nametag_template(frame, hit)
                 return hit, 'region'
 
         if not farm_logic.anchor_expired(now, self._anchor_time, cfg['锚点保鲜(秒)']):
@@ -523,16 +645,21 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._debug_drawn = False
 
     def _draw_debug(self, cfg, body, zone, attack_area, mobs, mob_present, attack_present,
-                    search_region=None, feet_y=None, frame_w=None):
+                    aoe_ready=False, search_region=None, feet_y=None, frame_w=None):
         """画玩家框(绿)/接敌区框(细,蓝=无怪红=有怪)/攻击区框(粗,同色)/怪物框(黄)+脚底点(青)。
-        画法照抄 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算,
-        用独立 key(DEBUG_OVERLAY_KEY),与 WarriorDebugTask 的 overlay 互不影响。"""
+        群攻就绪时接敌区框加粗(1→3)且标签改 接敌区(群攻),给 E2E 判据 D 一个可视对象。
+        画法照抄已移除的 WarriorDebugTask._draw_debug 的 get_overlay_view().draw + frame_ratio 换算(见 git 历史),
+        用独立 key(DEBUG_OVERLAY_KEY)。"""
         overlay = self.get_overlay_view()
         if overlay is None:
             return
         pw, ph = cfg['玩家宽(像素)'], cfg['玩家高(像素)']
         zx0, zy0, zx1, zy1 = zone
         zone_color = ZONE_HOT_COLOR if mob_present else ZONE_IDLE_COLOR
+        # 群攻态在闭包外定死:paint 是 Qt 重绘时才执行的,那时 now 早过去了,
+        # 在闭包里现调 _aoe_ready 会画出与本拍决策不一致的框(spec §4)。
+        zone_pen_width = 3 if aoe_ready else 1
+        zone_label = '接敌区(群攻)' if aoe_ready else '接敌区'
         ax0, ay0, ax1, ay1 = attack_area
         attack_color = ZONE_HOT_COLOR if attack_present else ZONE_IDLE_COLOR
 
@@ -565,9 +692,9 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
             # 接敌区（细线）+ 攻击区（粗线）
             if c.get('显示攻击区', True):
-                painter.setPen(QPen(zone_color, 1))
+                painter.setPen(QPen(zone_color, zone_pen_width))
                 painter.drawRect(rect(zx0, zy0, zx1 - zx0, zy1 - zy0))
-                painter.drawText(rect(zx0, zy0 - 20, 100, 20), '接敌区')
+                painter.drawText(rect(zx0, zy0 - 20, 140, 20), zone_label)
 
                 painter.setPen(QPen(attack_color, 4))
                 painter.drawRect(rect(ax0, ay0, ax1 - ax0, ay1 - ay0))
@@ -600,7 +727,16 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
 
         完整检测拍与寻怪快速刷新拍共用。攻击键本身不在这里按——由 _do_attack
         按"_last_attack_present"以 攻击间隔 轻点。"""
-        anchor_hit, source = self._resolve_anchor(frame, now, cfg)
+        # 一拍一次推理(find_all),mob/player 从结果里纯过滤分流(spec §3.2):
+        # 找怪走 find_mobs(boxes=)(不含 player),锚点 YOLO 级走 players。模型类
+        # 别 1 = 任意玩家角色,身份判别完全在融合层(spec §3.3),这里只按名字筛。
+        try:
+            all_boxes = self.find_all(frame)
+        except Exception as e:
+            all_boxes = []
+            self._log_detect_error(now, 'YOLO 检测', e)
+        players = [b for b in all_boxes if getattr(b, 'name', None) == 'player']
+        anchor_hit, source = self._resolve_anchor(frame, now, cfg, players)
         body = anchor.body_center(anchor_hit, cfg['名字牌到身体偏移(像素)'])
         self._last_body_x = body[0]          # 走动确认要用
         if cfg.get('朝向观测开关'):
@@ -626,7 +762,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         attack_area = (zone if cfg.get('攻击区形状') == '群体(对称)'
                        else farm_logic.facing_half_zone(zone, body[0], self._facing))
         try:
-            mobs = self.find_mobs(frame)
+            mobs = self.find_mobs(frame, boxes=all_boxes)
         except Exception as e:
             mobs = []
             self._log_detect_error(now, 'YOLO 找怪', e)
@@ -668,6 +804,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         # (攻击间隔)本就大于宽限,现算会让攻击档整个塌成空闲档,负载回归。
         self._detect_attacking = farm_logic.mob_present_debounced(
             raw_attack, now, self._last_attack_seen, cfg['寻怪起步宽限(秒)'])
+        # 群攻计数:接敌区内怪数(原始值,不去抖,见 farm_logic.crowd_present)。
+        # 这一份 in_zone 同时喂给决策日志——同一个数算两遍是将来漂移的种子。
+        in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
+        self._last_zone_count = len(in_zone)
+        self._last_zone_count_time = now   # 新鲜度戳,群攻判据要用(见 _aoe_ready)
+        # 本拍会不会放群攻:转向门与 overlay 都用这一份,不各自再调一次 ——
+        # 判据必须与 _do_attack 那次求值同值,否则会出现「以为要群攻所以没转向、
+        # 结果群攻没发」的两头落空拍(spec §3.4)。
+        aoe_ready = self._aoe_ready(cfg, keys, now)
         # 取纠正前的信念:决策行的 朝向=A→B 因此能同时反映「纠正」与「转向」两种
         # 变化(A=纠正前、B=本拍结束),分歧行也据它判(spec §3.4)。
         facing_before, turn = belief_before_obs, None
@@ -687,7 +832,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 硬直抑制:受击后 硬直抑制窗(秒) 内不按转向键——击退硬直中 tap 会被
             # 游戏吞掉,但下面的盲写 _facing 照常执行,键没生效信念却已翻转 → 打空。
             # 抑制窗把转向与盲写整块跳过,等硬直过了再补转(见 farm_logic.stun_suppressed)。
+            # 群攻拍不转向:双向命中不需要朝向,转向在这一拍是纯支出 ——
+            # 一次方向键 tap + 下面那句 self._last_detect = 0.0 作废检测节拍。
+            # 只跳过「真发群攻」的这一拍;群攻冷却中的拍照常转向,否则冷却那
+            # 2 秒里怪全在背侧时,单体攻击区(面朝侧半区)是空的,角色站着挨打
+            # (spec §3.6)。_facing 在群攻拍完全不动,也就不会有「盲写了朝向、
+            # 下一拍单体按着错朝向打空」的新分叉。
             if (turn is not None
+                    and not aoe_ready
                     and farm_logic.turn_allowed(now, self._last_turn, cfg['转向冷却(秒)'])
                     and not farm_logic.stun_suppressed(
                         now, self._last_hit, cfg['硬直抑制窗(秒)'])
@@ -745,16 +897,18 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._draw_debug(cfg, body=body, zone=zone, attack_area=draw_area,
                              mobs=mobs, mob_present=mob_present,
                              attack_present=self._last_attack_present,
+                             aoe_ready=aoe_ready,
                              search_region=region, feet_y=anchor_hit.y, frame_w=w)
         else:
             self._clear_debug()
         if cfg.get('决策日志开关'):
-            self._log_decision(source, anchor_hit, body, zone, attack_area, centres, mobs,
+            self._log_decision(source, anchor_hit, body, zone, attack_area, centres,
+                               in_zone, mobs,
                                raw_present, mob_present, self._last_attack_present,
                                facing_before, turn, observed, obs_s, obs_flip)
 
-    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres, mobs,
-                      raw_present, mob_present, attack_present, facing_before, turn,
+    def _log_decision(self, source, anchor_hit, body, zone, attack_area, centres, in_zone,
+                      mobs, raw_present, mob_present, attack_present, facing_before, turn,
                       observed, obs_s, obs_flip):
         """逐拍决策留痕(默认关,见配置 决策日志开关)。
 
@@ -766,7 +920,6 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         同层脚/同层心/近怪 三项见 decision_log_line 的说明:它们是 Task 6
         改同层口径之前唯一的观测手段(spec §2.3)。
         """
-        in_zone = [x for x, y in centres if farm_logic.point_in_zone((x, y), zone)]
         left = sum(1 for x in in_zone if x < body[0])
         attack_in = [x for x, y in centres
                      if farm_logic.point_in_zone((x, y), attack_area)]
@@ -780,12 +933,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             near = (m.x + m.width / 2 - body[0],
                     (m.y + m.height) - anchor_hit.y,
                     (m.y + m.height / 2) - body[1])
+        yolo_cands, yolo_dist = self._last_yolo_info or (None, None)
         self.log_debug(decision_log_line(
             source, body[0], anchor_hit.y, centres, in_zone, left,
             same_feet, same_center, near,
             raw_present, mob_present, attack_in, attack_present,
             facing_before, self._facing, turn, self._seek_dir,
-            self._key_sendable(), observed, obs_s, obs_flip))
+            self._key_sendable(), observed, obs_s, obs_flip,
+            yolo_cands=yolo_cands, yolo_dist=yolo_dist))
         if observed is not None and facing_before in ('LEFT', 'RIGHT') \
                 and observed != facing_before:
             now = time.time()
@@ -840,6 +995,45 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_busy = now
         self._sitting = False
 
+    def _aoe_ready(self, cfg, keys, now):
+        """本拍要不要放群攻 —— 转向门(_detect_and_act)与攻击门(_do_attack)的
+        唯一判据,两处必须调同一个方法。
+
+        分头写就会出现「以为要群攻所以没转向、结果群攻没发」的两头落空拍:
+        那一拍既不转向也不输出,比不做这个功能还差(spec §3.4)。
+
+        同一 tick 内 run() 的顺序是 _detect_and_act → _do_attack,期间没有任何
+        代码写 _last_zone_count / _last_zone_count_time / _last_attack / _last_hit,
+        所以两次求值必然同值。改动这四个状态的写入位置前,先确认这个前提还成立。
+
+        **群攻不另设节拍,与单体共用 攻击间隔(秒)** —— 到点了看区内怪数决定按哪个键。
+        原设计给过一个独立的 群攻间隔(秒)=2.0,两条理由后来都不成立:
+        「群攻耗蓝是单体数倍」被判定不是问题;「独立节拍保护群攻施法窗」站不住 ——
+        单体自己就在 攻击间隔=0.7 下自断施法(实测施法时长 0.7-1.0s,见
+        2026-08-08-facing-observer-design.md:66),群攻并不特殊,而且代码里根本
+        没有施法窗模型(_busy_until 在那份 spec §6 被显式推迟,全库无此变量)。
+        独立节拍反倒引入相位差:两个节拍互质地各走各的,群攻会落在上次单体后
+        0.6s(< 攻击间隔 0.7)。共用一个节拍从构造上消掉这一整类问题。
+
+        **计数必须是本拍现测的**(_last_zone_count_time == now)。_do_attack 每个
+        10Hz 拍都跑,而计数只在检测拍写;没有这道门,怪清光后的非检测拍会拿着上一个
+        检测拍的旧计数放空群攻 —— 正是 farm_logic.crowd_present 说「不加保持窗」
+        要避免的那件事,逐拍求值会把它从后门放回来。转向门那次求值天然满足这道门
+        (它就在写完计数的几行之后),所以这道门只对 _do_attack 起作用。
+
+        群攻键留空 = 功能关闭(同 椅子键(可留空) 的约定);阈值在这里现读,
+        GUI 里改 群攻怪数阈值 立刻生效,不用等下一个检测拍。
+        """
+        return bool(
+            cfg['攻击模式'] == '检测'
+            and keys.get('群攻键(可留空)', '')
+            and self._last_zone_count_time == now
+            and farm_logic.crowd_present(self._last_zone_count,
+                                         cfg['群攻怪数阈值'])
+            and farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
+            and not farm_logic.stun_suppressed(
+                now, self._last_hit, cfg['硬直抑制窗(秒)']))
+
     def _do_attack(self, cfg, keys, now):
         """攻击:检测模式且最近一次检测拍「有向攻击区」内有怪 → 按 攻击间隔 轻点攻击键。
 
@@ -849,9 +1043,23 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         期间区内一直有怪却打不出输出;且挥砍中 body_x 跳变 >80px 的拍占 19%
         (其余状态仅 5%),说明挥砍时被击退非常频繁。轻点每次都有新的按下边沿,
         被击退后下一拍就能重新起手。
+        接敌区内怪数达到 群攻怪数阈值 时改按群攻键(前后双向命中),那一拍不按
+        单体攻击键;判据见 _aoe_ready。
         定频模式不在这里管,由 run() 按 攻击间隔 定时轻点。
         """
         if cfg['攻击模式'] != '检测':
+            return
+        # 群攻优先,与单体二选一:被围时一发前后双向命中,比「转向 + 单体」划算,
+        # 且不需要朝向(spec §3.9 行为矩阵)。
+        # _last_attack = now 不是「顺带推进单体节拍」而是这条路径**自己的**节拍推进:
+        # 群攻与单体共用同一条 攻击间隔 节拍,谁出手都由它记账(见 _aoe_ready)。
+        # 漏写这一行的后果不是「单体打断群攻」,而是群攻每个 10Hz 拍连发。
+        if self._aoe_ready(cfg, keys, now):
+            self.send_key(keys['群攻键(可留空)'])
+            self._last_attack = now
+            if cfg.get('决策日志开关'):
+                self.log_debug(aoe_log_line(self._last_zone_count,
+                                            cfg['群攻怪数阈值']))
             return
         if (self._last_attack_present
                 and farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
@@ -1058,6 +1266,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 它顺带提供的「打破目标侧锁定死锁」由朝向纠正正面接管(spec §3.3)。
             self._last_turn = 0.0
             self._last_hit = now
+            self._force_rescan = True   # 击退=位置跳变:下一检测拍绕过慢扫节流立刻重扫(spec §3.5)
         self._prev_hp = hp
 
         # 2-3.5. 喝血/喝蓝/药水耗尽保护。喝药开关关闭时整段跳过:

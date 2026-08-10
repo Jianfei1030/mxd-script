@@ -116,6 +116,17 @@ class TestFarmLogic(unittest.TestCase):
         self.assertFalse(fl.walk_confirmed(None, 1000.0, 1045.0, 40))
         self.assertFalse(fl.walk_confirmed('right', None, 1045.0, 40))
 
+    def test_crowd_present(self):
+        # 等于阈值算命中:阈值语义是「达到就用群攻」,与 should_attack 的 >= 同口径
+        self.assertTrue(fl.crowd_present(3, 3))
+        self.assertTrue(fl.crowd_present(4, 3))
+        self.assertFalse(fl.crowd_present(2, 3))
+        self.assertFalse(fl.crowd_present(0, 3))
+        # 阈值 <= 0 = 功能关闭,不许因为「0 只怪 >= 0」而恒真
+        self.assertFalse(fl.crowd_present(5, 0))
+        self.assertFalse(fl.crowd_present(5, -1))
+        self.assertFalse(fl.crowd_present(0, 0))
+
 
 class TestAttackZone(unittest.TestCase):
 
@@ -669,3 +680,198 @@ class TestFacingHalfZone(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+from types import SimpleNamespace
+
+
+def _pbox(cx, cy, w=60, h=120):
+    """player 框:按中心坐标构造(x/y 是左上角,与 Box 同形)。"""
+    return SimpleNamespace(x=cx - w / 2, y=cy - h / 2, width=w, height=h)
+
+
+class TestSelectPlayerBox(unittest.TestCase):
+    """YOLO 关联门(spec §3.3):恰 1 个门内候选 → 接受;多个 → 身份新鲜才取最近;
+    0 个/身份过期多候选 → None(宁可退级,不认错人)。"""
+
+    def test_single_candidate_in_gate_accepted_even_if_identity_stale(self):
+        # 恰 1 个在门内:接受,不看身份新鲜度(屏幕上只有一个玩家,几乎必是自己)
+        box = _pbox(1200, 900)
+        self.assertIs(fl.select_player_box([box], (1180, 880), False), box)
+
+    def test_candidate_outside_gate_rejected(self):
+        # 横向差 250 > 半宽 240 → 门外
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1450, 900)], (1200, 900), True))
+        # 纵向差 130 > 半高 120 → 门外
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1200, 1030)], (1200, 900), True))
+
+    def test_gate_boundary_inclusive(self):
+        # 恰压门边算门内 —— 与 point_in_zone 的边界口径一致
+        box = _pbox(1200 + fl.PLAYER_GATE_HALF_W, 900)
+        self.assertIs(fl.select_player_box([box], (1200, 900), False), box)
+
+    def test_multiple_fresh_identity_picks_nearest(self):
+        near, far = _pbox(1180, 880), _pbox(1350, 900)
+        self.assertIs(fl.select_player_box([far, near], (1200, 900), True), near)
+
+    def test_multiple_nearest_breaks_horizontal_tie_by_y(self):
+        # 横向同距、纵向不同(隔一层平台的路人):取合位移最近的那个
+        same_floor, other_floor = _pbox(1240, 900), _pbox(1160, 1000)
+        self.assertIs(fl.select_player_box(
+            [other_floor, same_floor], (1200, 900), True), same_floor)
+
+    def test_multiple_stale_identity_rejected(self):
+        # 路人贴身且身份过期 → 拒绝,退给慢扫/cached,不认错人
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1180, 880), _pbox(1350, 900)], (1200, 900), False))
+
+    def test_empty_players_rejected(self):
+        self.assertIsNone(fl.select_player_box([], (1200, 900), True))
+
+    def test_gate_player_boxes_returns_only_in_gate_as_list(self):
+        # 决策日志 yolo候选= 记门内候选数,不是全屏数——全屏数混着门外路人,
+        # 调关联门/查误认时会误导。返回列表(而非单个框),供 len() 计数
+        inside, outside = _pbox(1240, 900), _pbox(1500, 900)
+        self.assertEqual(fl.gate_player_boxes([inside, outside], (1200, 900)),
+                         [inside])
+
+
+class TestPlayerBoxCoordinateFrame(unittest.TestCase):
+    """关联门的坐标系(2026-08-09 实测根因)。
+
+    pred 来自 self._anchor,存的一直是**名字牌** y;YOLO 的 player 框中心却在
+    身体上。实测 403 组「相邻拍、角色几乎没动」的 yolo↔名字牌配对:框中心比名字牌
+    高 64px(p10 61 / p90 67,极稳)。两个坐标系不换算直接比,±120 的门实际变成
+    「上 56px / 下 184px」——自己一跳(>56px)就被踢出门(丢锚),同时下一层平台
+    的路人稳稳落在门内,成了唯一候选被无条件接受(认错人)。用户报的两个症状
+    「玩家目标完全丢失」「识别到其他玩家身上」是同一个偏置的两面。"""
+
+    def test_box_anchor_converts_box_center_to_nametag_frame(self):
+        self.assertEqual(fl.player_box_anchor(_pbox(1200, 900)),
+                         (1200, 900 + fl.PLAYER_BOX_TO_NAMETAG))
+
+    def test_own_box_stays_in_gate_when_character_jumps_up(self):
+        # 起跳:框中心跑到名字牌上方 180px(静止时本就高 64,再跳起 116)。
+        # 换算后 dy=-116 在门内 —— 不换算是 180>120,自己的框被踢出门
+        box = _pbox(1200, 900 - 180)
+        self.assertIs(fl.select_player_box([box], (1200, 900), False), box)
+
+    def test_lower_platform_stranger_is_out_of_gate(self):
+        # 路人在下一层:框中心比我的名字牌还低 100px(= 比我的身体低 164px)。
+        # 换算后 dy=164>120 出门 —— 不换算是 100<=120,它会成为唯一候选被接受
+        self.assertIsNone(fl.select_player_box(
+            [_pbox(1200, 1000)], (1200, 900), True))
+
+    def test_nearest_is_measured_in_nametag_frame(self):
+        # 两个候选:aligned 的框中心正好落在「我此刻应该在的身体高度」(名字牌上方
+        # 64),offset 只是横向近一点。必须选 aligned —— 按框中心裸比会选 offset
+        aligned = _pbox(1200, 900 - fl.PLAYER_BOX_TO_NAMETAG)
+        offset = _pbox(1240, 900)
+        self.assertIs(fl.select_player_box(
+            [offset, aligned], (1200, 900), True), aligned)
+
+
+class TestPlayerGateSize(unittest.TestCase):
+    """位移合理性判据(spec §3.3):门随「距上次锚点观测的时长」放大,上限仍是
+    PLAYER_GATE_HALF_W/H。固定 ±240 的门在 0.2s 的相邻拍上宽得离谱——角色 0.2s
+    最多走 60px,门却容得下 240px 外的路人;自己那拍没被检出时,路人就是唯一候选。
+
+    常数由 2026-08-09 实测定:关联距 p99 对 dt 线性拟合斜率 ~260px/s(取 300 放宽),
+    dt<0.15s 的 max=174px 是击退冲量(基础半宽 110 覆盖);
+    纵向相邻拍 |Δanchor_y| p50=2 / p99=62 / max=66(基础半高 70 覆盖)。"""
+
+    def test_fresh_observation_gives_tight_gate(self):
+        w, h = fl.player_gate_size(0.2)
+        self.assertEqual(w, fl.PLAYER_GATE_BASE_W + fl.PLAYER_GATE_SPEED_X * 0.2)
+        self.assertEqual(h, fl.PLAYER_GATE_BASE_H + fl.PLAYER_GATE_SPEED_Y * 0.2)
+        self.assertLess(w, fl.PLAYER_GATE_HALF_W)
+
+    def test_long_gap_saturates_at_fixed_gate(self):
+        # 久未观测:退回固定上限,不许无限放大(放大到全屏 = 谁都能认成自己)
+        self.assertEqual(fl.player_gate_size(5.0),
+                         (fl.PLAYER_GATE_HALF_W, fl.PLAYER_GATE_HALF_H))
+
+    def test_never_observed_uses_fixed_gate(self):
+        # dt=None(从未命中过)→ 没有可信的时间基准,退回固定门
+        self.assertEqual(fl.player_gate_size(None),
+                         (fl.PLAYER_GATE_HALF_W, fl.PLAYER_GATE_HALF_H))
+
+    def test_negative_dt_uses_fixed_gate(self):
+        # 时钟回拨等异常:退回固定门,绝不产生比基础值还小的门
+        self.assertEqual(fl.player_gate_size(-1.0),
+                         (fl.PLAYER_GATE_HALF_W, fl.PLAYER_GATE_HALF_H))
+
+    def test_stranger_200px_away_rejected_on_adjacent_beat(self):
+        # 上一拍刚观测到(0.2s 前),路人在 200px 外:固定 ±240 的门会把它当成唯一
+        # 候选无条件接受;位移门(110+300*0.2=170)把它挡在外面
+        gw, gh = fl.player_gate_size(0.2)
+        stranger = _pbox(1400, 900 - fl.PLAYER_BOX_TO_NAMETAG)
+        self.assertIsNone(fl.select_player_box(
+            [stranger], (1200, 900), False, gw, gh))
+
+    def test_own_box_still_accepted_on_adjacent_beat(self):
+        # 同一拍,自己走了 55px:必须照常接受(收紧不能把自己也关在门外)
+        gw, gh = fl.player_gate_size(0.2)
+        mine = _pbox(1255, 900 - fl.PLAYER_BOX_TO_NAMETAG)
+        self.assertIs(fl.select_player_box(
+            [mine], (1200, 900), False, gw, gh), mine)
+
+
+class TestTemplateHitPlausible(unittest.TestCase):
+    """模板分片命中的纵向合理性(spec §3.8,2026-08-09 实测棘轮漂移根因)。
+
+    模板通道把自己上一拍的输出当作下一拍的搜索中心,却既不验名(命中的
+    AnchorHit.text 是空串)、也没有任何合理性判据 —— 一次误匹配就会自我强化:
+    匹配落在搜索窗**顶边**时,回推的锚点 y = (cy - half_h) + 0 + th/2,
+    即每拍恒定上移 `half_h - th/2` = 80 - 36/2 = **62px**。日志逐拍实测正是
+    -62、-62、-62……一路飘到 y=19(屏幕顶),再也回不来。
+
+    真实纵向步长(只取 OCR 验名过的相邻拍,n=2164):p50=2 / p99=26 / p99.9=34,
+    >40px 的只有 1 拍(0.05%)。45px 的帽子挡得住 62px 的棘轮,又几乎不误伤;
+    真换平台时纵向位移更大,那一拍让给验名的 OCR 通道去重建,天经地义。"""
+
+    def test_small_vertical_move_accepted(self):
+        self.assertTrue(fl.template_hit_plausible(890, 887))
+
+    def test_ratchet_step_rejected(self):
+        # 实测棘轮步长 62px:必须挡下,否则下一拍窗口跟着上移,自我强化
+        self.assertFalse(fl.template_hit_plausible(887 - 62, 887))
+
+    def test_boundary_is_inclusive(self):
+        self.assertTrue(fl.template_hit_plausible(887 - fl.TEMPLATE_MAX_DY, 887))
+        self.assertFalse(fl.template_hit_plausible(887 - fl.TEMPLATE_MAX_DY - 1, 887))
+
+    def test_downward_jump_rejected_too(self):
+        # 方向无关:往下飘一样是不可信的纵向跳变
+        self.assertFalse(fl.template_hit_plausible(887 + 62, 887))
+
+    def test_no_previous_anchor_accepts(self):
+        # 没有先验 y 就没有判据,不许凭空拒绝(冷启动/刚复位)
+        self.assertTrue(fl.template_hit_plausible(500, None))
+
+
+class TestForcedRescan(unittest.TestCase):
+    """丢锚事件触发即时慢扫(spec §3.5):force 绕过常规节流,但自身限频 0.5s。"""
+
+    def test_force_bypasses_regular_throttle(self):
+        # 常规窗没到(0.6s < 2s),force 放行
+        self.assertTrue(fl.should_rescan_anchor(100.6, 100.0, 2, force=True))
+
+    def test_force_rate_limited_by_min_interval(self):
+        # 距上次强制扫描 0.3s < 0.5s → 不放行(慢扫最坏 235ms,不许打满主循环)
+        self.assertFalse(fl.should_rescan_anchor(
+            100.6, 100.0, 2, force=True, last_forced=100.3))
+        # 边界:恰好 0.5s → 放行(与 should_attack 同口径)
+        self.assertTrue(fl.should_rescan_anchor(
+            100.8, 100.0, 2, force=True, last_forced=100.3))
+
+    def test_no_force_keeps_old_behavior(self):
+        self.assertFalse(fl.should_rescan_anchor(101.0, 100.0, 2))
+        self.assertTrue(fl.should_rescan_anchor(102.0, 100.0, 2))
+
+    def test_regular_window_due_passes_even_when_forced_rate_limited(self):
+        # 常规窗已到点:force 的限频不该反过来卡住常规扫描
+        self.assertTrue(fl.should_rescan_anchor(
+            102.0, 100.0, 2, force=True, last_forced=101.9))
