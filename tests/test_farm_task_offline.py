@@ -3128,7 +3128,10 @@ class TestAoeReady(unittest.TestCase):
     def test_ready_when_count_reaches_threshold(self):
         task = _aoe_task()
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
-        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+        # 时点取 102.0 而非 100.0:跑完的 now=100.0 那一拍已真发群攻(_last_aoe=100.0),
+        # 同一时刻判「就绪」会被群攻间隔门拦住(0.0 >= 2.0 为假);等一个间隔再断言
+        # 「计数达阈值 → 就绪」,与 test_not_ready_within_interval 的 101.0/102.0 同口径。
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 102.0))
 
     def test_not_ready_below_threshold(self):
         task = _aoe_task()
@@ -3162,3 +3165,98 @@ class TestAoeReady(unittest.TestCase):
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
         task._last_hit = 99.9
         self.assertFalse(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+
+
+class TestAoeAttack(unittest.TestCase):
+    """群攻按键路径:优先、二选一、节拍、日志(spec §3.5/§3.7/§4)。"""
+
+    def test_fires_aoe_and_skips_single_attack(self):
+        """区内 3 只 → 按群攻键,且本拍不按单体攻击键(二选一)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('f', sent)
+        self.assertNotIn('shift', sent)
+
+    def test_single_attack_below_threshold(self):
+        """区内 2 只 → 原样走单体,不按群攻键。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+
+    def test_unbound_key_behaves_as_before(self):
+        """群攻键留空 → 与改动前逐键一致:照常单体输出,不出现任何新键。"""
+        task = make_task(**{'攻击模式': '检测', '走位开关': False})  # KEYS 无群攻键
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+        self.assertTrue(set(sent) <= set(KEYS.values()) - {''},
+                        f'出现了 KEYS 之外的按键: {sent}')
+
+    def test_aoe_pushes_single_attack_cadence(self):
+        """群攻发出时同时推进 _last_attack(spec §3.7)。
+
+        鉴别力在「实现漏写 self._last_attack = now」那一档:漏写时 _last_attack
+        停在 0.0 哨兵,第二拍 100.3 - 0.0 >= 攻击间隔(1.5) 会补发单体攻击键,
+        正好落在自己的群攻施法中间。注意本用例在**实现之前**是绿的
+        (那时第一拍走单体路径,同样把 _last_attack 推到 100.0)——它是回归守卫,
+        不是 red-first 用例。"""
+        task = _aoe_task()
+        mobs = [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)]
+        _run_with_mobs(task, mobs, now=100.0)
+        self.assertEqual(task._last_aoe, 100.0)     # 这一拍真发了群攻(这条实现前会红)
+        self.assertEqual(task._last_attack, 100.0)  # 单体节拍被一起推进
+        task.send_key.reset_mock()
+        _run_with_mobs(task, mobs, now=100.3)   # 未满 攻击间隔 1.5
+        self.assertNotIn('shift', _sent(task))
+
+    def test_single_resumes_while_aoe_on_cooldown(self):
+        """群攻节拍未到但攻击间隔已过 → 照常单体输出(不整段停手)。
+
+        攻击间隔显式设 0.7 而不是吃默认值:默认 1.5 与 群攻间隔 2.0 太近,
+        留给「群攻还冷着、单体已放行」的窗口只有 0.5 秒,用例会贴着边界走。"""
+        task = _aoe_task(**{'攻击间隔(秒)': 0.7})
+        mobs = [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)]
+        _run_with_mobs(task, mobs, now=100.0)   # 这一拍放群攻
+        task.send_key.reset_mock()
+        _run_with_mobs(task, mobs, now=101.0)   # 群攻间隔 2.0 未到,攻击间隔 0.7 已过
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+
+    def test_no_aoe_in_fixed_rate_mode(self):
+        """定频模式:照常按单体攻击键,不按群攻键。"""
+        task = _aoe_task(**{'攻击模式': '定频'})
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        sent = _sent(task)
+        self.assertIn('shift', sent)
+        self.assertNotIn('f', sent)
+
+    def test_no_aoe_while_stunned(self):
+        """硬直抑制窗内:群攻键和单体攻击键都不按。"""
+        task = _aoe_task(**{'硬直抑制窗(秒)': 0.8})
+        task._last_hit = 99.9
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)],
+                       now=100.0)
+        sent = _sent(task)
+        self.assertNotIn('f', sent)
+        self.assertNotIn('shift', sent)
+
+    def test_logs_aoe_line(self):
+        """决策日志开着时,每次真按下群攻键写一行 群攻 区内=N 阈值=M(N >= M)。"""
+        task = _aoe_task(**{'决策日志开关': True})
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        lines = [c.args[0] for c in task.log_debug.call_args_list if c.args]
+        aoe_lines = [ln for ln in lines if ln.startswith('群攻 ')]
+        self.assertEqual(len(aoe_lines), 1, f'期望一行群攻日志,实得 {aoe_lines}')
+        self.assertEqual(aoe_lines[0], '群攻 区内=3 阈值=3')
+
+    def test_no_log_when_switch_off(self):
+        """决策日志关着 → 不写群攻行(10Hz 下不限频会刷爆日志)。"""
+        task = _aoe_task()
+        _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
+        lines = [c.args[0] for c in task.log_debug.call_args_list if c.args]
+        self.assertEqual([ln for ln in lines if ln.startswith('群攻 ')], [])

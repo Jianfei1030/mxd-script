@@ -310,7 +310,10 @@ class TestAoeReady(unittest.TestCase):
     def test_ready_when_count_reaches_threshold(self):
         task = _aoe_task()
         _run_with_mobs(task, [_aoe_mob(1030), _aoe_mob(1230), _aoe_mob(1530)])
-        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 100.0))
+        # 时点取 102.0 而非 100.0:Task 4 落地后,跑完的 now=100.0 那一拍已真发群攻
+        # (_last_aoe=100.0),同一时刻判「就绪」会被群攻间隔门拦住;等一个间隔再断言。
+        # (计划原写 100.0——那是 Task 3 阶段 _do_attack 还没群攻分支时才成立的前提。)
+        self.assertTrue(task._aoe_ready(task.config, dict(AOE_KEYS), 102.0))
 
     def test_not_ready_below_threshold(self):
         task = _aoe_task()
@@ -617,7 +620,14 @@ def aoe_log_line(count, threshold):
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_task_offline -v
 ```
 
-Expected: PASS —— `TestAoeAttack` 9 个用例全绿，既有用例无回归。
+Expected: PASS —— `TestAoeAttack` 9 个用例全绿。
+
+**一处既有用例需同步改时点**（本计划原先漏算的跨任务交互）：Task 3 的
+`test_ready_when_count_reaches_threshold` 隐含「跑完这一拍 `_last_aoe` 仍是 0.0 哨兵」，
+而 Task 4 让 `_do_attack` 在 `now=100.0` 那一拍真发了群攻、把 `_last_aoe` 推成 100.0，
+于是 `_aoe_ready(..., 100.0)` 被群攻间隔门拦住返回 False。这是间隔门的正确行为，不是实现
+bug——把该用例断言的 `now` 从 100.0 改成 102.0（与 `test_not_ready_within_interval` 的
+101.0/102.0 同口径），实现不动。其余既有用例无回归。
 
 - [ ] **Step 5: 提交**
 

@@ -157,6 +157,16 @@ def template_captured_line(direction, min_dx):
     return f'朝向模板已采集 方向={direction} (寻怪走动确认 ≥{min_dx}px)'
 
 
+def aoe_log_line(count, threshold):
+    """群攻触发行 —— 格式唯一事实源(同 decision_log_line)。
+
+    判据 A 直接 grep 「群攻」数行数,并核对每行的 区内 >= 阈值。
+    不塞进决策行是有意的:decision_log_line 被两个 analyze 脚本的正则和一批
+    绑定测试吃着,为一个偶发事件改它的格式不划算(spec §4)。
+    """
+    return f'群攻 区内={count} 阈值={threshold}'
+
+
 DEBUG_OVERLAY_KEY = 'maple_farm_debug'   # 调试 overlay 的画笔 key,与 WarriorDebugTask 的 'warrior_debug' 互不干扰
 PLAYER_COLOR = QColor(0, 255, 0)
 ZONE_IDLE_COLOR = QColor(0, 128, 255)
@@ -983,9 +993,26 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         期间区内一直有怪却打不出输出;且挥砍中 body_x 跳变 >80px 的拍占 19%
         (其余状态仅 5%),说明挥砍时被击退非常频繁。轻点每次都有新的按下边沿,
         被击退后下一拍就能重新起手。
+        接敌区内怪数达到 群攻怪数阈值 时改按群攻键(前后双向命中),那一拍不按
+        单体攻击键;判据见 _aoe_ready。
         定频模式不在这里管,由 run() 按 攻击间隔 定时轻点。
         """
         if cfg['攻击模式'] != '检测':
+            return
+        # 群攻优先,与单体二选一:被围时一发前后双向命中,比「转向 + 单体」划算,
+        # 且不需要朝向(spec §3.9 行为矩阵)。
+        # 同时推进 _last_attack —— 群攻施法约 1 秒,攻击间隔(秒) 若被调到比它短
+        # (默认 1.5 不会,实机常调到 0.7),不推的话单体攻击键会落在自己的群攻
+        # 施法中间把它打断,和 2026-08-07「长按连挥 → 改回轻点」修的是同一类
+        # 按键边沿问题(spec §3.7)。默认配置下这一行是惰性的,但它兜住的是
+        # 用户把节拍调快之后的情形,不该等出问题再补。
+        if self._aoe_ready(cfg, keys, now):
+            self.send_key(keys['群攻键(可留空)'])
+            self._last_aoe = now
+            self._last_attack = now
+            if cfg.get('决策日志开关'):
+                self.log_debug(aoe_log_line(self._last_zone_count,
+                                            cfg['群攻怪数阈值']))
             return
         if (self._last_attack_present
                 and farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
