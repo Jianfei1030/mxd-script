@@ -2813,7 +2813,14 @@ class TestDecisionLineYoloFields(unittest.TestCase):
 
     def test_fields_appended_at_line_end(self):
         # 追加在行尾:analyze_anchor/analyze_seek 的前缀正则不受影响
-        self.assertTrue(self._line().endswith('关联距=-'))
+        self.assertTrue(self._line().endswith('关联距=- yolo全屏=-'))
+
+    def test_full_count_rendered_when_present(self):
+        self.assertIn('yolo候选=0 关联距=- yolo全屏=1',
+                      self._line(yolo_cands=0, yolo_full=1))
+
+    def test_full_count_dash_when_absent(self):
+        self.assertIn('yolo全屏=-', self._line(yolo_cands=2, yolo_dist=35.4))
 
 
 class TestFindMobsBoxesParam(unittest.TestCase):
@@ -2956,6 +2963,39 @@ class TestYoloAnchorFusion(unittest.TestCase):
         # 同一对象:分流必须吃 find_all 的结果,不许自己再推理
         self.assertIs(kwargs.get('boxes'), task.find_all.return_value)
         self.assertTrue(any('怪=1' in l for l in lines), lines)
+
+    def test_rejected_beat_records_full_screen_count(self):
+        # 多候选 + 身份过期 → 拒裁退 cached,但观测必须留痕:
+        # yolo候选=2(门内) yolo全屏=2,不再是 '-/-' 的盲区(spec §3.3)
+        lines = self._beat(self._task(
+            [self._player(1180, 880), self._player(1300, 880)],
+            identity_age=30.0))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=2 关联距=- yolo全屏=2' in l
+                            for l in lines), lines)
+
+    def test_empty_screen_records_zero_not_dash(self):
+        # YOLO 跑了但全屏 0 个 player 框 → 候选=0 全屏=0(可达状态:
+        # 「推理了没框」与「YOLO 级未到达」必须分得开,这正是排查被挡两次的盲区)
+        lines = self._beat(self._task([]))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=0 关联距=- yolo全屏=0' in l
+                            for l in lines), lines)
+
+    def test_window_beat_yolo_fields_all_dash(self):
+        # YOLO 级未到达(快窗命中)→ 三个字段全 '-'
+        task = self._task([self._player(1180, 880)])
+        hit = AnchorHit(1200.0, 900.0, 130, 'Yufeng咕咕')
+        frame = _synthetic_frame()
+        with patch.object(anchor, 'find_in_window', return_value=hit), \
+                patch.object(anchor, 'find_in_region', return_value=None), \
+                patch('time.time', return_value=100.0):
+            task._detect_and_act(frame, 100.0, task.config, task.get_global_config())
+        lines = [c.args[0] for c in task.log_debug.call_args_list
+                 if '决策 ' in c.args[0]]
+        self.assertTrue(any('src=window' in l for l in lines), lines)
+        self.assertTrue(all('yolo候选=- 关联距=- yolo全屏=-' in l
+                            for l in lines), lines)
 
 
 class TestTemplateDriftGuard(unittest.TestCase):

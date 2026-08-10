@@ -109,7 +109,8 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
                       same_feet, same_center, near,
                       raw_present, mob_present, attack_in, attack_present,
                       facing_before, facing_now, turn, seek_dir, key_sendable,
-                      observed, obs_s, obs_flip, yolo_cands=None, yolo_dist=None):
+                      observed, obs_s, obs_flip, yolo_cands=None, yolo_dist=None,
+                      yolo_full=None):
     """决策日志行(不含时间戳前缀)—— 格式的唯一事实源。
 
     scripts/analyze_facing.py 与 scripts/analyze_seek.py 的正则按它解析,
@@ -127,7 +128,10 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
     yolo候选 / 关联距 是 YOLO 关联级(spec §3.6)的观测:候选 = **门内**候选数
     (gate_player_boxes 口径——全屏数混着门外路人,调关联门/查误认会误导),
     关联距 = 命中框中心与外推位置的水平距离。
-    非 yolo 来源的拍两项都写 '-',绝不写 0。追加在行尾:analyze 脚本前缀匹配。
+    yolo全屏 = 同拍全屏 player 框数(含门外):候选=0 全屏≥1 = 检出被门拒,
+    候选=0 全屏=0 = YOLO 跑了但全屏无 player 框,全=- = YOLO 级未到达
+    (模板/快窗命中)或定频无推理(2026-08-10 spec §3.3)。
+    非 yolo 来源的拍这些字段都写 '-',绝不写 0。追加在行尾:analyze 脚本前缀匹配。
     """
     near_s = ('近怪dx=- dy脚=- dy心=-' if near is None else
               f'近怪dx={near[0]:+.0f} dy脚={near[1]:+.0f} dy心={near[2]:+.0f}')
@@ -142,7 +146,8 @@ def decision_log_line(source, body_x, anchor_y, centres, in_zone, left,
             f'实测={_FACING_SHORT.get(observed, "?")} '
             f'分值={max(obs_s, obs_flip):.2f}/{abs(obs_s - obs_flip):.2f}'
             f' yolo候选={yolo_cands if yolo_cands is not None else "-"}'
-            f' 关联距={f"{yolo_dist:.0f}" if yolo_dist is not None else "-"}')
+            f' 关联距={f"{yolo_dist:.0f}" if yolo_dist is not None else "-"}'
+            f' yolo全屏={yolo_full if yolo_full is not None else "-"}')
 
 
 def divergence_log_line(facing_before, observed, obs_s, obs_flip,
@@ -295,7 +300,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._facing_template_dir = None  # 模板自身朝向 'LEFT'/'RIGHT';None=未知
         self._debug_drawn = False      # 调试 overlay 当前是否已画(True 时开关关掉/模式切换才需要真的调 clear_draw)
         self._last_identity_hit = 0.0  # 上次名字牌真实命中(template/window/region)时刻;0.0=从未。多候选裁决只在保鲜窗内放行;yolo 不刷新它(它不验名,spec §3.4)
-        self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联水平距);None=本拍非 yolo 来源(决策日志用)
+        self._last_yolo_info = None    # 本拍 YOLO 关联观测 (门内候选数, 关联距 or None, 全屏框数);None=本拍 YOLO 级未到达(决策日志用)
         self._force_rescan = False        # 受击置位:下一检测拍绕过慢扫节流(spec §3.5);任一通道命中即清(跳变已消化)
         self._last_forced_rescan = 0.0    # 上次强制慢扫时刻;0.0 哨兵=从未,配合 FORCED_RESCAN_MIN_INTERVAL 限频
         self._last_identity_scan = 0.0    # 上次身份复验慢扫时刻;0.0 哨兵=从未,配合「身份复验间隔(秒)」限频
@@ -460,7 +465,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._capture_nametag_template(frame, hit)
         return hit
 
-    def _resolve_anchor(self, frame, now, cfg, players=()):
+    def _resolve_anchor(self, frame, now, cfg, players=None):
         """按阶梯拿角色锚点,返回 (Anchor, 来源标签)。任何一级都不停任务。
 
         模板分片快通道(白字二值化模板竖切分片匹配 + 暗底验证,零 OCR 开销;
@@ -476,9 +481,12 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         锚点"处理,绝不允许异常冒泡出去——冒泡到 run() 外层会被框架 TaskExecutor 的
         通用 except 抓住并直接 disable() 整个任务,连保命/喝药都会停,违反
         "无怪只停手,任务继续跑"的契约。
-        players 为空(旧 3 参调用/定频模式)时 YOLO 级短路,行为完全退回旧阶梯。
+        players=None(旧 3 参调用/定频模式,本拍无推理)时 YOLO 级短路、行为完全退回
+        旧阶梯;players=[](推理了但全屏无 player 框)正常走完 YOLO 级并记 yolo全屏=0。
+        用 None/[] 区分「没推理」与「推理了没框」——全屏=0 要可达,否则「YOLO 到底
+        有没有看见人」仍是盲区。生产唯一调用点恒传真实 list,None 默认值只服务旧测试调用。
         """
-        self._last_yolo_info = None   # 本拍观测先清:非 yolo 来源时决策日志输出 '-'
+        self._last_yolo_info = None   # 本拍观测先清:(门内候选数, 关联距 or None, 全屏框数);None=本拍 YOLO 级未到达
         h, w = frame.shape[:2]
         centre = anchor.Anchor(w / 2.0, h / 2.0, 0)
         name = (cfg['角色名'] or '').strip()
@@ -555,12 +563,15 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # YOLO 关联级(spec §3.3):名字牌两条通道都没拿到,用同拍 player 框接管。
             # 放在 OCR 之后——名字牌可读时身份持续刷新;放最前快通道永远轮不到,
             # 身份就再也不校准。冷启动(_anchor is None)不进本块:外层 if 已保证。
-            if cfg.get('YOLO角色定位开关') and players:
+            if cfg.get('YOLO角色定位开关') and players is not None:
                 # 门随「距上次真观测的时长」缩放(位移合理性,spec §3.3):相邻拍
                 # 收到 ~170px,路人挤不进来;久未观测再放回固定上限
                 gate_w, gate_h = farm_logic.player_gate_size(
                     now - self._last_anchor_hit if self._last_anchor_hit else None)
                 gated = farm_logic.gate_player_boxes(players, center, gate_w, gate_h)
+                # 到达即留痕(spec §3.3):拒绝拍记门内/全屏(全屏含 0——
+                # 「没检出 vs 未到达」不再盲区),接受拍在下面用真实关联距覆盖
+                self._last_yolo_info = (len(gated), None, len(players))
                 pbox = farm_logic.select_player_box(
                     gated, center, identity_fresh, gate_w, gate_h)
                 if pbox is not None:
@@ -572,7 +583,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     # 64px。body_center() 再减 88 得到的落点,与名字牌拍完全一致,
                     # 下游(接敌区/同层/朝向)全部不用改(spec §3.4)
                     self._last_yolo_info = (len(gated),
-                                            abs(pseudo.x - center[0]))
+                                            abs(pseudo.x - center[0]),
+                                            len(players))
                     self._update_anchor(pseudo, now)
                     return pseudo, 'yolo'
 
@@ -938,14 +950,14 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             near = (m.x + m.width / 2 - body[0],
                     (m.y + m.height) - anchor_hit.y,
                     (m.y + m.height / 2) - body[1])
-        yolo_cands, yolo_dist = self._last_yolo_info or (None, None)
+        yolo_cands, yolo_dist, yolo_full = self._last_yolo_info or (None, None, None)
         self.log_debug(decision_log_line(
             source, body[0], anchor_hit.y, centres, in_zone, left,
             same_feet, same_center, near,
             raw_present, mob_present, attack_in, attack_present,
             facing_before, self._facing, turn, self._seek_dir,
             self._key_sendable(), observed, obs_s, obs_flip,
-            yolo_cands=yolo_cands, yolo_dist=yolo_dist))
+            yolo_cands=yolo_cands, yolo_dist=yolo_dist, yolo_full=yolo_full))
         if observed is not None and facing_before in ('LEFT', 'RIGHT') \
                 and observed != facing_before:
             now = time.time()
