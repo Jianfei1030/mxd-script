@@ -393,8 +393,12 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_com
 
 ### 11.7 当前基线（2026-08-07 / 2026-08-10 更新）
 
-- 单测：全模块全绿（2026-08-10 实测 518 用例 → 移除 WarriorDebugTask 相关 3 个测试模块后约 470+ 用例），
-  显式 skip（存档帧缺失、OCR 限制、val 数据缺失）
+- 单测：**523 用例 / 8 显式 skip / 1 红**（2026-08-10 群攻合入后实测）。
+  红的是 `test_anchor_offline.TestAnchorOnRealFrames.test_b_anchor_y_in_expected_band`
+  （`combat_mayidong2_frame_0018.png` 锚点 `y=657` 越出判据 B 的期望带 `[700, 950]`）——
+  **长期存在的既有失败**，与群攻无关，`651e155` 与合并前的 master 上复跑同样红，待处理。
+  skip 的原因是存档帧缺失 / OCR 限制 / val 数据缺失。
+  （此条原写「全模块全绿」，与实测不符，2026-08-10 改正。）
 - 编译：src/ scripts/ tests/ ok/ 全源码 + 入口脚本 py_compile 通过
 - E2E（2026-08-07 本机验收）：
   - **通过**：`main_debug.py` 启动 GUI 成功，主窗口「OK-MXD v0.1.0 开发工具」完整渲染
@@ -421,4 +425,4 @@ spec `2026-08-09-aoe-attack-design.md` §5.3 定了 A/B/C/D 四条门槛。**实
 
 离线证据（这部分是完整的）：与 `origin/master`（移除 `WarriorDebugTask` 的两个提交）合并后全量 **523 用例、8 skip**，仅 `test_anchor_offline.test_b_anchor_y_in_expected_band` 红；`py_compile` 全量通过。
 
-> 该红**不是群攻引入的**：切到 `master`（合并前）单独跑 `tests.test_anchor_offline` 同样红，在本分支起点 `651e155` 上复跑也同样红。症状是 `combat_mayidong2_frame_0018.png` 锚点 `y=657` 落在判据 B 的期望带 `[700, 950]` 之外。上面 11.7 开头那条「单测：全模块全绿」与此矛盾，以本条实测为准。
+> 该红**不是群攻引入的**：切到 `master`（合并前）单独跑 `tests.test_anchor_offline` 同样红，在本分支起点 `651e155` 上复跑也同样红。详见本节开头的单测基线条目。
