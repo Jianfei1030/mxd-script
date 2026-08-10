@@ -167,7 +167,7 @@ Expected: PASS(4 个用例)
         self.assertEqual(window.call_args[0][2], (1280 + 500.0, 800.0))
 ```
 
-- [ ] **Step 6: 跑这两个新测试确认失败**
+- [ ] **Step 6: 跑这四个新测试确认失败**
 
 Run: `python -m pytest tests/test_farm_task_offline.py::TestAnchorExtrapolation -v`
 Expected: 新用例 FAIL(pred 仍按旧逻辑 1280+75*3=1505 / 1280+2000 钳到 2560),
@@ -336,14 +336,13 @@ docstring 中「players 为空(旧 3 参调用/定频模式)时 YOLO 级短路�
 
 ```python
             if cfg.get('YOLO角色定位开关') and players is not None:
-                # 到达即留痕(spec §3.3):全屏数含 0——「没检出 vs 未到达」不再盲区;
-                # 门内数算出后更新,接受拍再用真实关联距覆盖
-                self._last_yolo_info = (0, None, len(players))
                 # 门随「距上次真观测的时长」缩放(位移合理性,spec §3.3):相邻拍
                 # 收到 ~170px,路人挤不进来;久未观测再放回固定上限
                 gate_w, gate_h = farm_logic.player_gate_size(
                     now - self._last_anchor_hit if self._last_anchor_hit else None)
                 gated = farm_logic.gate_player_boxes(players, center, gate_w, gate_h)
+                # 到达即留痕(spec §3.3):拒绝拍记门内/全屏(全屏含 0——
+                # 「没检出 vs 未到达」不再盲区),接受拍在下面用真实关联距覆盖
                 self._last_yolo_info = (len(gated), None, len(players))
                 pbox = farm_logic.select_player_box(
                     gated, center, identity_fresh, gate_w, gate_h)
@@ -387,7 +386,7 @@ git commit -m "feat: YOLO 拒绝拍留痕 yolo全屏=——区分没检出/检�
 **Files:**
 - Modify: `src/task/farm_logic.py`(新常量 + `select_lost_unique_box`)
 - Modify: `src/task/MapleFarmTask.py:67` 附近(配置默认值)、`:219` 附近(配置说明)、`:536-558`(YOLO 级内接线)
-- Test: `tests/test_farm_logic.py`(新 TestSelectLostUniqueBox)、`tests/test_farm_task_offline.py`(TestYoloAnchorFusion 增 3)
+- Test: `tests/test_farm_logic.py`(新 TestSelectLostUniqueBox)、`tests/test_farm_task_offline.py`(TestYoloAnchorFusion 增 4)
 
 **Interfaces:**
 - Consumes: `farm_logic.player_box_anchor`(既有);Task 2 的 `_last_yolo_info` 三元素结构。
@@ -497,10 +496,20 @@ Expected: PASS(6 个用例)
         self.assertTrue(any('body_x=2000' in l for l in lines), lines)
         # 接管不刷身份时间戳:认错路人靠复验慢扫兜底,整条风险章都押在这行上
         self.assertEqual(task._last_identity_hit, 70.0)
-        # 已知且接受:接管瞬移会被 anchor_vx_update 学习(dx=800/dt=3=267px/s,
-        # 在 600 跳变门内)——由外推 ±500 封顶与反向防护兜底(spec §5 已记),
-        # 这条断言锁的是「我们知道它在学」,不是「它不该学」
-        self.assertAlmostEqual(task._anchor_vx, 0.7 * 800 / 3, places=5)
+        # 本剧本接管瞬移不会污染实测速度:dt=3s > ANCHOR_VX_MAX_AGE(2s)先挡,
+        # dy=|944-900|=44 ≥ platform_dy(30)再挡(接管本身就常伴换层)
+        self.assertEqual(task._anchor_vx, 0.0)
+
+    def test_lost_unique_box_takeover_vx_learning_is_known_and_capped(self):
+        # 通性锁定(spec §5):age 落在 1.0~2.0s 且同层(dy<30,正是横向逃逸
+        # 主场景)时,两道门都拦不住,接管瞬移会被低通学进去
+        # (dx=600/dt=1.5=400px/s ≤ 600 跳变门 → 0.7*400=280)。
+        # 不加门:外推 ±500 封顶 + 同向防护兜底。这条锁「知道它在学、学多少」
+        task = self._task([self._player(1800, 836)], identity_age=30.0)
+        task._anchor_time = 98.5        # 丢锚 1.5s(now=100);pseudo y=836+64=900=锚点 y,dy=0
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        self.assertAlmostEqual(task._anchor_vx, 0.7 * 600 / 1.5, places=5)
 
     def test_lost_unique_box_respects_switch_off(self):
         task = self._task([self._player(2000, 880)], identity_age=30.0,
@@ -588,3 +597,8 @@ git commit -m "feat: 丢锚唯一框接管——全屏唯一玩家框+同层直�
   `test_gate_narrows_with_fresh_observation`/`test_gate_widens_after_long_loss`;
   ⑤`extrapolate_vx` 补 None 防御与显式测试;⑥常量名统一
   LOST_UNIQUE_MIN_AGE/LOST_UNIQUE_GATE_Y(spec §4 已回改)。
+- 评审修订第二轮:⑦接管 vx 断言修正——age=3s 剧本被 dt>2s 与 dy≥30 两道门
+  挡住(_anchor_vx=0.0,不是 0.7*267),另加 age=1.5s 同层剧本锁定通性
+  「1.0~2.0s 且 dy<30 时确实会学(280px/s),由封顶+同向防护兜底」;
+  ⑧YOLO 级留痕只留 gated 算出后一处(先行赋值是纯覆盖,死代码);
+  ⑨Step 6 标题计数随用例数改四。
