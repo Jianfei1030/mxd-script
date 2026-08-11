@@ -212,6 +212,8 @@ class DotTracker:
             pos = None
             status = 'lost'
         # 指令-位移一致性:持续按键期间位移方向/量级不符 → mismatch(内部计时窗口)
+        # 触发后重置 anchor = 新观察窗:防 RECOVER 恢复回 FOLLOW 后立刻再触发形成抖动循环;
+        # suspect/lost 清 anchor = 不可信位置不参与位移计量(spec §2.3,评审裁决 B,勿改)
         if cmd_dir in ('left', 'right') and status == 'ok' and self.pos is not None:
             if self._cmd_anchor is None:
                 self._cmd_anchor = (self.pos, now)
