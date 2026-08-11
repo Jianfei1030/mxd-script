@@ -37,7 +37,7 @@ openvino==2026.2.1              # 模型推理加速
 ### 0.2 运行约束(游戏相关,不可违背)
 
 - 游戏必须是**冒险岛怀旧服**(进程 `Maplestory_Classic.exe` / 窗口类 `UnityWndClass`)
-- 分辨率必须是 **2560x1440**(代码硬校验,不符自动停)
+- 分辨率校准值 **2560x1440**(不符只提醒、不自动停;但 ROI 全偏)
 - **必须以管理员身份运行** GUI(按键走 PyDirect 驱动级,非管理员被 BlackCipher 拦截)
 - 挂机期间**游戏窗口保持前台**,不要动键盘鼠标;不要拖动/缩放游戏 UI
 - **急停快捷键:F9**(全局)
@@ -301,7 +301,7 @@ yolo train data=dataset/mobs.yaml model=yolov8n.pt imgsz=1280 epochs=50
 ### 3.6 挂机注意事项
 
 - 挂机期间**游戏窗口保持前台**,别碰键盘鼠标(F9 可急停)
-- 分辨率/UI 布局不能变(变了任务自动停)
+- 分辨率/UI 布局不能变(变了只提醒、不自动停,但 ROI 会偏)
 - 检测模式不攻击 → 检查「攻击区中心」是否标定到站桩点
 - 按键无效 → 确认管理员运行 + 游戏前台 + 按键与游戏内一致
 
@@ -318,7 +318,7 @@ yolo train data=dataset/mobs.yaml model=yolov8n.pt imgsz=1280 epochs=50
 | 模型误检(框背景) | 补标该背景帧为空样本;或 `--conf` 调高 |
 | 训练后 best.pt 在哪 | `dataset/runs/<运行名>/weights/best.pt`(autolabel 默认读 `dataset/runs/mob_bootstrap/weights/best.pt`) |
 | 实机不攻击 | 攻击键与游戏内不一致 / 检测模式攻击区未标定 / 未管理员运行 |
-| 自动停了 | 看日志(`logs/ok-mxd.log`):死亡/低血/药尽/静止/经验停滞/分辨率不符 |
+| 自动停了 | 看日志(`logs/ok-mxd.log`):死亡/低血/药尽/静止/经验停滞;分辨率不符不自动停,只提醒 |
 | GUI 启动清空 screenshots | 框架行为;恢复:`git checkout -- screenshots/test_frames/` |
 
 ---

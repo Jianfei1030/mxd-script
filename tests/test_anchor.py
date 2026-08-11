@@ -105,6 +105,22 @@ class TestFindInWindow(unittest.TestCase):
         got = anchor.find_in_window(self.frame, NAME, (30, 20), 240, 80, ocr_fn=fn)
         self.assertIsNotNone(got)
 
+    def test_clamps_window_to_region(self):
+        """快通道窗口超出蓝框(锚点搜索区)的部分必须被裁掉:窗口本为
+        (1060,800)-(1540,960),蓝框 (1200,850)-(1400,950) 裁后
+        局部框中心 (75, 37.5) 平移到 (1275, 887.5)。"""
+        fn = fake_ocr([[NAME]])
+        got = anchor.find_in_window(self.frame, NAME, (1300, 880), 240, 80,
+                                    ocr_fn=fn, clamp_region=(1200, 850, 1400, 960))
+        self.assertEqual((got.x, got.y), (1275.0, 887.5))
+
+    def test_no_intersection_with_region_returns_none(self):
+        """蓝框与窗口完全不相交(角色已跑出搜索区)→ 不快扫,直接无命中。"""
+        fn = fake_ocr([[NAME]])
+        got = anchor.find_in_window(self.frame, NAME, (1300, 880), 240, 80,
+                                    ocr_fn=fn, clamp_region=(2000, 1000, 2560, 1200))
+        self.assertIsNone(got)
+
 
 class TestFindInRegion(unittest.TestCase):
 
@@ -188,6 +204,143 @@ class TestEnhanceForOcr(unittest.TestCase):
             self.assertLess(crop[880 - 800 + 10, 1200 - 1060 + 10].mean(), 30)
         finally:
             anchor.OCR_PREPROCESS_ENABLED = original
+
+
+class TestHasDarkBackground(unittest.TestCase):
+    """模板匹配命中后验证暗底:名字牌有暗色半透明底框(暗底 ~40%),
+    云/天空是纯亮色(无暗底)。此验证把误中的云/天空拒绝掉。"""
+
+    def test_nameplate_with_dark_bg_passes(self):
+        """命中点周围大片暗底(模拟名字牌暗色底框)→ 通过。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)     # 全黑帧
+        hit = anchor.AnchorHit(1280.0, 880.0, 130, '')
+        self.assertTrue(anchor.has_dark_background(frame, hit))
+
+    def test_bright_sky_without_dark_bg_rejected(self):
+        """命中点周围纯亮(模拟云/天空)→ 拒绝。"""
+        frame = np.full((1440, 2560, 3), 255, np.uint8)  # 全白帧
+        hit = anchor.AnchorHit(1280.0, 880.0, 130, '')
+        self.assertFalse(anchor.has_dark_background(frame, hit))
+
+    def test_mixed_bg_below_ratio_rejected(self):
+        """暗底占比低于阈值(30%)→ 拒绝。验证区域 240x70=16800 像素,
+        只涂 20% 暗底,应低于 DARK_BG_MIN_RATIO。"""
+        frame = np.full((1440, 2560, 3), 255, np.uint8)
+        # 在命中点周围涂一小块暗色(仅约 20% 面积)
+        for y in range(870, 885):
+            for x in range(1240, 1280):
+                frame[y, x] = 0
+        hit = anchor.AnchorHit(1280.0, 880.0, 130, '')
+        self.assertFalse(anchor.has_dark_background(frame, hit))
+
+    def test_hit_near_edge_clamps_roi_without_error(self):
+        """命中点贴边:ROI 被裁到帧内仍非空,不抛异常,按帧内内容判断。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+        hit = anchor.AnchorHit(10.0, 880.0, 130, '')  # 贴近左边界
+        self.assertTrue(anchor.has_dark_background(frame, hit))
+
+
+class TestSplitMatchVerifyDark(unittest.TestCase):
+    """split_match(verify_dark=True):命中后验证暗底,云/天空误匹配被拒绝。"""
+
+    def _make_template(self, text_w=120, text_h=24):
+        """白字二值化模板:黑底上的白色横条,宽 120 高 24。"""
+        tmpl = np.zeros((text_h + 8, text_w + 8), np.uint8)
+        tmpl[4:4 + text_h, 4:4 + text_w] = 255
+        return tmpl
+
+    def test_match_on_dark_bg_passes_verification(self):
+        """模板在暗底区域命中 → verify_dark=True 仍返回命中。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)     # 全黑帧(名字牌暗底)
+        frame[850:880, 1210:1340] = 255                  # 白字条(模板内容)
+        tmpl = self._make_template()
+        hit = anchor.split_match(frame, tmpl, (1280, 880), 240, 80, 0.3,
+                                 verify_dark=True)
+        self.assertIsNotNone(hit)
+
+    def test_match_on_bright_bg_rejected_by_verification(self):
+        """模板在纯亮背景命中(模拟云/天空)→ verify_dark=True 拒绝。"""
+        frame = np.full((1440, 2560, 3), 255, np.uint8)  # 全白帧(云/天空)
+        tmpl = self._make_template()
+        # 白字模板在全白帧上也能匹配(白对白差 0),但暗底验证必须拒绝
+        hit = anchor.split_match(frame, tmpl, (1280, 880), 240, 80, 0.3,
+                                 verify_dark=True)
+        self.assertIsNone(hit)
+
+    def test_verify_dark_false_keeps_old_behavior(self):
+        """verify_dark=False(旧行为):纯亮背景上的匹配不被拒绝。"""
+        frame = np.full((1440, 2560, 3), 255, np.uint8)
+        tmpl = self._make_template()
+        hit = anchor.split_match(frame, tmpl, (1280, 880), 240, 80, 0.3,
+                                 verify_dark=False)
+        self.assertIsNotNone(hit)
+
+    def test_clamps_window_to_region(self):
+        """模板匹配窗口超出蓝框的部分必须被裁掉。窗口本为 (1040,800)-(1520,960),
+        蓝框 (1100,830)-(1340,900) 裁后从 (1100,830) 起检 —— 白字条在 1210:1340,
+        仍在裁后窗口内,命中坐标按裁后窗口原点换算(≈1270x,884y)。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+        frame[850:880, 1210:1340] = 255
+        tmpl = self._make_template()
+        hit = anchor.split_match(frame, tmpl, (1280, 880), 240, 80, 0.3,
+                                 clamp_region=(1100, 830, 1340, 900))
+        self.assertIsNotNone(hit)
+        self.assertGreaterEqual(hit.x, 1100)
+        self.assertLessEqual(hit.x, 1340)
+        self.assertGreaterEqual(hit.y, 830)
+        self.assertLessEqual(hit.y, 900)
+
+    def test_no_intersection_with_region_returns_none(self):
+        """蓝框与窗口完全不相交 → 无命中(不越界找)。"""
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+        frame[850:880, 1210:1340] = 255
+        tmpl = self._make_template()
+        hit = anchor.split_match(frame, tmpl, (1280, 880), 240, 80, 0.3,
+                                 clamp_region=(1800, 1000, 2200, 1200))
+        self.assertIsNone(hit)
+
+
+class TestMatchesPrefixSuffix(unittest.TestCase):
+    """_matches 遮挡匹配:宠物/怪可挡名字任意侧,OCR 可能只读出部分文本。
+
+    2026-08-10 视觉模型验收确认:白色雪人宠物挡名字右侧 → OCR 读前缀
+    ('端侧大'/'端侧'),旧实现只认后缀导致 58% 通过率。新实现前缀/后缀/
+    粘连任一匹配即收。
+    """
+
+    def setUp(self):
+        self.target = '端侧大模型'
+
+    def test_exact(self):
+        self.assertTrue(anchor._matches('端侧大模型', self.target))
+
+    def test_prefix_full(self):
+        """宠物挡右侧 2-3 字,OCR 读前缀。"""
+        self.assertTrue(anchor._matches('端侧大', self.target))
+        self.assertTrue(anchor._matches('端侧', self.target))
+
+    def test_suffix_full(self):
+        """怪/邻牌挡前半,OCR 读尾巴。"""
+        self.assertTrue(anchor._matches('大模型', self.target))
+        self.assertTrue(anchor._matches('模型', self.target))
+
+    def test_glued_suffix(self):
+        """名字牌与 CV 标签粘连,OCR 读 '端侧大模型CV'(text 以 target 开头)。"""
+        self.assertTrue(anchor._matches('端侧大模型CV', self.target))
+
+    def test_glued_prefix(self):
+        """CV 标签在前,OCR 读 'CV端侧大模型'(text 以 target 结尾)。"""
+        self.assertTrue(anchor._matches('CV端侧大模型', self.target))
+
+    def test_too_short_rejected(self):
+        """被挡得只剩 1 字,信息量不够,丢弃。"""
+        self.assertFalse(anchor._matches('端', self.target))
+        self.assertFalse(anchor._matches('型', self.target))
+
+    def test_unrelated_glue_rejected(self):
+        """完全无关的粘连(邻玩家牌子),与 target 无公共前后缀,排除。"""
+        self.assertFalse(anchor._matches('小白雪人ifeng咕咕', self.target))
+        self.assertFalse(anchor._matches('等级1端侧CV', self.target))
 
 
 if __name__ == '__main__':

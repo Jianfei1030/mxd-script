@@ -116,6 +116,17 @@ class TestFarmLogic(unittest.TestCase):
         self.assertFalse(fl.walk_confirmed(None, 1000.0, 1045.0, 40))
         self.assertFalse(fl.walk_confirmed('right', None, 1045.0, 40))
 
+    def test_crowd_present(self):
+        # 等于阈值算命中:阈值语义是「达到就用群攻」,与 should_attack 的 >= 同口径
+        self.assertTrue(fl.crowd_present(3, 3))
+        self.assertTrue(fl.crowd_present(4, 3))
+        self.assertFalse(fl.crowd_present(2, 3))
+        self.assertFalse(fl.crowd_present(0, 3))
+        # 阈值 <= 0 = 功能关闭,不许因为「0 只怪 >= 0」而恒真
+        self.assertFalse(fl.crowd_present(5, 0))
+        self.assertFalse(fl.crowd_present(5, -1))
+        self.assertFalse(fl.crowd_present(0, 0))
+
 
 class TestAttackZone(unittest.TestCase):
 
@@ -182,6 +193,27 @@ class TestAnchorTiming(unittest.TestCase):
     def test_anchor_vx_rejects_stale_gap(self):
         # dt 超 2s:期间可能停过/回退过,速度不可信
         self.assertEqual(fl.anchor_vx_update(0.0, dx=20, dt=3, dy=0), 0.0)
+
+
+class TestExtrapolateVx(unittest.TestCase):
+    """外推速度裁决(spec 2026-08-10 §3.1):击退漂移几乎恒与寻怪反向,
+    学来的反向 vx 会把外推往真人反方向推(丢失逃逸根因,08-10 19:56 钳位铁证)。"""
+
+    def test_same_direction_uses_learned(self):
+        self.assertEqual(fl.extrapolate_vx(120.0, 'right', 250), 120.0)
+
+    def test_reverse_falls_back_to_config_speed(self):
+        # 学习到 +75(击退向右),寻怪向左 → 不用学习值,用配置速度×方向
+        self.assertEqual(fl.extrapolate_vx(75.0, 'left', 250), -250.0)
+
+    def test_zero_learned_uses_config_speed(self):
+        self.assertEqual(fl.extrapolate_vx(0.0, 'right', 200), 200.0)
+        self.assertEqual(fl.extrapolate_vx(0.0, 'left', 200), -200.0)
+
+    def test_none_seek_dir_returns_zero(self):
+        # 契约外输入显式不外推(唯一调用点在 _seek_dir is None 时提前返回,
+        # 这里防未来调用点踩坑——None 绝不能被静默当成 left)
+        self.assertEqual(fl.extrapolate_vx(120.0, None, 250), 0.0)
 
 
 class TestWarriorZone(unittest.TestCase):
@@ -405,6 +437,46 @@ class TestNearestMobSide(unittest.TestCase):
 
     def test_empty_centres_returns_none(self):
         self.assertEqual(fl.nearest_mob_side([], self.ZONE, 1280), (None, None))
+
+
+class TestAttackPreTap(unittest.TestCase):
+    """攻击前垫步方向:最近怪在哪侧就轻点哪侧方向键(不比较 facing)。
+
+    2026-08-09 需求:战士 _facing 是盲写信念,被击退/按键丢失破坏后攻击区内有怪
+    (attack_turn_direction 认为"面朝侧还有目标"不转向),角色背对怪一直砍空气。
+    垫步不信任信念,攻击前无条件朝最近怪所在侧轻点——信念错则物理修正,
+    信念对则 no-op(已朝该侧按方向键零代价,50ms 位移可忽略)。"""
+
+    ZONE = fl.attack_zone((1280, 630), 600, 200)   # x∈[980,1580], y∈[530,730]
+
+    def test_mob_on_left_returns_left(self):
+        centres = [(1100, 640), (1500, 640)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'left')
+
+    def test_mob_on_right_returns_right(self):
+        centres = [(1000, 640), (1500, 640)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'right')
+
+    def test_nearest_mob_wins_over_far_mob(self):
+        # 左右都有怪:朝最近的一侧垫步(远的等打完这只再处理)
+        centres = [(1010, 640), (1560, 640)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'left')
+
+    def test_mob_exactly_at_body_x_counts_as_right(self):
+        # 怪压身上:判边噪声不许引发左右横跳,固定按 right(与 nearest_mob_side 同规则)
+        self.assertEqual(fl.attack_pre_tap_direction([(1280, 640)], self.ZONE, 1280), 'right')
+
+    def test_mob_inside_zone_ignores_outside_mob(self):
+        # 区外更近的怪不参与:垫步只服务攻击判定(与 nearest_mob_side 同规则)
+        centres = [(1100, 640), (1000, 200)]
+        self.assertEqual(fl.attack_pre_tap_direction(centres, self.ZONE, 1280), 'left')
+
+    def test_no_mob_in_zone_returns_none(self):
+        self.assertIsNone(fl.attack_pre_tap_direction([(2000, 200), (100, 100)],
+                                                      self.ZONE, 1280))
+
+    def test_empty_centres_returns_none(self):
+        self.assertIsNone(fl.attack_pre_tap_direction([], self.ZONE, 1280))
 
 
 class TestMobPresentDebounce(unittest.TestCase):
@@ -824,3 +896,47 @@ class TestForcedRescan(unittest.TestCase):
         # 常规窗已到点:force 的限频不该反过来卡住常规扫描
         self.assertTrue(fl.should_rescan_anchor(
             102.0, 100.0, 2, force=True, last_forced=101.9))
+
+
+class TestSelectLostUniqueBox(unittest.TestCase):
+    """丢锚唯一框接管(spec 2026-08-10 §3.4):丢锚超 1s 且全屏唯一 player 框
+    且同层(±300) → 直接接管。唯一性=身份判据;横向不看门(pred 已逃逸,
+    横向先验已死),纵向先验仍活(外推只推 x)。"""
+
+    def _player(self, cx, cy):
+        return type('Box', (), {'x': cx - 30, 'y': cy - 60,
+                                'width': 60, 'height': 120})()
+
+    def test_accepts_unique_same_layer_box(self):
+        box = self._player(2000, 880)   # 横向距 pred 800px(门外),纵向同层
+        got = fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=2.0)
+        self.assertIs(got, box)
+
+    def test_rejects_when_age_insufficient(self):
+        box = self._player(2000, 880)
+        self.assertIsNone(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=0.9))
+
+    def test_age_boundary_accepts(self):
+        # 压线:年龄恰好 1.0s 算丢锚(与 anchor_expired 的 >= 口径一致)
+        box = self._player(2000, 880)
+        self.assertIs(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=1.0), box)
+
+    def test_rejects_multiple_boxes(self):
+        # 多框 = 可能多人图,宁可慢扫不认错(行为不变)
+        boxes = [self._player(2000, 880), self._player(600, 880)]
+        self.assertIsNone(
+            fl.select_lost_unique_box(boxes, pred_y=900.0, anchor_age=5.0))
+
+    def test_rejects_off_layer_box(self):
+        # 隔层路人:|by - pred_y| > 300 拒(实测层高差 240-300)
+        box = self._player(2000, 1200)  # by = 1200+64 = 1264,差 364
+        self.assertIsNone(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=5.0))
+
+    def test_layer_boundary_accepts(self):
+        # 压线:|dy| 恰 300 算同层(与 gate_player_boxes 边界算门内一致)
+        box = self._player(2000, 1136)  # by = 1136+64 = 1200,差恰 300
+        self.assertIs(
+            fl.select_lost_unique_box([box], pred_y=900.0, anchor_age=5.0), box)

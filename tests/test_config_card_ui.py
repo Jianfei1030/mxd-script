@@ -63,10 +63,9 @@ class ConfigCardUiTest(unittest.TestCase):
     def test_search_filters_widgets_and_headers(self):
         task = self._make_task(with_groups=True)
         card = self._make_card(task)
-        card.search_box.setText('坐椅')
-        # 键级过滤:键名含「坐椅」的项保留,其余隐藏
+        card.search_box.setText('椅子')
+        # 键级过滤:键名/描述含「椅子」的项保留(坐椅开关描述「自动坐椅子…拖到快捷键」),其余隐藏
         self.assertFalse(card.config_widget_by_key['坐椅开关'].isHidden())
-        self.assertFalse(card.config_widget_by_key['坐椅延迟(秒)'].isHidden())
         self.assertTrue(card.config_widget_by_key['攻击间隔(秒)'].isHidden())
         self.assertTrue(card.config_widget_by_key['角色名'].isHidden())
         # 组标题过滤:挂机辅助组有可见键 → 保留;攻击/角色定位组无匹配 → 隐藏

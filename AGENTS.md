@@ -4,6 +4,11 @@
 > **每个 agent 会话启动前必读，避免重复踩坑。**  
 > 路径：`C:\projects\mxd-script\AGENTS.md`（旧机器）；当前机器（2026-08-10 实机验证）为 `G:\projects\MyDocs\projects\mxd_script`，见 §1.1
 
+> **收录标准（2026-08-11 定）**：本文件每次会话都进 agent 上下文，**只放跨任务复用的常驻规则**——
+> 命令、坑、硬要求、硬件边界、环境事实。**不写**带日期的一次性内容：实验数据（mAP 对照、数据集构成）、
+> 功能验收记录、「当前部署/当前基线」这类会过期的状态。那些写进 `docs/superpowers/specs/` 对应设计文档，
+> 本节最多留一行指针。
+
 ---
 
 ## 1. 环境与运行
@@ -135,7 +140,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 ..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=yolov8m.pt imgsz=1280 epochs=200 batch=4 device=0 project=runs name=<名>
 ```
 - `yolov8m.pt` 用裸名，ultralytics 自动联网下载；离线用 `model=..\yolov8n.pt` 退级
-- **注意**：mob.onnx（12MB）**已入库**（spec §M3），训练新模型后记得提交；备份 `.onnx.bak_*` 在 .gitignore 不入库
+- **注意**：mob.onnx 已入库（spec §M3），训练新模型后记得提交；备份 `.onnx.bak_*` 在 .gitignore 不入库
 
 **共同要求**：
 - `python -m ultralytics` **报 No module named ultralytics.__main__**，必须用 `yolo.exe`
@@ -151,6 +156,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - 实机加载路径：`assets/mob_model/mob.onnx`（`src/globals.py:21`）
 - 部署前**备份旧模型**：`Copy-Item "assets\mob_model\mob.onnx" "assets\mob_model\mob.onnx.bak_<日期>"`
 - 训练产物在 `dataset/runs/detect/runs/<名>/weights/`
+- 模型类别数必须与代码一致（当前要求 mob+player 双类，见 §7.7）
 
 ---
 
@@ -255,7 +261,31 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - 画框跟随检测拍节流（MapleFarmTask 检测模式：在打→攻击间隔 / 在追→寻怪刷新间隔 / 空闲→空闲刷新间隔），paint 回调本身每帧 GUI repaint 执行，~10ms
 - 检测耗时：1280 推理 ~22ms + 名字牌 OCR ~118ms（首次）→ 后续快通道小窗 <50ms
 
-### 7.4 击退受击检测（朝向信念修复，2026-08-07 实测）
+### 7.4 名字牌暗底验证（anti-cloud，2026-08-10 实测）
+- **问题**：名字牌=白字+暗色半透明底框(暗底 <100 占 ~40%、白字 >150 占 ~35%)。纯白字模板匹配会**误中云/天空**(同为亮白色)
+- **解法**：`split_match(verify_dark=True)` 命中后调 `has_dark_background` 验证位置周围暗底占比 ≥30%——名字牌通过、云/天空(无暗底)被拒绝。验证只查一个 ROI，微秒级开销
+- **验证区域宽度跟随名字牌**：`pad_x = hit.width*0.6`（下限 60），不要用固定 240——固定宽会把周围亮背景带进来稀释暗底占比（实测 frame_0256：240 宽 29.1% 被拒，94 后通过）
+- **TEMPLATE_SPLITS 2→4**：宠物会随机遮挡名字中间 2 个字(用户实测截图)，4 片覆盖"端侧+大+模+型"各 1 字，被盖 1-2 字时其他片仍命中
+- **`_matches` 前缀/后缀/粘连三向匹配**（2026-08-10 视觉模型验收 5 帧确认）：宠物可挡名字**任意侧**——
+  - 怪/邻牌挡前半 → OCR 读尾巴 → `target.endswith(text)`（旧实现只认这个，58% 通过率）
+  - 白色雪人宠物挡右侧 → OCR 读前缀 `'端侧大'`/`'端侧'` → `target.startswith(text)`
+  - 名字牌与 CV 标签粘连 → OCR 读 `'端侧大模型CV'`/`'CV端侧大模型'` → `text.startswith(target)`/`text.endswith(target)`
+  - 半长 = `len(target)//2`，下限 2（被挡剩 2 字 '端侧' 也算锚点）
+  - 离线评估：151 帧新数据通过率 **58% → 90.7%**
+- ⛔ **踩过的坑(勿重走)**：不要试图"先全图找暗底矩形再匹配"——洞穴地图背景本身就是暗色，直接找暗底会匹配到整个背景；白字连通域被字符间隙拆成 35 块；膨胀连接字符会把整个搜索窗口白字连成一片(1024x431)；滑动窗口 7.7s 太慢。**先匹配、命中后验证单点暗底**才是可行解
+- 测试：`tests/test_anchor.py` 的 `TestHasDarkBackground` / `TestSplitMatchVerifyDark` / `TestMatchesPrefixSuffix`（合成帧，离线可跑）
+
+### 7.6 快速匹配范围限制（clamp_region，2026-08-08 实施 + 08-09 实测）
+- **语义**：蓝框（锚点搜索区 = 「名字搜索范围」）是锚点搜索的**合法边界**。模板匹配 `split_match` 与快通道 OCR `find_in_window` 的窗口先裁到帧内、**再裁到蓝框内**，两窗交集为空 → 无命中；慢通道 OCR `find_in_region` 本就限定蓝框
+- **实现**：`anchor.split_match` / `anchor.find_in_window` 加可选参数 `clamp_region=(x0,y0,x1,y1)`（anchor.py:156-168、245-290）；`MapleFarmTask._resolve_anchor` 开头算一次 `region = anchor.search_region(w, h, 宽比例, 高比例, 中心Y比例)` 传给两通道（:418-420, 433, 442）——与 `_draw_debug` 画「名字搜索范围」用**同一表达式**，蓝框与限制永不脱节
+- **蓝框公式**：`search_region(frame_w, frame_h, width_ratio, height_ratio, center_y_ratio=0.55)` = 以 (w/2, h*center_y) 为中心、宽高按比例取半的矩形（anchor.py:58-72）
+- ⛔ **2026-08-09 实测大坑：clamp 只保证"窗口不越蓝框"，不保证"蓝框内没有干扰源"**——
+  - 实测 `configs/MapleFarmTask.json`：宽=1.0 / 高=0.4 / 中心Y=0.55 → 2560×1440 下蓝框 = **(0, 504, 2560, 1080)**
+  - **组队列表 (x≈2256, y≈538) 在蓝框内**（504 ≤ 538 ≤ 1080，且宽=1.0 时 x=2256 必然在内）→ 决策日志持续 `src=window body_x=2256 anchor_y=538`，绿框飘到右侧组队列表，**clamp 拦不住**（它没越框，是框本身包了它）
+  - 排查锚点位置异常：**先算蓝框范围再对照**（`anchor.search_region` 一行），命中点在框内 = 蓝框参数问题（收窄宽/调中心Y/调高把干扰源排除），在框外 = clamp 失效
+- **测试**：`tests/test_anchor.py` 的 clamp 用例（蓝框必须 ≥ 模板尺寸，否则 split_match 按"窗口放不下模板"返回 None 误报——clamp_region 宽 < 模板宽 128px 时会踩这个坑，用例用 (1100,830,1340,900) 且坐标断言放宽为区间）
+
+### 7.5 击退受击检测（朝向信念修复，2026-08-07 实测）
 - **实测结论**：冒险岛被怪碰到 → 往**远离怪物**方向击退 + **翻转朝向来面对怪物**（用户实测确认）
 - **玩家朝向不是服务端状态**：`MapleCharacter` 无 facing 字段（只有 `MapleMonster` 有），抓包/读内存读不到，像素是唯一可观测面
 - **`_facing` 是盲写信念**（MapleFarmTask.py:158），只在转向轻点/寻怪走动/走位后更新 → **击退是唯一破坏源**。挥砍中 body_x 跳变 >80px 的拍占 19%，击退高频
@@ -263,6 +293,33 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - **为什么置 None 而非直接猜朝向**：对"击退翻不翻朝向"两种机制同时正确——翻了补 tap 是纠错；没翻，朝怪 tap 50ms 是 no-op（已面朝该侧按方向键零代价）
 - **受击检测放 run() 高频路径**（每拍 10Hz，不等 1.5s 检测拍节流），位置在保命之后、喝药之前
 - **WarriorDebugTask `_auto_facing` 两拍确认**（历史，任务已移除）：连续 2 拍同向位移(>15px)才翻转，单拍位移/OCR 噪声(±5px)不翻——避免调试 overlay 朝向抖动
+
+### 7.7 双类模型（mob + player）
+
+**硬要求**：模型必须是 2 类（class0=mob / class1=player，player 框用于名字牌被遮挡时接管角色定位，
+spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）。
+旧 1 类模型跑当前代码会退化成"player 框永为空"。
+
+**2 类基建三件套**：
+- `dataset/mobs.yaml`：`names: {0: mob, 1: player}`
+- `scripts/label_boxes.py`：`c` 键切换类别（0=mob 红框 / 1=player 绿框），txt 类别保真（重存不丢 player）
+- `src/OpenVinoYolo8Detect.py`：`dic_labels = {0: 'mob', 1: 'player'}`；`detect(label=-1)` 返回全类别
+
+**标注关键规则（"只标自己"策略）**：
+- 每帧**只框自己**（名字牌正下方角色），其他玩家/宠物一律不框（当背景）——框了路人模型就学会认"任意玩家"
+- player 框高 ≈0.15-0.17 归一化（比 mob 高，符合角色身形），可据此抽查校验
+
+**训练要点**：
+- **必须 OS 级后台启动训练**：bash 调用超时（600s）会连带杀掉通过它启动的 yolo 子进程：
+  ```powershell
+  $cmd = '$env:YOLO_OFFLINE="true"; <绝对路径>\.venv-warrior\Scripts\yolo.exe train ...'; Start-Process powershell -ArgumentList "-EncodedCommand", $([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))) -WindowStyle Hidden
+  ```
+  中断后用 `yolo train resume model=<last.pt> ...` 续训
+- **权重下载**：`yolov8s.pt` 等首次需联网下载；`YOLO_OFFLINE=true` + 本地权重绝对路径可跳过下载
+- **4090 硬件边界**（24GB 显存）：v8n batch8=4G / v8s batch8=10-12G / v8m 需 batch≤4 / v8l 勉强 / v8x 1280 下 OOM。数据量无硬上限（线性吃时间不吃显存），多样性 > 数量
+- 部署后 GUI 的 `find_all` 一拍推理全类别 → `find_mobs` 按 `b.name=='mob'` 过滤（BaseMapleTask.py）
+
+> 历史实验数据（v8s vs v8n 对照、数据集构成、训练切分）见 spec 末节「训练实验记录」。
 
 ---
 
@@ -308,7 +365,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 | 标定结果读不到 | 写了 config.json 而非 MapleFarmTask.json | 检查写入路径 |
 | 绿框/攻击区偏移 | 名字牌锚点偏移/参数不对 | 用 `calibrate_attack_zone.py` 标定 |
 | paint 日志爆炸 | paint 回调每帧执行 | 回调内禁日志 |
-| **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配** | **⛔ 必须关闭组队血量显示（UI 设置里关）** |
+| **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配；且蓝框(搜索区宽=1.0)本身包含组队列表位置 (x≈2256, y≈538)，clamp 拦不住框内干扰源** | **⛔ 必须关闭组队血量显示（UI 设置里关）**；收窄搜索区宽/调中心Y/调高把组队列表排除出蓝框（见 §7.6） |
 
 ---
 
@@ -333,6 +390,39 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 | `src/globals.py` | 全局配置/模型加载 |
 | `ok/feature/Box.py` | Box 类 + sort_boxes（检测结果容器） |
 | `assets/mob_model/mob.onnx` | 当前部署的检测模型 |
+
+### 10.1 战士「端侧大模型」参考配置（2026-08-10 沉淀）
+
+> 实机验证过的战士挂机配置快照（角色名 **端侧大模型**，2560×1440）。
+> 副本存 `docs/configs/端侧大模型_战士_MapleFarmTask.json`；运行时配置在
+> `configs/MapleFarmTask.json`（**被 .gitignore 忽略、不入库**，仓库只存文档副本）。
+
+| 键 | 值 | 说明 |
+|---|---|---|
+| 角色名 | 端侧大模型 | 名字牌 OCR 锚点定位 |
+| 攻击模式 | 检测 | 完整检测拍（锚点 OCR + YOLO） |
+| 攻击区形状 | 单体(面朝) | 只打面朝侧半区 |
+| 攻击区宽/高(像素) | 550 / 200 | 2560×1440 下标定 |
+| 攻击间隔(秒) | 1.0 | 攻击按键节奏 |
+| 名字牌到身体偏移(像素) | 104 | 牌子中心→身体中心 Y 偏移 |
+| 锚点搜索区 宽/高/中心Y | 1.0 / 0.3 / 0.55 | 蓝框（锚点搜索合法边界） |
+| 锚点保鲜(秒) | 11 | 锚点过期判定 |
+| 寻怪开关 / 同层容差(像素) | true / 250 | 斜坡怪也能追（默认 60 会漏斜坡怪） |
+| 寻怪刷新间隔(秒) | 0.05 | 追怪中刷新目标方向 |
+| 模板分片匹配开关 / 阈值 | true / 0.1 | 名字牌模板快通道（较严） |
+| YOLO角色定位开关 | true | 名字牌失效时 player 框接管锚点 |
+| 身份保鲜(秒) | 10 | 多玩家框时防认错路人 |
+| 身份复验开关 / 间隔(秒) | true / 3 | 身份过期时提前慢扫验名 |
+| 丢锚立即重扫开关 | true | 受击/超龄绕过慢扫节流 |
+| 转向冷却(秒) | 0.5 | 防原地左右扭 |
+| 硬直抑制窗(秒) | 1.0 | 受击后暂不按转向/攻击（注意：默认 0，此处按实机调高） |
+| 朝向纠正开关 | true | 观测到真实朝向不符时写回 |
+| 攻击前垫步开关 | true | 战士专用：攻击前朝怪侧轻点方向键 |
+| 决策日志开关 | true | 逐拍决策留痕（排查用，平时可关） |
+| 显示玩家框/攻击区/名字搜索范围/寻怪同层带/怪物框 | 全 true | 调试可视化（需先开「启用标记框」） |
+
+> ⚠️ 注意：`硬直抑制窗(秒)=1.0` 与代码默认 0 不同（AGENTS.md §7 记载默认 0 实测有害）。
+> 此配置为实机调参快照，恢复出厂默认请对照 `DEFAULT_CONFIG`（MapleFarmTask.py 顶部）。
 
 ---
 
@@ -391,18 +481,13 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_far
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for base in ['src','scripts','tests','ok'] for p in pathlib.Path(base).rglob('*.py')]; print('OK')"
 ```
 
-### 11.7 当前基线（2026-08-07 / 2026-08-10 更新）
+### 11.7 已知基线状态
 
-- 单测：全模块全绿（2026-08-10 实测 518 用例 → 移除 WarriorDebugTask 相关 3 个测试模块后约 470+ 用例），
-  显式 skip（存档帧缺失、OCR 限制、val 数据缺失）
-- 编译：src/ scripts/ tests/ ok/ 全源码 + 入口脚本 py_compile 通过
-- E2E（2026-08-07 本机验收）：
-  - **通过**：`main_debug.py` 启动 GUI 成功，主窗口「OK-MXD v0.1.0 开发工具」完整渲染
-    （标题栏/左侧 6 项导航/截图方式卡片/交互方式/调试悬浮窗开关），无崩溃无错误弹窗
-  - **通过**：trigger task（MapleFarmTask）在 GUI 内成功注册加载，
-    含受击检测/调试可视化代码——证明新代码在真实 GUI 运行路径无导入/编译错误
-  - **通过**：截图经视觉模型验收 PASS（`screenshots/e2e/gui_launch/gui_main_20260807.png`，
-    1200x800 与日志 geometry 一致）
-  - 已知无害 stderr：`pydirect:You must be an admin`（非管理员按键限制，检测只读不受影响）、
-    `install translations error for zh_CN`（qfluentwidgets 翻译缺失，界面英文可用）
-  - 截图工具：`scripts/_e2e_capture.py <pid> <out_path>`（按 PID 截窗口，E2E 取证用）
+- **既有红测试**（长期存在，非新改动引入）：`test_anchor_offline.TestAnchorOnRealFrames.test_b_anchor_y_in_expected_band`
+  （`combat_mayidong2_frame_0018.png` 锚点 `y=657` 越出期望带 `[700, 950]`），master 上复跑同样红，待处理
+- 显式 skip 的原因均为环境缺失：存档帧缺失 / OCR 限制 / val 数据缺失
+- GUI 启动的**无害 stderr**（不用处理）：`pydirect:You must be an admin`（非管理员按键限制，检测只读不受影响）、
+  `install translations error for zh_CN`（qfluentwidgets 翻译缺失，界面英文可用）
+- E2E 截图工具：`scripts/_e2e_capture.py <pid> <out_path>`（按 PID 截窗口取证）
+
+> 各功能的验收记录写在对应 spec 文档里（如群攻验收见 `2026-08-09-aoe-attack-design.md` §5.3 末节），不在本节记。
