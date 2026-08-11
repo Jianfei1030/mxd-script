@@ -157,3 +157,70 @@ def save_map_meta(map_dir, meta):
     path = os.path.join(map_dir, 'map_meta.json')
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+class DotTracker:
+    """黄点跟踪(spec §2.3):最近邻 + 跳变守卫 + 指令-位移一致性。纯状态类。
+    跳变守卫随拍间隔自适应(评审 3):上限 = base + per_sec × dt。
+    固定上限是拍脑袋——它隐式假设了调用频率;巡逻拍节奏 ~10Hz(远小于 1s),
+    base=4 格盖击退瞬移,per_sec=12 格/秒盖行走(M0 用实走速度标定终值)。"""
+
+    def __init__(self, jump_guard_base=4.0, jump_guard_per_sec=12.0,
+                 cmd_mismatch_limit=3.0, cmd_min_move=1.0):
+        self.jump_guard_base = jump_guard_base        # 瞬时位移余量(底图格):击退/首拍
+        self.jump_guard_per_sec = jump_guard_per_sec  # 行走速度上限(底图格/秒)
+        self.cmd_mismatch_limit = cmd_mismatch_limit  # 持续按键无位移判异常的秒数
+        self.cmd_min_move = cmd_min_move              # 该窗口内应有的最小位移(底图格)
+        self.pos = None                         # (mx, my) 底图坐标
+        self._last_update_t = None              # 上次 update 时刻(dt 自适应守卫用)
+        self._cmd_anchor = None                 # (pos, t) 指令一致性窗口起算点
+
+    def acquire(self, dots_before, dots_after, meta, min_panel_move=2.0):
+        """移动捕获:对比走动前后两帧,位移最大的点=自己。返回底图坐标或 None。"""
+        best, best_d = None, min_panel_move
+        for d in dots_after:
+            if not dots_before:
+                break
+            dmin = min(abs(d[0] - b[0]) + abs(d[1] - b[1]) for b in dots_before)
+            if dmin > best_d:
+                best, best_d = d, dmin
+        if best is None:
+            return None
+        self.pos = panel_to_map((best[0], best[1]), meta)
+        return self.pos
+
+    def update(self, dots, meta, now, cmd_dir=None):
+        """每帧更新。返回 (pos|None, status);status ∈ ok/lost/suspect/mismatch。"""
+        dt = 0.0 if self._last_update_t is None else max(0.0, now - self._last_update_t)
+        self._last_update_t = now
+        jump_limit = self.jump_guard_base + self.jump_guard_per_sec * dt
+        status = 'ok'
+        if self.pos is not None:
+            if not dots:
+                status, pos = 'lost', None
+            else:
+                cand = min(dots, key=lambda d: abs(d[0] - self.pos[0] * meta['scale'] - meta['offset_x'])
+                                             + abs(d[1] - self.pos[1] * meta['scale'] - meta['offset_y']))
+                cand_map = panel_to_map((cand[0], cand[1]), meta)
+                jump = abs(cand_map[0] - self.pos[0]) + abs(cand_map[1] - self.pos[1])
+                if jump > jump_limit:
+                    status, pos = 'suspect', self.pos   # 拒采,保持旧位置
+                else:
+                    self.pos = cand_map
+                    pos = cand_map
+        else:
+            pos = None
+            status = 'lost'
+        # 指令-位移一致性:持续按键期间位移方向/量级不符 → mismatch(内部计时窗口)
+        if cmd_dir in ('left', 'right') and status == 'ok' and self.pos is not None:
+            if self._cmd_anchor is None:
+                self._cmd_anchor = (self.pos, now)
+            elif now - self._cmd_anchor[1] >= self.cmd_mismatch_limit:
+                dx = self.pos[0] - self._cmd_anchor[0][0]
+                moved = dx < -self.cmd_min_move if cmd_dir == 'left' else dx > self.cmd_min_move
+                if not moved:
+                    status = 'mismatch'
+                self._cmd_anchor = (self.pos, now)
+        else:
+            self._cmd_anchor = None
+        return pos, status

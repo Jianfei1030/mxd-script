@@ -134,5 +134,69 @@ class TestUnicodeIO(unittest.TestCase):
             self.assertEqual(minimap.load_map_meta(sub)['scale'], 2.0)
 
 
+class TestDotTracker(unittest.TestCase):
+
+    def setUp(self):
+        self.meta = {'scale': 1.0, 'offset_x': 0.0, 'offset_y': 0.0}
+
+    def test_acquire_picks_the_moving_dot(self):
+        before = [(10.0, 10.0, 8), (50.0, 50.0, 8)]   # 左=NPC 静止
+        after = [(10.0, 10.0, 8), (58.0, 50.0, 8)]    # 右=自己动了 8px
+        t = minimap.DotTracker()
+        pos = t.acquire(before, after, self.meta)
+        self.assertIsNotNone(pos)
+        self.assertAlmostEqual(pos[0], 58.0, delta=0.5)
+
+    def test_acquire_returns_none_when_nothing_moved(self):
+        dots = [(10.0, 10.0, 8), (50.0, 50.0, 8)]
+        t = minimap.DotTracker()
+        self.assertIsNone(t.acquire(dots, dots, self.meta))
+
+    def test_update_nearest_neighbor(self):
+        t = minimap.DotTracker()
+        t.pos = (50.0, 50.0)
+        pos, status = t.update([(10.0, 10.0, 8), (52.0, 51.0, 8)], self.meta, 100.0)
+        self.assertEqual(status, 'ok')
+        self.assertAlmostEqual(pos[0], 52.0, delta=0.5)
+
+    def test_jump_guard_rejects_far_jump_and_keeps_pos(self):
+        t = minimap.DotTracker()  # dt=0 → 上限 = base 4 格
+        t.pos = (50.0, 50.0)
+        pos, status = t.update([(90.0, 50.0, 8)], self.meta, 100.0)  # 跳 40px=NPC 认错
+        self.assertEqual(status, 'suspect')
+        self.assertEqual(t.pos, (50.0, 50.0))  # 不采信
+
+    def test_jump_guard_scales_with_dt(self):
+        # 评审 3:固定 8 格在慢拍节奏下会误杀正常行走——上限必须随拍间隔自适应
+        t = minimap.DotTracker()  # base 4 + 12 格/秒
+        t.pos = (50.0, 50.0)
+        _, s1 = t.update([(60.0, 50.0, 8)], self.meta, 100.0)  # dt=0 → 上限 4,10px 拒采
+        self.assertEqual(s1, 'suspect')
+        _, s2 = t.update([(60.0, 50.0, 8)], self.meta, 101.0)  # dt=1s → 上限 16,10px 放行
+        self.assertEqual(s2, 'ok')
+
+    def test_lost_when_no_dots(self):
+        t = minimap.DotTracker()
+        t.pos = (50.0, 50.0)
+        pos, status = t.update([], self.meta, 100.0)
+        self.assertEqual(status, 'lost')
+        self.assertIsNone(pos)
+
+    def test_mismatch_when_cmd_held_but_no_movement(self):
+        t = minimap.DotTracker(cmd_mismatch_limit=3.0)
+        t.pos = (50.0, 50.0)
+        _, s1 = t.update([(50.0, 50.0, 8)], self.meta, 100.0, cmd_dir='right')
+        _, s2 = t.update([(50.3, 50.0, 8)], self.meta, 103.5, cmd_dir='right')
+        self.assertEqual(s1, 'ok')
+        self.assertEqual(s2, 'mismatch')  # 按右 3.5s 只动了 0.3px
+
+    def test_no_mismatch_when_moving_with_cmd(self):
+        t = minimap.DotTracker(cmd_mismatch_limit=3.0)
+        t.pos = (50.0, 50.0)
+        t.update([(50.0, 50.0, 8)], self.meta, 100.0, cmd_dir='right')
+        _, status = t.update([(62.0, 50.0, 8)], self.meta, 103.5, cmd_dir='right')
+        self.assertEqual(status, 'ok')
+
+
 if __name__ == '__main__':
     unittest.main()
