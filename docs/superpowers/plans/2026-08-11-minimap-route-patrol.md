@@ -207,8 +207,9 @@ YELLOW_HSV_LO = (20, 180, 180)   # 黄点 HSV 下限(标定后可调)
 YELLOW_HSV_HI = (40, 255, 255)
 MIN_DOT_AREA = 3                 # 黄点连通域最小面积:去噪
 MAX_DOT_AREA = 60                # 最大面积:大块黄是地图装饰
-CALIBRATE_MIN_SCORE = 0.5        # 标定 masked match 最低分,低于=面板/缩放不对
+CALIBRATE_MIN_SCORE = 0.5        # 标定相似度(带对比度门禁)最低分,低于=面板/缩放不对
 TERRAIN_MIN_SCORE = 0.3          # 巡逻期地形分底线,连续低于=换图/异常
+TERRAIN_PIX_TOL = 30             # 地形逐像素色差容忍(通道最大差):渲染抖动/抗锯齿余量
 CALIBRATE_SCALES = (0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)  # 标定候选缩放档
 
 
@@ -245,15 +246,25 @@ def map_to_panel(point, meta):
 
 
 def _masked_score(panel_bgr, base_rgba):
-    """以底图 alpha 为 mask 的 TM_CCORR_NORMED 匹配 → (max_val, max_loc)。
-    底图比面板大时返回 (0.0, None)。"""
+    """底图(alpha 为 mask)对面板的匹配相似度 → (score 0~1, loc)。
+    TM_SQDIFF_NORMED(0=完全一致)取最佳位置,再乘对比度门禁:
+    稀疏 mask 下 CCORR 在纯色/近纯色背景上归一化相关分虚高(评审铁证:
+    垃圾面板也能拿 0.74),门禁要求匹配区像素 std ≥ 模板 std 的一半,
+    uniform 背景 std≈0 → 相似度压到 ~0,假标定进不来。"""
     if base_rgba.shape[0] > panel_bgr.shape[0] or base_rgba.shape[1] > panel_bgr.shape[1]:
         return 0.0, None
     template = base_rgba[:, :, :3]
-    mask = base_rgba[:, :, 3]
-    res = cv2.matchTemplate(panel_bgr, template, cv2.TM_CCORR_NORMED, mask=mask)
-    _min, max_val, _ml, max_loc = cv2.minMaxLoc(res)
-    return float(max_val), max_loc
+    mask = base_rgba[:, :, 3] > 0
+    res = cv2.matchTemplate(panel_bgr, template, cv2.TM_SQDIFF_NORMED,
+                            mask=base_rgba[:, :, 3])
+    min_val, _max, min_loc, _mx = cv2.minMaxLoc(res)
+    x, y = min_loc
+    th, tw = template.shape[:2]
+    region = panel_bgr[y:y + th, x:x + tw]
+    t_std = float(template[mask].std())
+    r_std = float(region[mask].std())
+    contrast = 1.0 if t_std < 1e-6 else min(1.0, r_std / (0.5 * t_std + 1e-6))
+    return float(max(0.0, 1.0 - min_val)) * contrast, min_loc
 
 
 def calibrate(panel_bgr, base_rgba):
@@ -275,7 +286,11 @@ def calibrate(panel_bgr, base_rgba):
 
 
 def terrain_match_score(panel_bgr, base_rgba, meta):
-    """巡逻期换图检测:按 meta 的 scale/offset 在固定位置算 masked 分(不做全图搜索)。"""
+    """换图判别(评审 2 修订):底图地形像素里"颜色对得上"的比例(0~1)。
+    逐像素取通道最大差,≤ TERRAIN_PIX_TOL 记为对得上,返回占比;
+    纯色背景/另一张图 → 占比≈0。旧实现用 1-平均差/765(理论最大),
+    自然色差撑不满量程,错误地形也稳定 0.6~0.8,阈值形同虚设——
+    归一化必须落在差异的真实分布范围内,不能除以理论上限。"""
     h, w = base_rgba.shape[:2]
     tw, th = int(w * meta['scale']), int(h * meta['scale'])
     ox, oy = int(meta['offset_x']), int(meta['offset_y'])
@@ -283,13 +298,11 @@ def terrain_match_score(panel_bgr, base_rgba, meta):
         return 0.0
     region = panel_bgr[oy:oy + th, ox:ox + tw]
     resized = cv2.resize(base_rgba, (tw, th), interpolation=cv2.INTER_NEAREST)
-    template = resized[:, :, :3].astype(np.float32)
     mask = resized[:, :, 3] > 0
     if not mask.any():
         return 0.0
-    diff = np.abs(region.astype(np.float32) - template).sum(axis=2)[mask]
-    # 平均色差 → 0~1 相似度:完全一致=1,差 255*3=765=0
-    return float(max(0.0, 1.0 - diff.mean() / 765.0))
+    diff = np.abs(region.astype(np.int16) - resized[:, :, :3].astype(np.int16)).max(axis=2)
+    return float(((diff <= TERRAIN_PIX_TOL) & mask).sum() / mask.sum())
 
 
 def load_base_map(map_dir):
@@ -342,7 +355,7 @@ git commit -m "feat: 小地图感知纯函数——黄点质心/坐标变换/标
 **Interfaces:**
 - Consumes: Task 1 的 `panel_to_map` / meta
 - Produces:
-  - `DotTracker(jump_guard=8.0, cmd_mismatch_limit=3.0, cmd_min_move=1.0)`
+  - `DotTracker(jump_guard_base=4.0, jump_guard_per_sec=12.0, cmd_mismatch_limit=3.0, cmd_min_move=1.0)`
   - `.pos` → `(mx, my) | None`(底图坐标)
   - `acquire(dots_before, dots_after, meta, min_panel_move=2.0) -> (mx, my) | None` — 移动捕获:位移最大的点=自己
   - `update(dots, meta, now, cmd_dir=None) -> ((mx, my) | None, status)`;status ∈ `'ok' | 'lost' | 'suspect' | 'mismatch'`;cmd_dir ∈ `'left' | 'right' | None`
@@ -377,11 +390,20 @@ class TestDotTracker(unittest.TestCase):
         self.assertAlmostEqual(pos[0], 52.0, delta=0.5)
 
     def test_jump_guard_rejects_far_jump_and_keeps_pos(self):
-        t = minimap.DotTracker(jump_guard=8.0)
+        t = minimap.DotTracker()  # dt=0 → 上限 = base 4 格
         t.pos = (50.0, 50.0)
-        pos, status = t.update([(90.0, 50.0, 8)], self.meta, 100.0)  # 跳 40px=NCP 认错
+        pos, status = t.update([(90.0, 50.0, 8)], self.meta, 100.0)  # 跳 40px=NPC 认错
         self.assertEqual(status, 'suspect')
         self.assertEqual(t.pos, (50.0, 50.0))  # 不采信
+
+    def test_jump_guard_scales_with_dt(self):
+        # 评审 3:固定 8 格在慢拍节奏下会误杀正常行走——上限必须随拍间隔自适应
+        t = minimap.DotTracker()  # base 4 + 12 格/秒
+        t.pos = (50.0, 50.0)
+        _, s1 = t.update([(60.0, 50.0, 8)], self.meta, 100.0)  # dt=0 → 上限 4,10px 拒采
+        self.assertEqual(s1, 'suspect')
+        _, s2 = t.update([(60.0, 50.0, 8)], self.meta, 101.0)  # dt=1s → 上限 16,10px 放行
+        self.assertEqual(s2, 'ok')
 
     def test_lost_when_no_dots(self):
         t = minimap.DotTracker()
@@ -415,13 +437,19 @@ Expected: FAIL `AttributeError: ... 'minimap' has no attribute 'DotTracker'`
 
 ```python
 class DotTracker:
-    """黄点跟踪(spec §2.3):最近邻 + 跳变守卫 + 指令-位移一致性。纯状态类。"""
+    """黄点跟踪(spec §2.3):最近邻 + 跳变守卫 + 指令-位移一致性。纯状态类。
+    跳变守卫随拍间隔自适应(评审 3):上限 = base + per_sec × dt。
+    固定上限是拍脑袋——它隐式假设了调用频率;巡逻拍节奏 ~10Hz(远小于 1s),
+    base=4 格盖击退瞬移,per_sec=12 格/秒盖行走(M0 用实走速度标定终值)。"""
 
-    def __init__(self, jump_guard=8.0, cmd_mismatch_limit=3.0, cmd_min_move=1.0):
-        self.jump_guard = jump_guard            # 单拍位移上限(底图格):超=物理不可能,拒采
+    def __init__(self, jump_guard_base=4.0, jump_guard_per_sec=12.0,
+                 cmd_mismatch_limit=3.0, cmd_min_move=1.0):
+        self.jump_guard_base = jump_guard_base        # 瞬时位移余量(底图格):击退/首拍
+        self.jump_guard_per_sec = jump_guard_per_sec  # 行走速度上限(底图格/秒)
         self.cmd_mismatch_limit = cmd_mismatch_limit  # 持续按键无位移判异常的秒数
-        self.cmd_min_move = cmd_min_move        # 该窗口内应有的最小位移(底图格)
+        self.cmd_min_move = cmd_min_move              # 该窗口内应有的最小位移(底图格)
         self.pos = None                         # (mx, my) 底图坐标
+        self._last_update_t = None              # 上次 update 时刻(dt 自适应守卫用)
         self._cmd_anchor = None                 # (pos, t) 指令一致性窗口起算点
 
     def acquire(self, dots_before, dots_after, meta, min_panel_move=2.0):
@@ -440,6 +468,9 @@ class DotTracker:
 
     def update(self, dots, meta, now, cmd_dir=None):
         """每帧更新。返回 (pos|None, status);status ∈ ok/lost/suspect/mismatch。"""
+        dt = 0.0 if self._last_update_t is None else max(0.0, now - self._last_update_t)
+        self._last_update_t = now
+        jump_limit = self.jump_guard_base + self.jump_guard_per_sec * dt
         status = 'ok'
         if self.pos is not None:
             if not dots:
@@ -449,7 +480,7 @@ class DotTracker:
                                              + abs(d[1] - self.pos[1] * meta['scale'] - meta['offset_y']))
                 cand_map = panel_to_map((cand[0], cand[1]), meta)
                 jump = abs(cand_map[0] - self.pos[0]) + abs(cand_map[1] - self.pos[1])
-                if jump > self.jump_guard:
+                if jump > jump_limit:
                     status, pos = 'suspect', self.pos   # 拒采,保持旧位置
                 else:
                     self.pos = cand_map
@@ -548,7 +579,7 @@ class TestLoadRoutes(unittest.TestCase):
         self.assertEqual(rl.load_routes('不存在的目录'), ([], []))
 
 
-class TestNearestCommand(unittest.TestCase:
+class TestNearestCommand(unittest.TestCase):
 
     def setUp(self):
         self.seg = {(10, 10): 'left none none', (20, 20): 'none up none', (90, 90): 'none none goal'}
@@ -1780,6 +1811,8 @@ class TestPatrolClimb(unittest.TestCase):
 
     def test_no_progress_retries_then_recovers(self):
         m = self._m(climb_verify_window=1.5, climb_max_retries=4)
+        # 入口拍即对位(评审 4):前置 3 拍恰好完成转换(100.0/100.1/100.2 命中 1/2/3 → 开爬)。
+        # 评审 5:旧入口实现(入口拍空走)会把循环第一拍消耗在"开爬"上,循环 4 拍只攒 3 次重试
         m.tick(100.0, (10, 50), nearest('none up none', pixel=(10, 40)), False, 500.0)
         m.tick(100.1, (10, 50), nearest('none up none', pixel=(10, 40)), False, 500.0)
         m.tick(100.2, (10, 50), nearest('none up none', pixel=(10, 40)), False, 500.0)
@@ -1810,53 +1843,59 @@ Expected: FAIL(CLIMB 分支未实现,`state` 仍是 FOLLOW)
                             #  'since':t,'align_hits':int,'retries':int,'y0':float,'retry_tap':bool}
 ```
 
-`tick` 中 RECOVER/COMBAT 之后、FOLLOW 之前插 CLIMB 块;FOLLOW 的 `cmd in CLIMB_COMMANDS` 分支改为进入 CLIMB:
+`tick` 中 CLIMB 块置于 mob_in_zone 判断**之前**(评审 1:怪不打断)、RECOVER 之后(跟踪告警仍可打断);子阶段步进抽成 `_climb_step`,FOLLOW 入口**委托同一段逻辑**——进入拍即对位(评审 4:旧实现入口拍 held=空集,白空走一拍);`_climb_step` 退出时返回 None,tick 落回本拍 FOLLOW 流程:
 
 ```python
         if self.state == self.CLIMB:
-            c = self._climb
-            cur_y = anchor_y if anchor_y is not None else (pos[1] if pos else None)
-            # 退出:最近色不再是爬色(爬到新层,走色接管)
-            if nearest is None or nearest['command'] not in CLIMB_COMMANDS:
+            out = self._climb_step(now, pos, nearest, anchor_y)
+            if out is not None:
+                return out
+            # 返回 None = 已退 CLIMB(最近色变回走色),落回下面 FOLLOW 流程
+
+    def _climb_step(self, now, pos, nearest, anchor_y):
+        """CLIMB 子阶段步进 → PatrolOutput;退出 CLIMB 时返回 None(调用方落回 FOLLOW)。"""
+        c = self._climb
+        cur_y = anchor_y if anchor_y is not None else (pos[1] if pos else None)
+        if nearest is None or nearest['command'] not in CLIMB_COMMANDS:
+            self._climb = None
+            self.state = self.FOLLOW
+            return None
+        if c['sub'] == 'align':
+            dx = pos[0] - c['target'][0] if pos else 999
+            if pos is not None and abs(dx) <= self.climb_align_px:
+                c['align_hits'] += 1
+            else:
+                c['align_hits'] = 0
+            if c['align_hits'] >= self.climb_align_ticks or \
+                    now - c['since'] > self.climb_align_timeout:
+                c['sub'] = 'climb'
+                c['since'] = now
+                c['y0'] = cur_y
+                return self._output(held={c['dir']}, note='climb_start')
+            step = 'left' if dx > 0 else 'right'
+            return self._output(held={step}, note=f"align dx={dx:.1f}")
+        # climb 子阶段:验证爬动
+        progressed = (cur_y is not None and c['y0'] is not None
+                      and ((c['dir'] == 'up' and cur_y < c['y0'] - self.climb_min_dy)
+                           or (c['dir'] == 'down' and cur_y > c['y0'] + self.climb_min_dy)))
+        if progressed:
+            c['y0'] = cur_y
+            c['since'] = now
+            return self._output(held={c['dir']}, note='climbing')
+        if now - c['since'] > self.climb_verify_window:
+            c['retries'] += 1
+            if c['retries'] > self.climb_max_retries:
                 self._climb = None
-                self.state = self.FOLLOW
-            elif c['sub'] == 'align':
-                dx = pos[0] - c['target'][0] if pos else 999
-                if pos is not None and abs(dx) <= self.climb_align_px:
-                    c['align_hits'] += 1
-                else:
-                    c['align_hits'] = 0
-                aligned = c['align_hits'] >= self.climb_align_ticks
-                timed_out = now - c['since'] > self.climb_align_timeout
-                if aligned or timed_out:
-                    c['sub'] = 'climb'
-                    c['since'] = now
-                    c['y0'] = cur_y
-                    return self._output(held={c['dir']}, note='climb_start')
-                step = 'left' if dx > 0 else 'right'
-                return self._output(held={step}, note=f"align dx={dx:.1f}")
-            else:  # climb 子阶段:验证爬动
-                progressed = (cur_y is not None and c['y0'] is not None
-                              and ((c['dir'] == 'up' and cur_y < c['y0'] - self.climb_min_dy)
-                                   or (c['dir'] == 'down' and cur_y > c['y0'] + self.climb_min_dy)))
-                if progressed:
-                    c['y0'] = cur_y
-                    c['since'] = now
-                    return self._output(held={c['dir']}, note='climbing')
-                if now - c['since'] > self.climb_verify_window:
-                    c['retries'] += 1
-                    if c['retries'] > self.climb_max_retries:
-                        self._climb = None
-                        return self._enter_recover(now, 'climb_failed')
-                    # 朝梯子方向 tap 一小步,再按爬键(下拍生效);此处直接给 tap 意图
-                    step = 'left' if pos and pos[0] > c['target'][0] else 'right'
-                    c['since'] = now
-                    c['y0'] = cur_y
-                    return self._output(held={step}, note=f"climb_retry{c['retries']}")
-                return self._output(held={c['dir']}, note='climb_wait')
+                return self._enter_recover(now, 'climb_failed')
+            # 朝梯子方向 tap 一小步,再按爬键(下拍生效);此处直接给 tap 意图
+            step = 'left' if pos and pos[0] > c['target'][0] else 'right'
+            c['since'] = now
+            c['y0'] = cur_y
+            return self._output(held={step}, note=f"climb_retry{c['retries']}")
+        return self._output(held={c['dir']}, note='climb_wait')
 ```
 
-FOLLOW 进入:
+FOLLOW 的 `cmd in CLIMB_COMMANDS` 分支改为进入并**当拍对位**:
 
 ```python
         if cmd in CLIMB_COMMANDS:
@@ -1864,10 +1903,8 @@ FOLLOW 进入:
             self.state = self.CLIMB
             self._climb = {'target': nearest['pixel'], 'dir': ud, 'sub': 'align',
                            'since': now, 'align_hits': 0, 'retries': 0, 'y0': None}
-            return self._output(note='climb_enter')
+            return self._climb_step(now, pos, nearest, anchor_y)  # 进入拍即对位(评审 4)
 ```
-
-注意 CLIMB 块置于 mob_in_zone 判断**之前**(评审 1:怪不打断);RECOVER 保留最高优先。
 
 - [ ] **Step 4: 跑测试确认通过 + 全量回归**
 
@@ -2058,3 +2095,12 @@ git commit -m "docs: 路线巡逻五关验收记录——30min 无干预通过,�
 - **占位符扫描**:T13 Step1 用例骨架标了 `...`——执行时按 T9 `_task` 工厂展开,属"重复代码不复制"的例外(同一文件内工厂);其余步骤均含完整代码。
 - **类型一致**:`PatrolMachine(n_segments)`(T8 Step4 修正)↔ T9 `_patrol_ensure_loaded` 调用一致;`PatrolOutput.held` 元素 ∈ {'left','right','up','down'} ↔ T9 `key_of` 映射一致;`DotTracker.update` status 四值 ↔ T9 告警换算一致。
 - **已知先后手**:T11 删除 T8 的 `test_climb_color_no_crash_before_m2`(爬色接管后语义过期),已在 T11 Step4 写明。
+
+## 评审修订记录(2026-08-11,计划评审 5 条)
+
+1. **calibrate() 判别力(严重)**:`_masked_score` 由 TM_CCORR_NORMED 改为 **TM_SQDIFF_NORMED + 对比度门禁**(匹配区 std ≥ 模板 std/2,uniform 背景压到 ~0)——旧实现稀疏 mask 下垃圾面板也能拿 0.74,打穿 spec §2.1"校验失败报错停任务"
+2. **terrain_match_score() 判别力(严重)**:由 `1-平均差/765` 改为**逐像素色差容忍占比**(通道最大差 ≤ TERRAIN_PIX_TOL=30 的像素比例)——旧实现量程撑不满,错误地形也有 0.6~0.8,阈值形同虚设,打穿 spec §6 换图守护
+3. **jump_guard 与拍节奏冲突(中)**:固定 8 格改为 **base 4 格 + 12 格/秒 × dt 自适应**(隐式频率假设消除;测试补 `test_jump_guard_scales_with_dt`);spec §2.3/§4 参数行同步修订
+4. **CLIMB 入口空走一拍(中)**:子阶段步进抽成 `_climb_step`,FOLLOW 入口委托同一段逻辑,**进入拍即对位**;退出返回 None 落回本拍 FOLLOW
+5. **重试计数少一拍(中)**:与第 4 条联动——入口拍即对位后前置 3 拍恰好完成转换,测试原样通过;测试内加拍数注释固化
+6. 附带修复:`TestNearestCommand` 类定义缺右括号(SyntaxError)
