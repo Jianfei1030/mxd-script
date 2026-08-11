@@ -15,7 +15,8 @@ from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmT
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
 KEYS = {'攻击键': 'shift', '血药键': 'home', '蓝药键': 'insert',
         '回城卷键(可留空)': '', '拾取键': 'z', '宠物食物键(可留空)': 'q',
-        '椅子键(可留空)': 'r', '左移键': 'left', '右移键': 'right'}
+        '椅子键(可留空)': 'r', '左移键': 'left', '右移键': 'right',
+        '副攻击键(可留空)': ''}
 
 
 def make_task(**cfg_overrides):
@@ -1034,6 +1035,69 @@ class TestAttackTap(unittest.TestCase):
         # _last_attack 保持默认 0.0（哨兵，从未攻击过）
         task._do_attack(task.config, KEYS, now=100.0)
         self.assertEqual(task.send_key.call_count, 2)
+
+    def test_double_attack_off_by_default(self):
+        """二连击默认关闭:只按攻击键,不按副攻击键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_attack_present = True
+        task._do_attack(task.config, KEYS, now=100.0)
+        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+
+    def test_double_attack_fires_both_keys_back_to_back(self):
+        """二连击开启 + 副攻击键已绑定:先攻击键、立即副攻击键,两键相邻。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True})
+        task._last_attack_present = True
+        task._do_attack(task.config, keys, now=100.0)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('shift'), call('x')])
+
+    def test_double_attack_skipped_when_subkey_empty(self):
+        """二连击开启但副攻击键留空 → 视为关闭,只按攻击键(同群攻键约定)。"""
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True})
+        task._last_attack_present = True
+        task._do_attack(task.config, KEYS, now=100.0)
+        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+
+    def test_double_attack_skips_pad_step(self):
+        """二连击开启时跳过攻击前垫步:方向键不许插入攻击-副攻击之间。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '攻击前垫步开关': True, '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._last_zone = ((980, 530, 1580, 730))
+        task._last_centres = [(1100, 640)]
+        task._last_body_x = 1280
+        task._last_attack = 98.5  # 垫步条件本应放行(1.5s<2s)
+        task._do_attack(task.config, keys, now=100.0)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('shift'), call('x')])
+        # 无任何方向键插入
+        for c in task.send_key.call_args_list:
+            self.assertNotIn(c.args[0], ('left', 'right'))
+
+    def test_double_attack_respects_attack_interval(self):
+        """二连击共用 攻击间隔 节拍:同一间隔内只发一轮,不连发。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._do_attack(task.config, keys, now=100.0)
+        task.send_key.reset_mock()
+        task._do_attack(task.config, keys, now=101.0)  # 未满 1.5s
+        task.send_key.assert_not_called()
+
+    def test_double_attack_aoe_path_unaffected(self):
+        """群攻路径零改动:区内怪数达阈值时只按群攻键,不做二连击。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x',
+                             '群攻键(可留空)': 'a'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '群攻怪数阈值': 2})
+        task._last_zone_count = 3
+        task._last_zone_count_time = 100.0
+        task._last_attack = 0.0
+        task._do_attack(task.config, keys, now=100.0)
+        self.assertEqual(task.send_key.call_args_list, [call('a')])
 
 
 class TestSitChair(unittest.TestCase):
