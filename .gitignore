@@ -17,4 +17,4 @@ train_log.txt
 run_train.ps1
 docs/plans/
 *.onnx.bak_*
-assets/mob_model/mob.onnx
+assets/
