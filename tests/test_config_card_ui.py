@@ -35,6 +35,14 @@ class ConfigCardUiTest(unittest.TestCase):
         # Config 读写重定向到临时目录,不触碰真实 configs/(§11.1 禁止污染运行时配置)
         Config.config_folder = tempfile.mkdtemp()
 
+    def setUp(self):
+        # 每个用例独立:清掉折叠状态文件,避免用例间互相污染
+        import os
+        from ok.util.file import get_relative_path
+        state_path = get_relative_path(Config.config_folder, 'config_groups_state.json')
+        if os.path.exists(state_path):
+            os.remove(state_path)
+
     def _make_task(self, with_groups):
         from types import SimpleNamespace
         from src.task.MapleFarmTask import MapleFarmTask
@@ -133,6 +141,41 @@ class ConfigCardUiTest(unittest.TestCase):
         card.search_box.clear()  # 清空:恢复折叠状态
         self.assertTrue(card.config_widget_by_key['攻击间隔(秒)'].isHidden(), '清空后恢复折叠')
         self.assertFalse(card.config_widget_by_key['喝血阈值'].isHidden())
+
+    def test_collapse_state_persists_to_file(self):
+        from ok.util.file import get_relative_path, read_json_file
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        card.group_header_by_group['攻击'].click()  # 折叠并持久化
+        card.group_header_by_group['角色定位'].click()
+        path = get_relative_path(Config.config_folder, 'config_groups_state.json')
+        data = read_json_file(path)
+        self.assertEqual(data['MapleFarmTask']['攻击'], True)
+        self.assertEqual(data['MapleFarmTask']['角色定位'], True)
+        # 重建卡片(同任务类名),折叠状态应从文件恢复
+        card2 = self._make_card(task)
+        self.assertTrue(card2.config_widget_by_key['攻击间隔(秒)'].isHidden(), '重建后攻击组应保持折叠')
+        self.assertTrue(card2.config_widget_by_key['角色名'].isHidden(), '重建后角色定位组应保持折叠')
+        self.assertFalse(card2.config_widget_by_key['喝血阈值'].isHidden(), '未折叠组不受影响')
+
+    def test_collapse_persist_ignores_stale_group_names(self):
+        """state 文件里存在但当前 CONFIG_GROUPS 没有的组名应被忽略(配置演进后残留)。"""
+        import json
+        from ok.util.file import get_relative_path
+        path = get_relative_path(Config.config_folder, 'config_groups_state.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump({'MapleFarmTask': {'攻击': True, '不存在的组': True}}, f, ensure_ascii=False)
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        self.assertTrue(card.config_widget_by_key['攻击间隔(秒)'].isHidden())
+        self.assertEqual(card.group_collapsed.get('不存在的组'), None, '残留组名不加载')
+
+    def test_no_groups_task_does_not_write_state(self):
+        from ok.util.file import get_relative_path, read_json_file
+        task = self._make_task(with_groups=False)
+        self._make_card(task)
+        path = get_relative_path(Config.config_folder, 'config_groups_state.json')
+        self.assertIsNone(read_json_file(path), '无分组任务不应创建折叠状态文件')
 
     def test_render_grab_screenshots(self):
         """offscreen 渲染抓图,作为 E2E 截图证据归档(§11.3/§11.5)。"""

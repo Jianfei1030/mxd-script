@@ -496,8 +496,8 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_com
 
 ## 12. 自动打怪卡片配置项分组+搜索（2026-08-11 上线）
 
-- **功能**：「实时触发」→「自动打怪」卡片展开区：全部配置项按功能分 9 组（攻击/拾取/保命与药水/走位与朝向/寻怪/角色定位/战斗细节/挂机辅助/调试），组标题青绿粗体 + 组间虚线；**组标题可点击折叠/展开**（会话级状态，▶/▼ 箭头指示）；展开区顶部有搜索框，输入关键字**宽松匹配**（键名+描述子串、忽略大小写、空输入全显示），匹配项保留、组标题随组内匹配显隐，**搜索时匹配组自动展开、清空后恢复折叠状态**；清空恢复全部分组。仅 UI 层，不改任何任务执行/配置读写逻辑
+- **功能**：「实时触发」→「自动打怪」卡片展开区：全部配置项按功能分 9 组（攻击/拾取/保命与药水/走位与朝向/寻怪/角色定位/战斗细节/挂机辅助/调试），组标题青绿粗体 + 组间虚线；**组标题可点击折叠/展开**（▶/▼ 箭头指示，**折叠状态持久化到 `configs/config_groups_state.json`**——重建卡片/重启 GUI 后恢复，按任务类名分节，残留组名自动忽略）；展开区顶部有搜索框，输入关键字**宽松匹配**（键名+描述子串、忽略大小写、空输入全显示），匹配项保留、组标题随组内匹配显隐，**搜索时匹配组自动展开、清空后恢复折叠状态**；清空恢复全部分组。仅 UI 层，不改任何任务执行/配置读写逻辑
 - **实现**：分组元数据 `MapleFarmTask.CONFIG_GROUPS`（模块级，与 `DEFAULT_CONFIG` 相邻，**新增配置键必须同步归组**——test_config_groups 的完整性用例会红）；匹配/过滤纯函数在 `src/task/config_groups.py`；渲染装配在 `ok/gui/tasks/ConfigCard.py`（无 `config_groups` 的任务卡片零变化）
 - **渲染顺序**：ConfigCard 有 config_groups 时按组序渲染（`__ordered_config_keys`，组连续、每组只插一个标题）；无分组任务保持原 dict 顺序
-- **测试**：`tests/test_config_groups.py`（CONFIG_GROUPS 覆盖 DEFAULT_CONFIG 全部键且不重复、唯一组名、matches/visible_keys/visible_groups 纯函数）；`tests/test_config_card_ui.py`（offscreen 渲染：搜索框存在/组标题数/过滤/清空恢复/**折叠切换/搜索展开覆盖折叠/清空恢复折叠**/无分组任务无搜索框；grab 渲染图存 `screenshots/e2e/config_groups/`）
+- **测试**：`tests/test_config_groups.py`（CONFIG_GROUPS 覆盖 DEFAULT_CONFIG 全部键且不重复、唯一组名、matches/visible_keys/visible_groups 纯函数）；`tests/test_config_card_ui.py`（offscreen 渲染：搜索框存在/组标题数/过滤/清空恢复/**折叠切换/搜索展开覆盖折叠/清空恢复折叠/持久化写入与重建恢复/残留组名忽略/无分组任务不写状态文件**/无分组任务无搜索框；grab 渲染图存 `screenshots/e2e/config_groups/`）
 - **E2E 验收（2026-08-11）**：offscreen 渲染截图经视觉模型验收通过（9 组标题 + 顶部搜索框 + 过滤后跨组匹配 + 折叠后组标题保留/内容隐藏/箭头区分）；真实 GUI 启动无崩溃。⚠️ agent 受限窗口站无法截图提权 GUI（PyAutoGUI 全屏与 `_e2e_capture.py` 都抓到空白），交互类 E2E 走 offscreen grab + 断言

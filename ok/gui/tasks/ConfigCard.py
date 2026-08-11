@@ -73,6 +73,9 @@ class ConfigContentMixin:
                             self.__addConfigWithSubConfigs(key, None, added_keys, set())
         self.__setup_sub_configs()
         self.add_buttons()
+        self.__load_group_collapsed()
+        if hasattr(self, 'search_box'):
+            self.__apply_search_filter(self.search_box.text())
         self._adjust_config_content_size()
 
     def _on_empty_config_content(self):
@@ -203,10 +206,40 @@ class ConfigContentMixin:
         self._adjust_config_content_size()
 
     def __toggle_group(self, group):
-        """点击组标题:折叠/展开该组。折叠状态只影响无搜索时的展示。"""
+        """点击组标题:折叠/展开该组。折叠状态只影响无搜索时的展示,并持久化到本地。"""
         self.group_collapsed[group] = not self.group_collapsed.get(group, False)
+        self.__save_group_collapsed()
         self.__update_header_arrow(group)
         self.__apply_search_filter(self.search_box.text())
+
+    def __config_groups_state_path(self):
+        """折叠状态文件路径:configs/config_groups_state.json(configs/ 被 gitignore,天然本地)。"""
+        from ok.util.config import Config
+        from ok.util.file import get_relative_path
+        return get_relative_path(Config.config_folder, 'config_groups_state.json')
+
+    def __load_group_collapsed(self):
+        """渲染完成后读取本地折叠状态,仅覆盖已渲染的组(旧组名残留自动忽略)。"""
+        groups = self.__config_groups()
+        if not groups or self.task is None:
+            return
+        from ok.util.file import read_json_file
+        data = read_json_file(self.__config_groups_state_path()) or {}
+        stored = data.get(self.task.__class__.__name__) or {}
+        valid_groups = {g for g, _ in groups}
+        self.group_collapsed.update(
+            {g: bool(v) for g, v in stored.items() if g in valid_groups})
+
+    def __save_group_collapsed(self):
+        """折叠状态变化即写回本地,按任务类名分节。"""
+        groups = self.__config_groups()
+        if not groups or self.task is None:
+            return
+        from ok.util.file import read_json_file, write_json_file
+        path = self.__config_groups_state_path()
+        data = read_json_file(path) or {}
+        data[self.task.__class__.__name__] = dict(self.group_collapsed)
+        write_json_file(path, data)
 
     def __update_header_arrow(self, group):
         header = self.group_header_by_group.get(group)
