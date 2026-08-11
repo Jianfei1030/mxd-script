@@ -177,6 +177,22 @@ def anchor_vx_update(old_vx, dx, dt, dy,
     return 0.7 * v + 0.3 * old_vx
 
 
+def extrapolate_vx(learned_vx, seek_dir, cfg_speed):
+    """外推速度(像素/秒):学习值与寻怪方向**同向**才用,反向/无学习值用配置速度×方向。
+
+    击退方向几乎恒与寻怪方向相反(朝怪走、被怪打回来),学来的反向 vx 是击退残余,
+    不是行走速度——直接外推会把 pred 往真人反方向推,1s 内逃出所有关联门
+    (2026-08-10 19:56 日志铁证:cached 拍 x=2560 钳位而 寻怪=left)。
+    学习点(anchor_vx_update)不动:残余会在下一次真实行走观测时被低通自然替换。
+    """
+    if seek_dir not in ('left', 'right'):
+        return 0.0   # 契约外输入:不外推(调用点已保证非 None,这里防御)
+    sign = 1.0 if seek_dir == 'right' else -1.0
+    if learned_vx != 0.0 and learned_vx * sign > 0:
+        return learned_vx
+    return cfg_speed * sign
+
+
 def should_pickup(now, last_pickup_time, interval, enabled):
     return enabled and now - last_pickup_time >= interval
 
@@ -587,6 +603,29 @@ def select_player_box(players, pred, identity_fresh,
         return (bx - px) ** 2 + (by - py) ** 2
 
     return min(gated, key=_d2)
+
+
+LOST_UNIQUE_MIN_AGE = 1.0   # 丢锚超此时长(秒)才允许唯一框接管:新鲜丢失先走常规门
+LOST_UNIQUE_GATE_Y = 300    # 唯一框纵向门(px):实测层高差 240-300,换层接得住、隔层挡得住
+
+
+def select_lost_unique_box(players, pred_y, anchor_age,
+                           min_age=LOST_UNIQUE_MIN_AGE, gate_y=LOST_UNIQUE_GATE_Y):
+    """丢锚末级安全网(spec 2026-08-10 §3.4):常规门裁决失败后,
+    丢锚超 min_age 且全屏**恰好 1 个** player 框且同层 → 直接接管。
+
+    唯一性就是身份判据(单人挂机全屏 1 框几乎恒是自己,与 select_player_box
+    「门内恰 1 个不看身份」同理,范围扩到全屏)。横向不看门:pred 已逃逸,
+    横向先验已死;纵向先验仍活(外推只推 x),±gate_y 挡住隔层路人。
+    多框拒裁:多人图宁可慢扫不认错。认错上界 = 名字牌下次可读 + 复验间隔,
+    身份时间戳不由本通道刷新(yolo 级既有纪律)。
+    """
+    if anchor_age is None or anchor_age < min_age or len(players) != 1:
+        return None
+    _, by = player_box_anchor(players[0])
+    if abs(by - pred_y) > gate_y:
+        return None
+    return players[0]
 
 
 def crowd_present(mob_count, threshold):

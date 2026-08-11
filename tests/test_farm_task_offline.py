@@ -15,7 +15,8 @@ from src.task.MapleFarmTask import (DEFAULT_CONFIG, TURN_TAP_SECONDS, MapleFarmT
 FRAME = 'screenshots/test_frames/training_ground_full_2560x1440.png'
 KEYS = {'攻击键': 'shift', '血药键': 'home', '蓝药键': 'insert',
         '回城卷键(可留空)': '', '拾取键': 'z', '宠物食物键(可留空)': 'q',
-        '椅子键(可留空)': 'r', '左移键': 'left', '右移键': 'right'}
+        '椅子键(可留空)': 'r', '左移键': 'left', '右移键': 'right',
+        '副攻击键(可留空)': ''}
 
 
 def make_task(**cfg_overrides):
@@ -1035,6 +1036,69 @@ class TestAttackTap(unittest.TestCase):
         task._do_attack(task.config, KEYS, now=100.0)
         self.assertEqual(task.send_key.call_count, 2)
 
+    def test_double_attack_off_by_default(self):
+        """二连击默认关闭:只按攻击键,不按副攻击键。"""
+        task = make_task(**{'攻击模式': '检测'})
+        task._last_attack_present = True
+        task._do_attack(task.config, KEYS, now=100.0)
+        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+
+    def test_double_attack_fires_both_keys_back_to_back(self):
+        """二连击开启 + 副攻击键已绑定:先攻击键、立即副攻击键,两键相邻。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True})
+        task._last_attack_present = True
+        task._do_attack(task.config, keys, now=100.0)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('shift'), call('x')])
+
+    def test_double_attack_skipped_when_subkey_empty(self):
+        """二连击开启但副攻击键留空 → 视为关闭,只按攻击键(同群攻键约定)。"""
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True})
+        task._last_attack_present = True
+        task._do_attack(task.config, KEYS, now=100.0)
+        self.assertEqual(task.send_key.call_args_list, [call('shift')])
+
+    def test_double_attack_skips_pad_step(self):
+        """二连击开启时跳过攻击前垫步:方向键不许插入攻击-副攻击之间。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '攻击前垫步开关': True, '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._last_zone = ((980, 530, 1580, 730))
+        task._last_centres = [(1100, 640)]
+        task._last_body_x = 1280
+        task._last_attack = 98.5  # 垫步条件本应放行(1.5s<2s)
+        task._do_attack(task.config, keys, now=100.0)
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('shift'), call('x')])
+        # 无任何方向键插入
+        for c in task.send_key.call_args_list:
+            self.assertNotIn(c.args[0], ('left', 'right'))
+
+    def test_double_attack_respects_attack_interval(self):
+        """二连击共用 攻击间隔 节拍:同一间隔内只发一轮,不连发。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '攻击间隔(秒)': 1.5})
+        task._last_attack_present = True
+        task._do_attack(task.config, keys, now=100.0)
+        task.send_key.reset_mock()
+        task._do_attack(task.config, keys, now=101.0)  # 未满 1.5s
+        task.send_key.assert_not_called()
+
+    def test_double_attack_aoe_path_unaffected(self):
+        """群攻路径零改动:区内怪数达阈值时只按群攻键,不做二连击。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x',
+                             '群攻键(可留空)': 'a'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '群攻怪数阈值': 2})
+        task._last_zone_count = 3
+        task._last_zone_count_time = 100.0
+        task._last_attack = 0.0
+        task._do_attack(task.config, keys, now=100.0)
+        self.assertEqual(task.send_key.call_args_list, [call('a')])
+
 
 class TestSitChair(unittest.TestCase):
     """坐椅(_do_sit_chair 直接测,无帧依赖)。
@@ -1256,10 +1320,10 @@ class TestAnchorExtrapolation(unittest.TestCase):
                 patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
             got, source = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
         self.assertEqual(source, 'cached')
-        self.assertEqual(got.x, 1280 + 200 * 3)  # 3s × 配置速度
+        self.assertEqual(got.x, 1280 + 500.0)                     # 600 → 钳 500
         self.assertEqual(got.y, 800.0)           # y 不推(同平台稳定)
         window.assert_called_once()
-        self.assertEqual(window.call_args[0][2], (1280 + 600.0, 800.0))  # 小窗跟外推位置
+        self.assertEqual(window.call_args[0][2], (1280 + 500.0, 800.0))  # 小窗跟外推位置
 
     def test_cached_anchor_uses_measured_velocity_when_fresh(self):
         """近 2s 内有实测速度(低通后)→ 优先用它,而不是配置速度。"""
@@ -1386,6 +1450,68 @@ class TestAnchorExtrapolation(unittest.TestCase):
         self.assertIsNone(task._seek_dir)
         self.assertIsNone(task._seek_key)
         self.assertIn(call('shift'), task.send_key.call_args_list)
+
+    def test_reverse_learned_vx_does_not_escape(self):
+        """回归(08-10 19:56 钳位铁证):学到 +vx(击退向右)但寻怪向左 →
+        外推不许往右逃,退回配置速度×寻怪方向。
+        速度取 150:150*3=450 < 500 不触帽——这条只测方向,与
+        test_extrapolation_capped_at_max_dx 职责分离。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 150})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._anchor_vx = 75.0           # 击退残余(向右)
+        task._last_anchor_hit = 102.0    # 实测速度仍新鲜
+        task._seek_dir = 'left'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 103.0, task.config)
+        self.assertEqual(got.x, 1280 - 150 * 3)  # 830;旧逻辑会给 1280+75*3=1505
+
+    def test_extrapolation_capped_at_max_dx(self):
+        """丢锚期外推位移封顶 ±500(拆振荡回路,08-10 21:18 外推↔寻怪反馈):
+        年龄再大,位移也不超 2s 行走量。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'right'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 108.0, task.config)
+        self.assertEqual(got.x, 1280 + 500.0)  # 250*8=2000 → 钳 500
+
+    def test_extrapolation_clamped_to_frame_edge(self):
+        """封顶与帧边界 [0,2560] 的复合(spec §6):锚点在 x=100、寻怪 left →
+        dx 钳 -500 后 x=-400,再钳到 0,绝不出负坐标。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (100.0, 800.0)
+        task._anchor_time = 100.0
+        task._seek_dir = 'left'
+        with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+            got, _ = task._resolve_anchor(_synthetic_frame(), 106.0, task.config)
+        self.assertEqual(got.x, 0.0)
+
+    def test_oscillation_bounded_when_seek_flips(self):
+        """回归(spec §6 振荡剧本,08-10 21:18):丢锚期寻怪方向每拍翻转,
+        相邻 cached 拍 |Δbody_x| ≤ 2×500=1000(旧逻辑外推位移随年龄无界,
+        实测单拍跳 ±1250px+,门中心跟着瞬移,YOLO 关联被主动压死)。"""
+        task = make_task(**{'攻击模式': '检测', '角色名': 'Yufeng咕咕',
+                            '寻怪外推速度(像素/秒)': 250})
+        task._anchor = (1280.0, 800.0)
+        task._anchor_time = 100.0
+        xs = []
+        for i, d in enumerate(['right', 'left', 'right', 'left']):
+            task._seek_dir = d
+            with patch('src.task.MapleFarmTask.anchor.find_in_window', return_value=None), \
+                    patch('src.task.MapleFarmTask.anchor.find_in_region', return_value=None):
+                got, source = task._resolve_anchor(_synthetic_frame(), 106.0 + i, task.config)
+            self.assertEqual(source, 'cached')
+            xs.append(got.x)
+        self.assertTrue(all(abs(b - a) <= 1000 for a, b in zip(xs, xs[1:])),
+                        xs)
 
 
 class TestTemplateSplitMatch(unittest.TestCase):
@@ -2751,7 +2877,14 @@ class TestDecisionLineYoloFields(unittest.TestCase):
 
     def test_fields_appended_at_line_end(self):
         # 追加在行尾:analyze_anchor/analyze_seek 的前缀正则不受影响
-        self.assertTrue(self._line().endswith('关联距=-'))
+        self.assertTrue(self._line().endswith('关联距=- yolo全屏=-'))
+
+    def test_full_count_rendered_when_present(self):
+        self.assertIn('yolo候选=0 关联距=- yolo全屏=1',
+                      self._line(yolo_cands=0, yolo_full=1))
+
+    def test_full_count_dash_when_absent(self):
+        self.assertIn('yolo全屏=-', self._line(yolo_cands=2, yolo_dist=35.4))
 
 
 class TestFindMobsBoxesParam(unittest.TestCase):
@@ -2894,6 +3027,89 @@ class TestYoloAnchorFusion(unittest.TestCase):
         # 同一对象:分流必须吃 find_all 的结果,不许自己再推理
         self.assertIs(kwargs.get('boxes'), task.find_all.return_value)
         self.assertTrue(any('怪=1' in l for l in lines), lines)
+
+    def test_rejected_beat_records_full_screen_count(self):
+        # 多候选 + 身份过期 → 拒裁退 cached,但观测必须留痕:
+        # yolo候选=2(门内) yolo全屏=2,不再是 '-/-' 的盲区(spec §3.3)
+        lines = self._beat(self._task(
+            [self._player(1180, 880), self._player(1300, 880)],
+            identity_age=30.0))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=2 关联距=- yolo全屏=2' in l
+                            for l in lines), lines)
+
+    def test_empty_screen_records_zero_not_dash(self):
+        # YOLO 跑了但全屏 0 个 player 框 → 候选=0 全屏=0(可达状态:
+        # 「推理了没框」与「YOLO 级未到达」必须分得开,这正是排查被挡两次的盲区)
+        lines = self._beat(self._task([]))
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=0 关联距=- yolo全屏=0' in l
+                            for l in lines), lines)
+
+    def test_yolo_exception_marks_level_not_reached(self):
+        # 推理异常 ≠ 全屏无框:异常拍 players=None,YOLO 级按未到达处理记 '-',
+        # 与「跑了没框」(全屏=0) 在日志里可区分(评审 Minor 1 修复)
+        task = self._task([])
+        task.find_all = MagicMock(side_effect=RuntimeError('boom'))
+        lines = self._beat(task)
+        self.assertTrue(any('src=cached' in l for l in lines), lines)
+        self.assertTrue(any('yolo候选=- 关联距=- yolo全屏=-' in l
+                            for l in lines), lines)
+
+    def test_window_beat_yolo_fields_all_dash(self):
+        # YOLO 级未到达(快窗命中)→ 三个字段全 '-'
+        task = self._task([self._player(1180, 880)])
+        hit = AnchorHit(1200.0, 900.0, 130, 'Yufeng咕咕')
+        frame = _synthetic_frame()
+        with patch.object(anchor, 'find_in_window', return_value=hit), \
+                patch.object(anchor, 'find_in_region', return_value=None), \
+                patch('time.time', return_value=100.0):
+            task._detect_and_act(frame, 100.0, task.config, task.get_global_config())
+        lines = [c.args[0] for c in task.log_debug.call_args_list
+                 if '决策 ' in c.args[0]]
+        self.assertTrue(any('src=window' in l for l in lines), lines)
+        self.assertTrue(all('yolo候选=- 关联距=- yolo全屏=-' in l
+                            for l in lines), lines)
+
+    def test_lost_unique_box_takes_over_beyond_gate(self):
+        # 丢锚 3s + 全屏唯一框在门外(横向 800px)→ 末级接管,一拍 src=yolo
+        # (08-09/08-10 两次完全丢失的主修复:不再等名字牌可读的慢扫)
+        task = self._task([self._player(2000, 880)], identity_age=30.0)
+        task._anchor_time = 97.0        # 丢锚 3s(now=100)
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        self.assertTrue(any('body_x=2000' in l for l in lines), lines)
+        # 接管不刷身份时间戳:认错路人靠复验慢扫兜底,整条风险章都押在这行上
+        self.assertEqual(task._last_identity_hit, 70.0)
+        # 本剧本接管瞬移不会污染实测速度:dt=3s > ANCHOR_VX_MAX_AGE(2s)先挡,
+        # dy=|944-900|=44 ≥ platform_dy(30)再挡(接管本身就常伴换层)
+        self.assertEqual(task._anchor_vx, 0.0)
+
+    def test_lost_unique_box_takeover_vx_learning_is_known_and_capped(self):
+        # 通性锁定(spec §5):age 落在 1.0~2.0s 且同层(dy<30,正是横向逃逸
+        # 主场景)时,两道门都拦不住,接管瞬移会被低通学进去
+        # (dx=600/dt=1.5=400px/s ≤ 600 跳变门 → 0.7*400=280)。
+        # 不加门:外推 ±500 封顶 + 同向防护兜底。这条锁「知道它在学、学多少」
+        task = self._task([self._player(1800, 836)], identity_age=30.0)
+        task._anchor_time = 98.5        # 丢锚 1.5s(now=100);pseudo y=836+64=900=锚点 y,dy=0
+        lines = self._beat(task)
+        self.assertTrue(any('src=yolo' in l for l in lines), lines)
+        self.assertAlmostEqual(task._anchor_vx, 0.7 * 600 / 1.5, places=5)
+
+    def test_lost_unique_box_respects_switch_off(self):
+        task = self._task([self._player(2000, 880)], identity_age=30.0,
+                          **{'丢锚唯一框接管开关': False})
+        task._anchor_time = 97.0
+        lines = self._beat(task)
+        self.assertFalse(any('src=yolo' in l for l in lines), lines)
+
+    def test_lost_unique_box_rejects_multiple_players(self):
+        # 丢锚再久,全屏 ≥2 框也不接管(多人图保守,spec §3.4)
+        task = self._task([self._player(2000, 880), self._player(600, 880)],
+                          identity_age=30.0)
+        task._anchor_time = 97.0
+        lines = self._beat(task)
+        self.assertFalse(any('src=yolo' in l for l in lines), lines)
 
 
 class TestTemplateDriftGuard(unittest.TestCase):

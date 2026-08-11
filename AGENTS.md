@@ -4,6 +4,11 @@
 > **每个 agent 会话启动前必读，避免重复踩坑。**  
 > 路径：`C:\projects\mxd-script\AGENTS.md`（旧机器）；当前机器（2026-08-10 实机验证）为 `G:\projects\MyDocs\projects\mxd_script`，见 §1.1
 
+> **收录标准（2026-08-11 定）**：本文件每次会话都进 agent 上下文，**只放跨任务复用的常驻规则**——
+> 命令、坑、硬要求、硬件边界、环境事实。**不写**带日期的一次性内容：实验数据（mAP 对照、数据集构成）、
+> 功能验收记录、「当前部署/当前基线」这类会过期的状态。那些写进 `docs/superpowers/specs/` 对应设计文档，
+> 本节最多留一行指针。
+
 ---
 
 ## 1. 环境与运行
@@ -151,7 +156,7 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - 实机加载路径：`assets/mob_model/mob.onnx`（`src/globals.py:21`）
 - 部署前**备份旧模型**：`Copy-Item "assets\mob_model\mob.onnx" "assets\mob_model\mob.onnx.bak_<日期>"`
 - 训练产物在 `dataset/runs/detect/runs/<名>/weights/`
-- **当前部署**（2026-08-10）：v8s 双类 45MB（东部岩山6 训练，mob+player），备份见 §7.7
+- 模型类别数必须与代码一致（当前要求 mob+player 双类，见 §7.7）
 
 ---
 
@@ -289,41 +294,32 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - **受击检测放 run() 高频路径**（每拍 10Hz，不等 1.5s 检测拍节流），位置在保命之后、喝药之前
 - **WarriorDebugTask `_auto_facing` 两拍确认**（历史，任务已移除）：连续 2 拍同向位移(>15px)才翻转，单拍位移/OCR 噪声(±5px)不翻——避免调试 overlay 朝向抖动
 
-### 7.7 双类模型（mob + player，2026-08-10 引入）
+### 7.7 双类模型（mob + player）
 
-**背景**：master 分支引入「YOLO 关联锚点级」（名字牌被遮挡时用 player 框接管角色定位，spec
-`docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`），模型必须是 2 类：
-class0=mob（怪）/ class1=player（玩家角色框）。旧 1 类模型跑 master 代码会退化成"player 框永为空"。
+**硬要求**：模型必须是 2 类（class0=mob / class1=player，player 框用于名字牌被遮挡时接管角色定位，
+spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）。
+旧 1 类模型跑当前代码会退化成"player 框永为空"。
 
-**2 类基建三件套**（从 master 检出，当前分支已合入）：
+**2 类基建三件套**：
 - `dataset/mobs.yaml`：`names: {0: mob, 1: player}`
 - `scripts/label_boxes.py`：`c` 键切换类别（0=mob 红框 / 1=player 绿框），txt 类别保真（重存不丢 player）
 - `src/OpenVinoYolo8Detect.py`：`dic_labels = {0: 'mob', 1: 'player'}`；`detect(label=-1)` 返回全类别
 
-**标注关键规则（"只标自己"策略，2026-08-10 实测有效）**：
+**标注关键规则（"只标自己"策略）**：
 - 每帧**只框自己**（名字牌正下方角色），其他玩家/宠物一律不框（当背景）——框了路人模型就学会认"任意玩家"
-- 分两轮标：第一轮标 mob（预标注 344 框人工校对），第二轮切 `c` 标自己（100 帧 100 框）
 - player 框高 ≈0.15-0.17 归一化（比 mob 高，符合角色身形），可据此抽查校验
-- 效果：player mAP50=0.995 / Recall=1.0——"只标自己"策略有效，模型 100% 找回验证集的自己
 
-**v8s 混合训练（5 地图 511 帧 mob，2026-08-10）**：
-- 数据源：东部岩山2(151) + 岩山3(100) + 岩山4(100) + 野猪领地(100) + 巡逻(60)，共 511 帧 / 2031 框 / 37 负样本
-- 切分：每地图前 90% 入 train（459 帧），后 10% 入 val（52 帧），地图内时序不重叠
-- 命令（从 dataset 目录）：
+**训练要点**：
+- **必须 OS 级后台启动训练**：bash 调用超时（600s）会连带杀掉通过它启动的 yolo 子进程：
   ```powershell
-  ..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=..\yolov8s.pt imgsz=1280 epochs=100 batch=8 device=0 project=runs name=<名>
-  ```
-- **v8s vs v8n 同口径对照**（同 459/52 划分、同 100 epochs、同 COCO 起点）：v8s mAP50=0.984 vs v8n 0.975（**+0.9%**）、Precision +3.3%（误检更少）、Recall -2.7%（略保守）。v8s 收益集中在少误检，挂机场景更优
-- **训练中断恢复**：bash 调用超时（600s）会连带杀掉通过它启动的 yolo 子进程。**必须 OS 级后台启动**：
-  ```powershell
-  $cmd = '$env:YOLO_OFFLINE="true"; C:\projects\mxd-script\.venv-warrior\Scripts\yolo.exe train ...'; Start-Process powershell -ArgumentList "-EncodedCommand", $([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))) -WindowStyle Hidden
+  $cmd = '$env:YOLO_OFFLINE="true"; <绝对路径>\.venv-warrior\Scripts\yolo.exe train ...'; Start-Process powershell -ArgumentList "-EncodedCommand", $([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))) -WindowStyle Hidden
   ```
   中断后用 `yolo train resume model=<last.pt> ...` 续训
-- **权重下载**：`yolov8s.pt` 首次需联网下载（21.5MB），代理生效时正常；`YOLO_OFFLINE=true` + 本地权重绝对路径可跳过下载
+- **权重下载**：`yolov8s.pt` 等首次需联网下载；`YOLO_OFFLINE=true` + 本地权重绝对路径可跳过下载
+- **4090 硬件边界**（24GB 显存）：v8n batch8=4G / v8s batch8=10-12G / v8m 需 batch≤4 / v8l 勉强 / v8x 1280 下 OOM。数据量无硬上限（线性吃时间不吃显存），多样性 > 数量
+- 部署后 GUI 的 `find_all` 一拍推理全类别 → `find_mobs` 按 `b.name=='mob'` 过滤（BaseMapleTask.py）
 
-**4090 硬件边界**（24GB 显存）：v8n batch8=4G / v8s batch8=10-12G / v8m 需 batch≤4 / v8l 勉强 / v8x 1280 下 OOM。数据量无硬上限（线性吃时间不吃显存），多样性 > 数量
-
-**部署**：`assets/mob_model/mob.onnx` 当前为 v8s 双类（45MB，master 仓库版为 mob_player_v1 12.7MB）。部署后 GUI 的 `find_all` 一拍推理全类别 → `find_mobs` 按 `b.name=='mob'` 过滤（BaseMapleTask.py）
+> 历史实验数据（v8s vs v8n 对照、数据集构成、训练切分）见 spec 末节「训练实验记录」。
 
 ---
 
@@ -422,11 +418,13 @@ class0=mob（怪）/ class1=player（玩家角色框）。旧 1 类模型跑 mas
 | 硬直抑制窗(秒) | 1.0 | 受击后暂不按转向/攻击（注意：默认 0，此处按实机调高） |
 | 朝向纠正开关 | true | 观测到真实朝向不符时写回 |
 | 攻击前垫步开关 | true | 战士专用：攻击前朝怪侧轻点方向键 |
+| 二连击开关 | false | 区内有怪时攻击键+副攻击键连按两下(默认关;需「开关开 且 副攻击键已绑定」同时满足才生效,任缺其一不启用;开启时跳过攻击前垫步) |
 | 决策日志开关 | true | 逐拍决策留痕（排查用，平时可关） |
 | 显示玩家框/攻击区/名字搜索范围/寻怪同层带/怪物框 | 全 true | 调试可视化（需先开「启用标记框」） |
 
 > ⚠️ 注意：`硬直抑制窗(秒)=1.0` 与代码默认 0 不同（AGENTS.md §7 记载默认 0 实测有害）。
 > 此配置为实机调参快照，恢复出厂默认请对照 `DEFAULT_CONFIG`（MapleFarmTask.py 顶部）。
+> 二连击的「副攻击键(可留空)」绑定在设置页「游戏按键」。功能启用需「开关开 且 键已绑定」同时满足,留空或开关未开均不启用。
 
 ---
 
@@ -480,43 +478,28 @@ class0=mob（怪）/ class1=player（玩家角色框）。旧 1 类模型跑 mas
 
 ```powershell
 # 全量单测(排除重型 live/yolo 测试;它们只做编译检查)
-$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic tests.test_farm_task_offline tests.test_bars tests.test_guards tests.test_anchor_offline tests.test_potions tests.test_anchor tests.test_ocr_engine tests.test_analyze_anchor tests.test_analyze_facing tests.test_analyze_seek tests.test_analyze_turn tests.test_facing tests.test_label_boxes tests.test_yolo
+$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic tests.test_farm_task_offline tests.test_bars tests.test_guards tests.test_anchor_offline tests.test_potions tests.test_anchor tests.test_ocr_engine tests.test_analyze_anchor tests.test_analyze_facing tests.test_analyze_seek tests.test_analyze_turn tests.test_facing tests.test_label_boxes tests.test_yolo tests.test_config_groups tests.test_config_card_ui
 # 编译检查(全源码)
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for base in ['src','scripts','tests','ok'] for p in pathlib.Path(base).rglob('*.py')]; print('OK')"
 ```
 
-### 11.7 当前基线（2026-08-07 / 2026-08-10 更新）
+### 11.7 已知基线状态
 
-- 单测：**523 用例 / 8 显式 skip / 1 红**（2026-08-10 群攻合入后实测）。
-  红的是 `test_anchor_offline.TestAnchorOnRealFrames.test_b_anchor_y_in_expected_band`
-  （`combat_mayidong2_frame_0018.png` 锚点 `y=657` 越出判据 B 的期望带 `[700, 950]`）——
-  **长期存在的既有失败**，与群攻无关，`651e155` 与合并前的 master 上复跑同样红，待处理。
-  skip 的原因是存档帧缺失 / OCR 限制 / val 数据缺失。
-  （此条原写「全模块全绿」，与实测不符，2026-08-10 改正。）
-- 编译：src/ scripts/ tests/ ok/ 全源码 + 入口脚本 py_compile 通过
-- E2E（2026-08-07 本机验收）：
-  - **通过**：`main_debug.py` 启动 GUI 成功，主窗口「OK-MXD v0.1.0 开发工具」完整渲染
-    （标题栏/左侧 6 项导航/截图方式卡片/交互方式/调试悬浮窗开关），无崩溃无错误弹窗
-  - **通过**：trigger task（MapleFarmTask）在 GUI 内成功注册加载，
-    含受击检测/调试可视化代码——证明新代码在真实 GUI 运行路径无导入/编译错误
-  - **通过**：截图经视觉模型验收 PASS（`screenshots/e2e/gui_launch/gui_main_20260807.png`，
-    1200x800 与日志 geometry 一致）
-  - 已知无害 stderr：`pydirect:You must be an admin`（非管理员按键限制，检测只读不受影响）、
-    `install translations error for zh_CN`（qfluentwidgets 翻译缺失，界面英文可用）
-  - 截图工具：`scripts/_e2e_capture.py <pid> <out_path>`（按 PID 截窗口，E2E 取证用）
+- **既有红测试**（长期存在，非新改动引入）：`test_anchor_offline.TestAnchorOnRealFrames.test_b_anchor_y_in_expected_band`
+  （`combat_mayidong2_frame_0018.png` 锚点 `y=657` 越出期望带 `[700, 950]`），master 上复跑同样红，待处理
+- 显式 skip 的原因均为环境缺失：存档帧缺失 / OCR 限制 / val 数据缺失
+- GUI 启动的**无害 stderr**（不用处理）：`pydirect:You must be an admin`（非管理员按键限制，检测只读不受影响）、
+  `install translations error for zh_CN`（qfluentwidgets 翻译缺失，界面英文可用）
+- E2E 截图工具：`scripts/_e2e_capture.py <pid> <out_path>`（按 PID 截窗口取证）
 
-#### 群攻功能验收（2026-08-10，`feat/aoe-attack`）
+> 各功能的验收记录写在对应 spec 文档里（如群攻验收见 `2026-08-09-aoe-attack-design.md` §5.3 末节），不在本节记。
 
-spec `2026-08-09-aoe-attack-design.md` §5.3 定了 A/B/C/D 四条门槛。**实际只有 A 跑完并通过，D/B/C 由用户判定豁免、直接验收。** 如实记在这里，将来回看这个功能的行为时不要误以为它过了全部四条。
+---
 
-- **A（确实生效且计数自洽）— 通过，有证据**
-  - 数据源 `logs/ok-script.log`，2026-08-10 19:44–21:13，约 31 分钟有效挂机，2470 个检测拍
-  - 「群攻」行 **71** 条（要求 > 0）
-  - 每行 `区内 ≥ 阈值` **违例 0**：56×`2≥2`、11×`3≥2`、2×`3≥3`、2×`4≥2`
-- **D（E2E 截图视觉验收）— 未做**（spec 原文写的是「合入门槛」）。`screenshots/e2e/aoe_attack/` 不存在，overlay 的群攻态（接敌区框 1→3 加粗、标签 `接敌区(群攻)`）**从未在真实 GUI 上看过**，只有离线单测覆盖传参。
-- **B（不变差，经验对照）— 未做**。没有「群攻键留空」的基准组。**且当前缺仪器**：日志里没有任何经验读数（`exp=` 零命中），经验只被停滞守卫在内存里读，要跑 B 得先加一行低频经验日志或人肉抄表。
-- **C（症状消失）— 未确认**。「被围时放得出群攻」由 A 的 71 次触发间接支持；「不再左右扭」只有一个无对照的旁证：同一份日志里 208 次转向中 103 次与上次反向（**49.8%**），而 spec §1 引用的历史基线是 12/17 = 70.6% —— 样本只有 17 次且非同图同配置对照，**不足以当结论**。
+## 12. 自动打怪卡片配置项分组+搜索（2026-08-11 上线）
 
-离线证据（这部分是完整的）：与 `origin/master`（移除 `WarriorDebugTask` 的两个提交）合并后全量 **523 用例、8 skip**，仅 `test_anchor_offline.test_b_anchor_y_in_expected_band` 红；`py_compile` 全量通过。
-
-> 该红**不是群攻引入的**：切到 `master`（合并前）单独跑 `tests.test_anchor_offline` 同样红，在本分支起点 `651e155` 上复跑也同样红。详见本节开头的单测基线条目。
+- **功能**：「实时触发」→「自动打怪」卡片展开区：全部配置项按功能分 9 组（攻击/拾取/保命与药水/走位与朝向/寻怪/角色定位/战斗细节/挂机辅助/调试），组标题青绿粗体 + 组间虚线；**组标题可点击折叠/展开**（▶/▼ 箭头指示，**折叠状态持久化到 `configs/config_groups_state.json`**——重建卡片/重启 GUI 后恢复，按任务类名分节，残留组名自动忽略）；展开区顶部有搜索框，输入关键字**宽松匹配**（键名+描述子串、忽略大小写、空输入全显示），匹配项保留、组标题随组内匹配显隐，**搜索时匹配组自动展开、清空后恢复折叠状态**；清空恢复全部分组。仅 UI 层，不改任何任务执行/配置读写逻辑
+- **实现**：分组元数据 `MapleFarmTask.CONFIG_GROUPS`（模块级，与 `DEFAULT_CONFIG` 相邻，**新增配置键必须同步归组**——test_config_groups 的完整性用例会红）；匹配/过滤纯函数在 `src/task/config_groups.py`；渲染装配在 `ok/gui/tasks/ConfigCard.py`（无 `config_groups` 的任务卡片零变化）
+- **渲染顺序**：ConfigCard 有 config_groups 时按组序渲染（`__ordered_config_keys`，组连续、每组只插一个标题）；无分组任务保持原 dict 顺序
+- **测试**：`tests/test_config_groups.py`（CONFIG_GROUPS 覆盖 DEFAULT_CONFIG 全部键且不重复、唯一组名、matches/visible_keys/visible_groups 纯函数）；`tests/test_config_card_ui.py`（offscreen 渲染：搜索框存在/组标题数/过滤/清空恢复/**折叠切换/搜索展开覆盖折叠/清空恢复折叠/持久化写入与重建恢复/残留组名忽略/无分组任务不写状态文件**/无分组任务无搜索框；grab 渲染图存 `screenshots/e2e/config_groups/`）
+- **E2E 验收（2026-08-11）**：offscreen 渲染截图经视觉模型验收通过（9 组标题 + 顶部搜索框 + 过滤后跨组匹配 + 折叠后组标题保留/内容隐藏/箭头区分）；真实 GUI 启动无崩溃。⚠️ agent 受限窗口站无法截图提权 GUI（PyAutoGUI 全屏与 `_e2e_capture.py` 都抓到空白），交互类 E2E 走 offscreen grab + 断言
