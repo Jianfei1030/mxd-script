@@ -431,9 +431,10 @@ spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）�
 | 配置键 | 默认 | 说明 |
 |---|---|---|
 | 补BUFF开关 | false | 到点且**攻击区内无怪**才补;有怪优先解决,顺延下一拍;触发那一拍暂停攻击/寻怪,只按 BUFF 键 |
-| 补BUFF列表 | '' | 格式 `名称=按键:间隔秒`,逗号分隔。例 `魔法盾=q:180,狂暴=w:300`。每项独立计时;`interval None`(不写 `:间隔`)永不自动补(保留手动按键);间隔非数字整条丢弃 |
+| 补BUFF列表 | [] | 可添加配置区(buff_list 控件):点「Modify Buffs」弹编辑区,每项填 名称/按键/间隔秒(间隔≥1s),支持添加/删除/排序;存储为 list,元素 `名称=按键:间隔秒`。每项独立计时;不写 `:间隔` 的项永不自动补(保留手动按键) |
 
-- 解析/到期判定纯函数在 `farm_logic.py`：`parse_buff_config`（三元组 `(name, key, interval)`）+ `due_buffs`（`now - last_times.get(name,0) >= interval` 才算到期，从未补过=到期）
+- 解析/到期判定纯函数在 `farm_logic.py`：`parse_buff_config`（三元组 `(name, key, interval)`，接受 str 逗号分隔或 list 两种输入）+ `due_buffs`（`now - last_times.get(name,0) >= interval` 才算到期，从未补过=到期）+ `buff_entry_to_text`（UI 三字段→列表元素，parse 的逆）
+- GUI 控件：`ok/gui/tasks/LabelAndBuffList.py`（`buff_list` 配置类型，AddBuffDialog 名称/按键/间隔 三字段表单）——配置默认值 `[]`，老字符串配置会被 `verify_config` 类型校验重置为 `[]`（用户重新添加即可）
 - 集成在 `MapleFarmTask.run()` §3.6（攻击块之前）:`_last_attack_present is False` 门 → `due_buffs` → `_release_seek_key()` + `_seek_dir=None` + 依次 `send_key` + 更新 `_last_buff_times[name]=now` + `return`
 - **定频模式不补BUFF**（无攻击区状态,`_last_attack_present` 恒 None）——开关描述已注明
 - 测试：`tests/test_farm_logic.py`（parse_buff_config 三元组/坏间隔/due_buffs 到期边界）+ `tests/test_farm_task_offline.py::TestBuffTimer`（7 用例：开关关/到期补键/未到期不补/有怪不补/多BUFF只补到期/停手 return/interval None 不补）
