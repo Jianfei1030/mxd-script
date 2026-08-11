@@ -3654,3 +3654,75 @@ class TestAoeOverlay(unittest.TestCase):
     def test_aoe_ready_passed_false_below_threshold(self):
         kwargs = self._draw_kwargs([_aoe_mob(1230), _aoe_mob(1530)])
         self.assertIs(kwargs['aoe_ready'], False)
+
+class TestBuffTimer(unittest.TestCase):
+    """定时补BUFF(spec §S5):到点且攻击区无怪 → 按 BUFF 键+更新计时+停手 return;
+    攻击区有怪 → 不补,正常攻击;开关关 → 不补;多 BUFF 只补到期的。"""
+
+    def _task(self, buff_list='魔法盾=q:180', switch=True, mode='检测'):
+        # 坐椅/走位/寻怪都有独立节拍,会干扰"本拍只补BUFF"的隔离断言,测试里全关
+        task = make_task(**{'攻击模式': mode, '补BUFF开关': switch, '补BUFF列表': buff_list,
+                            '坐椅开关': False, '走位开关': False, '寻怪开关': False})
+        return task
+
+    def test_switch_off_never_buffs(self):
+        task = self._task(switch=False)
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0)
+        task.send_key.assert_not_called()
+        self.assertEqual(task._last_buff_times, {})
+
+    def test_due_and_no_mob_sends_buff_key_and_updates_time(self):
+        task = self._task('魔法盾=q:180')
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)  # 从未补过 → 到期
+        self.assertEqual(task.send_key.call_args_list, [call('q')])
+        self.assertEqual(task._last_buff_times.get('魔法盾'), 200.0)
+
+    def test_not_due_no_key(self):
+        task = self._task('魔法盾=q:180')
+        task._last_attack_present = False
+        task._last_buff_times = {'魔法盾': 100.0}
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)  # 距上次 100s < 180s
+        task.send_key.assert_not_called()
+
+    def test_mob_in_zone_skips_buff_and_attacks(self):
+        """攻击区有怪 → 不补BUFF,攻击逻辑正常跑。"""
+        task = self._task('魔法盾=q:180')
+        task._last_attack_present = True
+        task.send_key.reset_mock()
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)
+        self.assertNotIn(call('q'), task.send_key.call_args_list)
+        self.assertEqual(task._last_buff_times, {})
+
+    def test_only_due_buffs_sent(self):
+        task = self._task('魔法盾=q:180,狂暴=w:300')
+        task._last_attack_present = False
+        task._last_buff_times = {'魔法盾': 100.0, '狂暴': 0.0}   # 魔法盾差 80s,狂暴已到期
+        # now=280:魔法盾 280-100=180 恰到期;狂暴 280-0=280 < 300 未到期 → 只补魔法盾
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=280.0)
+        self.assertEqual(task.send_key.call_args_list, [call('q')])
+        self.assertEqual(task._last_buff_times['魔法盾'], 280.0)
+        self.assertEqual(task._last_buff_times['狂暴'], 0.0)  # 未补,时间不动
+
+    def test_buff_stops_seek_this_tick(self):
+        """触发补BUFF:松寻怪键、停追(_seek_dir=None),本拍 return(不攻击不寻怪)。"""
+        task = self._task('魔法盾=q:180')
+        task._last_attack_present = False
+        task._seek_dir = 'right'
+        task._seek_key = '右移键'
+        with patch.object(task, '_release_seek_key') as release:
+            run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)
+        release.assert_called_once()
+        self.assertIsNone(task._seek_dir)
+        self.assertEqual(task.send_key.call_args_list, [call('q')])
+        # 本拍 return:没走到攻击/寻怪,不会发攻击键
+        self.assertNotIn(call('shift'), task.send_key.call_args_list)
+
+    def test_no_interval_entry_never_auto_buffs(self):
+        """interval None 的项永不自动补(保留手动按键)。"""
+        task = self._task('魔法盾=q')   # 无 :间隔
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)
+        task.send_key.assert_not_called()
+        self.assertEqual(task._last_buff_times, {})

@@ -333,6 +333,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._force_rescan = False        # 受击置位:下一检测拍绕过慢扫节流(spec §3.5);任一通道命中即清(跳变已消化)
         self._last_forced_rescan = 0.0    # 上次强制慢扫时刻;0.0 哨兵=从未,配合 FORCED_RESCAN_MIN_INTERVAL 限频
         self._last_identity_scan = 0.0    # 上次身份复验慢扫时刻;0.0 哨兵=从未,配合「身份复验间隔(秒)」限频
+        self._last_buff_times = {}        # 每个 BUFF 上次补的时间 {名称: 时刻};空 = 全部未补过,到点即补
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -1378,6 +1379,21 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._hp_streak = 0
             self._hp_at_press = 0.0
             self._last_hp_potion_press = 0.0
+
+        # 3.6 定时补BUFF(挂机辅助):攻击区内无怪才补;有怪优先解决,顺延下一拍。
+        # 位置在攻击块之前:补BUFF只按键不检测,放最前保证「本拍只补BUFF」的 return 语义干净。
+        # 攻击区判定用上一拍的 _last_attack_present(去抖后,10Hz 足够及时)。
+        if cfg['补BUFF开关'] and self._last_attack_present is False:
+            due = farm_logic.due_buffs(now, farm_logic.parse_buff_config(cfg['补BUFF列表']),
+                                       self._last_buff_times)
+            if due:
+                self._release_seek_key()   # 停手:先松开寻怪长按的方向键
+                self._seek_dir = None      # 停追:本拍不寻怪
+                for name, key in due:
+                    self.send_key(key)
+                    self._last_buff_times[name] = now
+                self.log_info(f'补BUFF: {", ".join(n for n, _ in due)}')
+                return   # 本拍只补BUFF,不执行攻击/寻怪/坐椅等
 
         # 4. 攻击
         if cfg['攻击模式'] == '检测':
