@@ -9,6 +9,8 @@ OpenCC==1.2.0
 onnxocr-ppocrv5==0.0.18
     # via -r .\requirements.in
     # via ok-script
+onnxruntime-directml==1.24.4
+    # via -r .\requirements.in
 pynput==1.8.2
 six==1.17.0
 certifi==2025.7.14

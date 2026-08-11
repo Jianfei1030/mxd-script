@@ -11,15 +11,43 @@ logger = Logger.get_logger(__name__)
 
 class OpenVinoYolo8Detect:
 
-    def __init__(self, weights='echo.onnx', model_h=1280, model_w=1280, iou_thres=0.45):
+    def __init__(self, weights='echo.onnx', model_h=1280, model_w=1280, iou_thres=0.45, backend='cpu'):
         self.dic_labels = {0: 'mob', 1: 'player'}
         self.weights = weights
         self.model_size = (model_w, model_h)
         self.iou_threshold = iou_thres
         self.openfile_name_model = weights
+        self.input_width = model_w
+        self.input_height = model_h
 
+        self._ort_session = None
+        self._ort_input_name = None
+
+        # backend: 默认 'cpu'(OpenVINO,兼容性最好);'auto'/'dml' 优先 DirectML(Windows 全 GPU),
+        # 失败回退 OpenVINO CPU;其他值一律按 'cpu' 处理
+        if backend in ('auto', 'dml'):
+            self._try_init_dml()
+        if self._ort_session is None:
+            self._init_openvino()
+
+    def _try_init_dml(self):
+        """DirectML 后端(认 NVIDIA/Intel 等任意 DirectX12 卡)。"""
+
+        try:
+            import onnxruntime as ort
+            so = ort.SessionOptions()
+            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            self._ort_session = ort.InferenceSession(
+                self.weights, so, providers=['DmlExecutionProvider'])
+            self._ort_input_name = self._ort_session.get_inputs()[0].name
+            logger.info(f'ONNX Runtime DirectML session created (weights={self.weights})')
+        except Exception as e:
+            # 走到这里说明调用方显式要 GPU(auto/dml),不可用必须显式告警,不能静默
+            logger.warning(f'启用GPU推理但 DirectML 不可用,自动回退 OpenVINO CPU: {e}')
+            self._ort_session = None
+
+    def _init_openvino(self):
         self.core = Core()
-
         try:
             model = self.core.read_model(model=self.openfile_name_model)
 
@@ -133,8 +161,11 @@ class OpenVinoYolo8Detect:
             h, w = image.shape[:2]
             img_data, pad = self._preprocess(image)
 
-            results = self.compiled_model({self.input_layer: img_data})
-            outputs = results[self.output_layer]
+            if self._ort_session is not None:
+                outputs = self._ort_session.run(None, {self._ort_input_name: img_data})[0]
+            else:
+                results = self.compiled_model({self.input_layer: img_data})
+                outputs = results[self.output_layer]
 
             boxes = self._postprocess(outputs, pad, (h, w), threshold, label)
 

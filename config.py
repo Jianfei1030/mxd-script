@@ -24,12 +24,18 @@ key_config_option = ConfigOption('游戏按键', {
     '群攻键(可留空)': '群攻(前后双向命中)技能键。接敌区内怪数达到「群攻怪数阈值」时改按它,那一拍不转向也不按单体攻击键。留空 = 功能关闭',
 }, show_at_tab=True, icon=FluentIcon.GAME)
 
+inference_config_option = ConfigOption('推理加速', {
+    '启用GPU推理': False,
+}, description='YOLO 推理后端:默认 CPU(OpenVINO,兼容性最好);勾选后优先使用本机最强推理硬件(DirectML GPU,失败自动回退 CPU)', config_description={
+    '启用GPU推理': '勾选后 YOLO 检测走 DirectML GPU(本机 RTX 4060 等),失败自动回退 CPU;不勾选始终用 CPU。默认不勾选以保兼容性',
+}, show_at_tab=True, icon=FluentIcon.SPEED_HIGH)
+
 config = {
     'debug': False,
     'use_gui': True,
     'config_folder': 'configs',
     'gui_icon': 'icons/icon.png',
-    'global_configs': [key_config_option],
+    'global_configs': [key_config_option, inference_config_option],
     'ocr': {
         'lib': 'onnxocr',
         'auto_simplify': True,
