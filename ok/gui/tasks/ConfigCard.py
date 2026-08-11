@@ -53,15 +53,16 @@ class ConfigContentMixin:
         self.viewLayout.setSpacing(0)
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(6, 4, 6, 8)
+        self.__maybe_add_search_box()
         self.sub_configs_rules = self.__collect_sub_configs_rules()
         self.sub_configs_controlled_keys = self.__collect_sub_configs_controlled_keys()
         if not self.config or not (self.config.has_user_config() or self.default_config or self.config_type):
             self._on_empty_config_content()
         else:
             added_keys = set()
-            for key, value in self.config.items():
+            for key in self.__ordered_config_keys():
                 if not key.startswith('_') and not self.__is_hidden_config(key) and not self.__is_sub_config_key(key):
-                    self.__addConfigWithSubConfigs(key, value, added_keys, set())
+                    self.__addConfigWithSubConfigs(key, self.config.get(key), added_keys, set())
             if self.config_type:
                 for key, the_type in self.config_type.items():
                     if key not in added_keys and not key.startswith('_') and not self.__is_hidden_config(key):
@@ -117,6 +118,22 @@ class ConfigContentMixin:
         groups = getattr(self.task, 'config_groups', None) if self.task is not None else None
         return groups or []
 
+    def __ordered_config_keys(self):
+        """渲染键序:有 config_groups 时按组定义顺序(组内按组内键定义顺序),
+        保证每个组只插一次标题、组内容连续;无分组任务保持原 dict 顺序。"""
+        groups = self.__config_groups()
+        if not groups:
+            return list(self.config.keys())
+        ordered = []
+        for _group, group_keys in groups:
+            for key in group_keys:
+                if key in self.config and key not in ordered:
+                    ordered.append(key)
+        for key in self.config:
+            if key not in ordered:
+                ordered.append(key)
+        return ordered
+
     def __maybe_add_group_header(self, key: str):
         groups = self.__config_groups()
         if not groups:
@@ -133,6 +150,32 @@ class ConfigContentMixin:
             self.group_headers.append(header)
             self.group_header_by_group[group] = header
             self._last_config_group = group
+
+    def __maybe_add_search_box(self):
+        groups = self.__config_groups()
+        if not groups:
+            return
+        from PySide6.QtWidgets import QLineEdit
+        self.search_box = QLineEdit(self)
+        self.search_box.setPlaceholderText('搜索选项')
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.textChanged.connect(self.__apply_search_filter)
+        self.viewLayout.addWidget(self.search_box)
+
+    def __apply_search_filter(self, query):
+        groups = self.__config_groups()
+        if not groups:
+            return
+        from src.task.config_groups import visible_groups, visible_keys
+        keys = list(self.config_widget_by_key.keys())
+        descriptions = self.config_description or {}
+        visible = visible_keys(query, keys, descriptions)
+        for key, widget in self.config_widget_by_key.items():
+            widget.setVisible(key in visible)
+        visible_group_names = visible_groups(query, groups, keys, descriptions)
+        for group, header in self.group_header_by_group.items():
+            header.setVisible(group in visible_group_names)
+        self._adjust_config_content_size()
 
     def __add_sub_configs_divider(self, key, position):
         divider = QFrame()
