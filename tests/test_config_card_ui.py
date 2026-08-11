@@ -98,6 +98,42 @@ class ConfigCardUiTest(unittest.TestCase):
         self.assertFalse(hasattr(card, 'search_box'), '无分组的任务不应创建搜索框')
         self.assertEqual(len(card.group_headers), 0, '无分组的任务不应有组标题')
 
+    def test_groups_initial_expanded(self):
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        for group, widgets in card.group_widgets.items():
+            for widget in widgets:
+                self.assertFalse(widget.isHidden(), f'{group} 组初始应全部展开: {widget}')
+
+    def test_group_collapse_toggles_widgets(self):
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        card.group_header_by_group['攻击'].click()  # 折叠攻击组
+        self.assertTrue(card.config_widget_by_key['攻击间隔(秒)'].isHidden())
+        self.assertTrue(card.config_widget_by_key['攻击区宽(像素)'].isHidden())
+        self.assertFalse(card.config_widget_by_key['喝血阈值'].isHidden(), '其他组不受影响')
+        self.assertFalse(card.group_header_by_group['攻击'].isHidden(), '折叠后组标题仍可见(可再点展开)')
+        card.group_header_by_group['攻击'].click()  # 再次点击展开
+        self.assertFalse(card.config_widget_by_key['攻击间隔(秒)'].isHidden(), '再点应恢复展开')
+
+    def test_collapse_independent_per_group(self):
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        card.group_header_by_group['角色定位'].click()
+        self.assertTrue(card.config_widget_by_key['角色名'].isHidden())
+        self.assertFalse(card.config_widget_by_key['攻击间隔(秒)'].isHidden(), '攻击组未折叠')
+
+    def test_search_overrides_collapse_then_restores(self):
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        card.group_header_by_group['攻击'].click()  # 折叠攻击组
+        self.assertTrue(card.config_widget_by_key['攻击间隔(秒)'].isHidden())
+        card.search_box.setText('攻击')  # 搜索:匹配优先,折叠忽略
+        self.assertFalse(card.config_widget_by_key['攻击间隔(秒)'].isHidden(), '搜索中匹配组自动展开')
+        card.search_box.clear()  # 清空:恢复折叠状态
+        self.assertTrue(card.config_widget_by_key['攻击间隔(秒)'].isHidden(), '清空后恢复折叠')
+        self.assertFalse(card.config_widget_by_key['喝血阈值'].isHidden())
+
     def test_render_grab_screenshots(self):
         """offscreen 渲染抓图,作为 E2E 截图证据归档(§11.3/§11.5)。"""
         import pathlib
@@ -114,8 +150,15 @@ class ConfigCardUiTest(unittest.TestCase):
         for _ in range(10):
             self.app.processEvents()
         card.grab().save(str(out / 'card_groups_filtered_20260810.png'))
+        card.search_box.clear()
+        card.group_header_by_group['攻击'].click()
+        card.group_header_by_group['角色定位'].click()
+        for _ in range(10):
+            self.app.processEvents()
+        card.grab().save(str(out / 'card_groups_collapsed_20260810.png'))
         self.assertTrue((out / 'card_groups_all_20260810.png').exists())
         self.assertTrue((out / 'card_groups_filtered_20260810.png').exists())
+        self.assertTrue((out / 'card_groups_collapsed_20260810.png').exists())
 
 
 if __name__ == '__main__':
