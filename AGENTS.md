@@ -426,6 +426,18 @@ spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）�
 > 此配置为实机调参快照，恢复出厂默认请对照 `DEFAULT_CONFIG`（MapleFarmTask.py 顶部）。
 > 二连击的「副攻击键(可留空)」绑定在设置页「游戏按键」。功能启用需「开关开 且 键已绑定」同时满足,留空或开关未开均不启用。
 
+### 10.2 定时补BUFF（2026-08-12 上线，spec docs/compose/specs/2026-08-10-buff-timer-design.md）
+
+| 配置键 | 默认 | 说明 |
+|---|---|---|
+| 补BUFF开关 | false | 到点且**攻击区内无怪**才补;有怪优先解决,顺延下一拍;触发那一拍暂停攻击/寻怪,只按 BUFF 键 |
+| 补BUFF列表 | '' | 格式 `名称=按键:间隔秒`,逗号分隔。例 `魔法盾=q:180,狂暴=w:300`。每项独立计时;`interval None`(不写 `:间隔`)永不自动补(保留手动按键);间隔非数字整条丢弃 |
+
+- 解析/到期判定纯函数在 `farm_logic.py`：`parse_buff_config`（三元组 `(name, key, interval)`）+ `due_buffs`（`now - last_times.get(name,0) >= interval` 才算到期，从未补过=到期）
+- 集成在 `MapleFarmTask.run()` §3.6（攻击块之前）:`_last_attack_present is False` 门 → `due_buffs` → `_release_seek_key()` + `_seek_dir=None` + 依次 `send_key` + 更新 `_last_buff_times[name]=now` + `return`
+- **定频模式不补BUFF**（无攻击区状态,`_last_attack_present` 恒 None）——开关描述已注明
+- 测试：`tests/test_farm_logic.py`（parse_buff_config 三元组/坏间隔/due_buffs 到期边界）+ `tests/test_farm_task_offline.py::TestBuffTimer`（7 用例：开关关/到期补键/未到期不补/有怪不补/多BUFF只补到期/停手 return/interval None 不补）
+
 ---
 
 ## 11. 测试标准（铁律，2026-08-07 设立）
