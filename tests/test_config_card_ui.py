@@ -203,6 +203,34 @@ class ConfigCardUiTest(unittest.TestCase):
         self.assertTrue((out / 'card_groups_filtered_20260810.png').exists())
         self.assertTrue((out / 'card_groups_collapsed_20260810.png').exists())
 
+    def test_buff_list_widget_rendered_and_updates(self):
+        """补BUFF列表 是 buff_list 控件(可添加配置区,非裸字符串文本框)。"""
+        from ok.gui.tasks.LabelAndBuffList import LabelAndBuffList
+        task = self._make_task(with_groups=True)
+        card = self._make_card(task)
+        widget = card.config_widget_by_key['补BUFF列表']
+        self.assertIsInstance(widget, LabelAndBuffList, '补BUFF列表 应渲染为可添加列表控件')
+        # 默认空列表 → 显示占位提示
+        self.assertIn('Modify Buffs', widget.list_text.text())
+        # 配置写入 list 后 update_value 反映新值
+        widget.config['补BUFF列表'] = ['魔法盾=q:180']
+        widget.update_value()
+        self.assertIn('魔法盾=q:180', widget.list_text.text())
+
+    def test_buff_add_dialog_value_format(self):
+        """AddBuffDialog 三字段 → 列表元素字符串(与 parse_buff_config 互逆)。"""
+        from PySide6.QtWidgets import QWidget
+        from ok.gui.tasks.LabelAndBuffList import AddBuffDialog
+        parent = QWidget()
+        dlg = AddBuffDialog(parent)
+        dlg.name_edit.setText('魔法盾')
+        dlg.key_edit.setText('q')
+        dlg.interval_spin.setValue(180)
+        self.assertEqual(dlg.buff_value(), '魔法盾=q:180')
+        # 间隔 1 秒是最小值,仍序列化
+        dlg.interval_spin.setValue(1)
+        self.assertEqual(dlg.buff_value(), '魔法盾=q:1')
+
 
 if __name__ == '__main__':
     unittest.main()

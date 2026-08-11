@@ -8,6 +8,7 @@ from ok.gui.tasks.LabelAndMultiSelection import LabelAndMultiSelection
 from ok.gui.tasks.LabelAndSpinBox import LabelAndSpinBox
 from ok.gui.tasks.LabelAndSwitchButton import LabelAndSwitchButton
 from ok.gui.tasks.LabelAndTextEdit import LabelAndTextEdit
+from ok.gui.tasks.LabelAndBuffList import LabelAndBuffList
 from ok.gui.tasks.ModifyListItem import ModifyListItem
 
 
@@ -56,6 +57,8 @@ def config_widget(config_type, config_desc, config, key, value, task):
             if not buttons:
                 buttons = [the_type]
             return LabelAndButtons(config_desc, key, buttons)
+        elif resolved_type == 'buff_list':
+            return LabelAndBuffList(config_desc, config, key)
         else:
             raise Exception('Unknown config type')
     if isinstance(value, bool):
