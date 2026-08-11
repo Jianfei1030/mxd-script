@@ -203,11 +203,14 @@ def should_feed_pet(now, last_feed_time, interval, enabled):
 
 
 def parse_buff_config(text):
-    """'magic_shield=q:180,armor=w' -> [('magic_shield', 'q', 180), ('armor', 'w', None)]
+    """'magic_shield=q:180,armor=w' 或 ['magic_shield=q:180', 'armor=w']
+    -> [('magic_shield', 'q', 180), ('armor', 'w', None)]
     每项格式 名称=按键[:间隔秒];间隔缺省为 None(永不自动补,只手动按);
-    间隔非法(非数字)整条丢弃——配置打错字不该静默变成"手动键",用户会以为自动补生效了。"""
+    间隔非法(非数字)整条丢弃——配置打错字不该静默变成"手动键",用户会以为自动补生效了。
+    list 元素是 GUI 可添加配置区产出的条目字符串,与 str 逗号分隔格式等价。"""
+    entries = text.split(',') if isinstance(text, str) else (text or [])
     result = []
-    for entry in (text or '').split(','):
+    for entry in entries:
         entry = entry.strip()
         if '=' in entry:
             name, rest = entry.split('=', 1)
@@ -222,6 +225,12 @@ def parse_buff_config(text):
             if name.strip() and key.strip():
                 result.append((name.strip(), key.strip(), interval))
     return result
+
+
+def buff_entry_to_text(name, key, interval):
+    """添加表单三字段 → 列表元素字符串('魔法盾=q:180' / '狂暴=w');parse_buff_config 的逆。"""
+    suffix = f':{interval}' if interval is not None else ''
+    return f'{name}={key}{suffix}'
 
 
 def due_buffs(now, buffs, last_times):

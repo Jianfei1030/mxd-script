@@ -97,6 +97,19 @@ class TestFarmLogic(unittest.TestCase):
         self.assertEqual(fl.parse_buff_config('bad-entry,good=x'), [('good', 'x', None)])
         self.assertEqual(fl.parse_buff_config('bad=x:abc,good=y:60'), [('good', 'y', 60)])  # 坏间隔跳过
 
+    def test_parse_buff_config_accepts_list(self):
+        """GUI 改为 list 存储后,run() 读到的是 list(元素仍是 名称=按键:间隔 字符串)。"""
+        self.assertEqual(fl.parse_buff_config(['magic_shield=q:180', 'armor=w']),
+                         [('magic_shield', 'q', 180), ('armor', 'w', None)])
+        self.assertEqual(fl.parse_buff_config([]), [])
+        self.assertEqual(fl.parse_buff_config(['bad=x:abc', 'good=y:60']), [('good', 'y', 60)])
+
+    def test_buff_entry_to_text(self):
+        """UI 添加表单的三个字段 → 列表元素字符串(与 parse_buff_config 互逆)。"""
+        self.assertEqual(fl.buff_entry_to_text('魔法盾', 'q', 180), '魔法盾=q:180')
+        self.assertEqual(fl.buff_entry_to_text('狂暴', 'w', None), '狂暴=w')
+        self.assertEqual(fl.buff_entry_to_text('魔法盾', 'q', 0), '魔法盾=q:0')
+
     def test_due_buffs(self):
         buffs = [('magic_shield', 'q', 180), ('armor', 'w', 300), ('manual', 'e', None)]
         # 从未补过 → 视为到期
