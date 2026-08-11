@@ -197,6 +197,29 @@ class TestDotTracker(unittest.TestCase):
         _, status = t.update([(62.0, 50.0, 8)], self.meta, 103.5, cmd_dir='right')
         self.assertEqual(status, 'ok')
 
+    def test_acquire_sets_last_update_then_first_update_ok(self):
+        # 评审 #1:acquire 播种须设 _last_update_t,否则首拍 dt=0 → 跳变上限仅 base 4px,
+        # 人还在走 → 永久 suspect 楔死。播种后 dt=0.5 → 上限 10px,6px 位移放行。
+        before = [(10.0, 10.0, 8)]
+        after = [(16.0, 10.0, 8)]   # 走了 6px
+        t = minimap.DotTracker()
+        self.assertIsNotNone(t.acquire(before, after, self.meta, now=100.0))
+        pos, status = t.update([(22.0, 10.0, 8)], self.meta, 100.5)  # 又走 6px
+        self.assertEqual(status, 'ok')
+        self.assertAlmostEqual(pos[0], 22.0, delta=0.5)
+
+    def test_direction_change_resets_anchor(self):
+        # 评审 #6:折返换向不清算旧方向位移——right 3s 无位移 mismatch 后切 left 重新计时
+        t = minimap.DotTracker(cmd_mismatch_limit=3.0)
+        t.pos = (50.0, 50.0)
+        _, s1 = t.update([(50.0, 50.0, 8)], self.meta, 100.0, cmd_dir='right')
+        _, s2 = t.update([(50.3, 50.0, 8)], self.meta, 103.5, cmd_dir='right')
+        self.assertEqual(s2, 'mismatch')           # right 3.5s 只动 0.3px
+        _, s3 = t.update([(50.3, 50.0, 8)], self.meta, 104.0, cmd_dir='left')   # 换向第一拍
+        self.assertEqual(s3, 'ok')                 # 换向即重置锚点,不误报
+        _, s4 = t.update([(50.3, 50.0, 8)], self.meta, 107.5, cmd_dir='left')   # left 3.5s 未动
+        self.assertEqual(s4, 'mismatch')           # 新方向自己的窗口照常判
+
 
 if __name__ == '__main__':
     unittest.main()

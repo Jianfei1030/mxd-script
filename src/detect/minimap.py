@@ -173,10 +173,12 @@ class DotTracker:
         self.cmd_min_move = cmd_min_move              # 该窗口内应有的最小位移(底图格)
         self.pos = None                         # (mx, my) 底图坐标
         self._last_update_t = None              # 上次 update 时刻(dt 自适应守卫用)
-        self._cmd_anchor = None                 # (pos, t) 指令一致性窗口起算点
+        self._cmd_anchor = None                 # (pos, t, cmd_dir) 指令一致性窗口起算点
 
-    def acquire(self, dots_before, dots_after, meta, min_panel_move=2.0):
-        """移动捕获:对比走动前后两帧,位移最大的点=自己。返回底图坐标或 None。"""
+    def acquire(self, dots_before, dots_after, meta, now=None, min_panel_move=2.0):
+        """移动捕获:对比走动前后两帧,位移最大的点=自己。返回底图坐标或 None。
+        now=播种时刻:播种后必须设 _last_update_t,否则首拍 dt=0 → 跳变上限仅
+        base 4 格,人还在走 → 永久 suspect 楔死,整场录制全废(评审 #1)。"""
         best, best_d = None, min_panel_move
         for d in dots_after:
             if not dots_before:
@@ -187,6 +189,7 @@ class DotTracker:
         if best is None:
             return None
         self.pos = panel_to_map((best[0], best[1]), meta)
+        self._last_update_t = now
         return self.pos
 
     def update(self, dots, meta, now, cmd_dir=None):
@@ -212,15 +215,18 @@ class DotTracker:
             pos = None
             status = 'lost'
         # 指令-位移一致性:持续按键期间位移方向/量级不符 → mismatch(内部计时窗口)
+        # 触发后重置 anchor = 新观察窗:防 RECOVER 恢复回 FOLLOW 后立刻再触发形成抖动循环;
+        # suspect/lost 清 anchor = 不可信位置不参与位移计量(spec §2.3,评审裁决 B,勿改)
+        # anchor 记方向:cmd_dir 变化(折返换向)即重置锚点,旧方向位移不清算新方向(评审 #6)
         if cmd_dir in ('left', 'right') and status == 'ok' and self.pos is not None:
-            if self._cmd_anchor is None:
-                self._cmd_anchor = (self.pos, now)
+            if self._cmd_anchor is None or self._cmd_anchor[2] != cmd_dir:
+                self._cmd_anchor = (self.pos, now, cmd_dir)
             elif now - self._cmd_anchor[1] >= self.cmd_mismatch_limit:
                 dx = self.pos[0] - self._cmd_anchor[0][0]
                 moved = dx < -self.cmd_min_move if cmd_dir == 'left' else dx > self.cmd_min_move
                 if not moved:
                     status = 'mismatch'
-                self._cmd_anchor = (self.pos, now)
+                self._cmd_anchor = (self.pos, now, cmd_dir)
         else:
             self._cmd_anchor = None
         return pos, status
