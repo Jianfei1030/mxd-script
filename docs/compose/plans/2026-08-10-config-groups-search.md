@@ -1,5 +1,10 @@
 # 自动打怪卡片配置项分组+搜索 Implementation Plan
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/config-groups-search.md)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use compose:subagent (recommended) or compose:execute to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 给「实时触发」tab 的「自动打怪」任务卡片展开区加功能分组 + 关键字搜索，纯 UI 层修改，不触碰任何任务执行/配置读写逻辑。
