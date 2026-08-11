@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton
 from qfluentwidgets import FluentIcon, ExpandSettingCard, PushButton
 
 from ok import og
@@ -13,6 +13,12 @@ class ConfigContentMixin:
         self.config_widgets = []
         self.config_widget_by_key = {}
         self.config_keys = []
+        self.group_headers = []                 # 组标题列表(搜索过滤时显隐)
+        self.group_header_by_group = {}         # 组名 → 组标题控件
+        self.group_widgets = {}                 # 组名 → 该组配置项控件列表(折叠时整体显隐)
+        self.group_collapsed = {}               # 组名 → 是否折叠(会话级,不持久化)
+        self._last_config_group = None          # 渲染中的当前组名
+        self._current_group = None              # 当前渲染键所属组(登记 widget 用,None=未分组)
         self.default_config = default_config
         self.config_description = config_description
         self.config_type = config_type
@@ -50,15 +56,16 @@ class ConfigContentMixin:
         self.viewLayout.setSpacing(0)
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(6, 4, 6, 8)
+        self.__maybe_add_search_box()
         self.sub_configs_rules = self.__collect_sub_configs_rules()
         self.sub_configs_controlled_keys = self.__collect_sub_configs_controlled_keys()
         if not self.config or not (self.config.has_user_config() or self.default_config or self.config_type):
             self._on_empty_config_content()
         else:
             added_keys = set()
-            for key, value in self.config.items():
+            for key in self.__ordered_config_keys():
                 if not key.startswith('_') and not self.__is_hidden_config(key) and not self.__is_sub_config_key(key):
-                    self.__addConfigWithSubConfigs(key, value, added_keys, set())
+                    self.__addConfigWithSubConfigs(key, self.config.get(key), added_keys, set())
             if self.config_type:
                 for key, the_type in self.config_type.items():
                     if key not in added_keys and not key.startswith('_') and not self.__is_hidden_config(key):
@@ -103,11 +110,116 @@ class ConfigContentMixin:
         adding_keys.remove(key)
 
     def __addConfig(self, key: str, value):
+        self.__maybe_add_group_header(key)
         widget = config_widget(self.config_type, self.config_description, self.config, key, value, self.task)
         self.config_widgets.append(widget)
         self.config_widget_by_key[key] = widget
         self.config_keys.append(key)
         self.viewLayout.addWidget(widget)
+        if self._current_group is not None:
+            self.group_widgets[self._current_group].append(widget)
+
+    def __config_groups(self):
+        groups = getattr(self.task, 'config_groups', None) if self.task is not None else None
+        return groups or []
+
+    def __ordered_config_keys(self):
+        """渲染键序:有 config_groups 时按组定义顺序(组内按组内键定义顺序),
+        保证每个组只插一次标题、组内容连续;无分组任务保持原 dict 顺序。"""
+        groups = self.__config_groups()
+        if not groups:
+            return list(self.config.keys())
+        ordered = []
+        for _group, group_keys in groups:
+            for key in group_keys:
+                if key in self.config and key not in ordered:
+                    ordered.append(key)
+        for key in self.config:
+            if key not in ordered:
+                ordered.append(key)
+        return ordered
+
+    def __maybe_add_group_header(self, key: str):
+        groups = self.__config_groups()
+        if not groups:
+            self._current_group = None
+            return
+        from src.task.config_groups import group_of, should_insert_header
+        group = group_of(key, groups)
+        self._current_group = group
+        if should_insert_header(self._last_config_group, group):
+            header = QToolButton(self)
+            header.setText(group)
+            header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            header.setArrowType(Qt.DownArrow)
+            header.setCursor(Qt.PointingHandCursor)
+            header.setObjectName('configGroupHeader')
+            header.setStyleSheet(
+                'color: #009faa; font-weight: 600;'
+                'padding: 6px 4px 2px 4px; background: transparent; border: none;')
+            header.clicked.connect(lambda _checked=False, g=group: self.__toggle_group(g))
+            self.viewLayout.addWidget(header)
+            self.group_headers.append(header)
+            self.group_header_by_group[group] = header
+            self.group_widgets[group] = []
+            self._last_config_group = group
+
+    def __maybe_add_search_box(self):
+        groups = self.__config_groups()
+        if not groups:
+            return
+        from PySide6.QtWidgets import QLineEdit
+        self.search_box = QLineEdit(self)
+        self.search_box.setPlaceholderText('搜索选项')
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.textChanged.connect(self.__apply_search_filter)
+        self.viewLayout.addWidget(self.search_box)
+
+    def __apply_search_filter(self, query):
+        groups = self.__config_groups()
+        if not groups:
+            return
+        from src.task.config_groups import visible_groups, visible_keys
+        keys = list(self.config_widget_by_key.keys())
+        descriptions = self.config_description or {}
+        q = (query or '').strip()
+        if not q:
+            # 无搜索:恢复全部显示后再按折叠状态收起,组标题始终可见(可点击展开)
+            for widget in self.config_widgets:
+                widget.setVisible(True)
+            for header in self.group_headers:
+                header.setVisible(True)
+            self.__apply_group_collapse()
+            self._adjust_config_content_size()
+            return
+        # 有搜索:匹配优先,折叠忽略(命中即自动展开该组)
+        visible = visible_keys(query, keys, descriptions)
+        for key, widget in self.config_widget_by_key.items():
+            widget.setVisible(key in visible)
+        visible_group_names = visible_groups(query, groups, keys, descriptions)
+        for group, header in self.group_header_by_group.items():
+            header.setVisible(group in visible_group_names)
+            header.setArrowType(Qt.DownArrow)  # 搜索中匹配组视为展开(内容已强制显示)
+        self._adjust_config_content_size()
+
+    def __toggle_group(self, group):
+        """点击组标题:折叠/展开该组。折叠状态只影响无搜索时的展示。"""
+        self.group_collapsed[group] = not self.group_collapsed.get(group, False)
+        self.__update_header_arrow(group)
+        self.__apply_search_filter(self.search_box.text())
+
+    def __update_header_arrow(self, group):
+        header = self.group_header_by_group.get(group)
+        if header is not None:
+            header.setArrowType(Qt.RightArrow if self.group_collapsed.get(group, False) else Qt.DownArrow)
+
+    def __apply_group_collapse(self):
+        """无搜索时按折叠状态收起组内配置项(组标题保持可见)。"""
+        for group, widgets in self.group_widgets.items():
+            collapsed = self.group_collapsed.get(group, False)
+            for widget in widgets:
+                widget.setVisible(not collapsed)
+            self.__update_header_arrow(group)
 
     def __add_sub_configs_divider(self, key, position):
         divider = QFrame()
