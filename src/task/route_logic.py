@@ -5,6 +5,7 @@
 """
 import glob
 import os
+import re
 
 import cv2
 import numpy as np
@@ -33,9 +34,12 @@ STOP_COMMAND = 'stop stop stop'
 
 def load_routes(map_dir):
     """读 minimap/<地图名>/route*.png → (segments, unknown)。
-    只认 alpha>0 且在色表中的像素;涂错色收进 unknown 供录制校验报告。"""
+    只认 alpha>0 且在色表中的像素;涂错色收进 unknown 供录制校验报告。
+    文件按编号自然排序(评审 #15:字典序会把 route10 排到 route2 前,≥10 段乱序)。"""
     segments, unknown = [], []
-    for f in sorted(glob.glob(os.path.join(map_dir, 'route*.png'))):
+    for f in sorted(glob.glob(os.path.join(map_dir, 'route*.png')),
+                    key=lambda p: int(m.group(1)) if (m := re.search(r'route(\d+)\.png$',
+                                                                     os.path.basename(p))) else 0):
         img = minimap.imread_unicode(f)  # cv2.imread 中文路径静默返 None
         if img is None or img.ndim != 3 or img.shape[2] != 4:
             continue
@@ -124,8 +128,18 @@ class RouteOps:
             self._paint(op)
 
     def draw_line(self, p0, p1, command):
-        op = {'type': 'line', 'p0': (int(p0[0]), int(p0[1])),
-              'p1': (int(p1[0]), int(p1[1])), 'command': command}
+        p0 = (int(p0[0]), int(p0[1]))
+        p1 = (int(p1[0]), int(p1[1]))
+        if p0 == p1:
+            return  # 零长线段不落笔(评审 #13 洪泛防护)
+        if (self.ops and self.ops[-1]['type'] == 'line'
+                and self.ops[-1]['command'] == command
+                and self.ops[-1]['p1'] == p0):
+            # 同命令连续线:更新终点不新增 op(评审 #13:微线段洪泛压栈,10s 顶墙=100 笔,F3 语义报废)
+            self.ops[-1]['p1'] = p1
+            self._repaint()
+            return
+        op = {'type': 'line', 'p0': p0, 'p1': p1, 'command': command}
         self.ops.append(op)
         self._paint(op)
 

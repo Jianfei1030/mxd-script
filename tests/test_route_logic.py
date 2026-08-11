@@ -41,6 +41,16 @@ class TestLoadRoutes(unittest.TestCase):
     def test_missing_dir_returns_empty(self):
         self.assertEqual(rl.load_routes('不存在的目录'), ([], []))
 
+    def test_natural_numeric_order(self):
+        # 评审 #15:≥10 段按编号自然排序,不按字典序(route10 不能排到 route2 前)
+        with tempfile.TemporaryDirectory() as d:
+            self._write_route(os.path.join(d, 'route1.png'), [(1, 1, (255, 0, 0))])
+            self._write_route(os.path.join(d, 'route2.png'), [(2, 2, (255, 0, 0))])
+            self._write_route(os.path.join(d, 'route10.png'), [(3, 3, (255, 0, 0))])
+            segments, unknown = rl.load_routes(d)
+            self.assertEqual([list(s)[0] for s in segments], [(1, 1), (2, 2), (3, 3)])
+            self.assertEqual(unknown, [])
+
 
 class TestNearestCommand(unittest.TestCase):
 
@@ -143,6 +153,29 @@ class TestRouteOps(unittest.TestCase):
             self.assertEqual(len(segments), 1)
             self.assertEqual(segments[0][(20, 20)], 'none none goal')
             self.assertEqual(unknown, [])
+
+    def test_draw_line_merges_continuous_same_command(self):
+        # 评审 #13:同命令连续线只更新终点,不新增 op(防微线段洪泛压栈,F3 语义报废)
+        ops = rl.RouteOps((94, 122))
+        ops.draw_line((5, 5), (10, 5), 'left none none')
+        ops.draw_line((10, 5), (20, 5), 'left none none')
+        ops.draw_line((20, 5), (20, 9), 'left none none')
+        self.assertEqual(len(ops.ops), 1)
+        self.assertEqual(ops.ops[0]['p1'], (20, 9))
+        self.assertGreater(int(ops.layer[:, :, 3].sum()), 0)
+
+    def test_draw_line_skips_zero_length(self):
+        ops = rl.RouteOps((94, 122))
+        ops.draw_line((5, 5), (5, 5), 'left none none')
+        self.assertEqual(len(ops.ops), 0)
+        self.assertEqual(int(ops.layer[:, :, 3].sum()), 0)
+
+    def test_draw_line_does_not_merge_broken_or_different_command(self):
+        ops = rl.RouteOps((94, 122))
+        ops.draw_line((5, 5), (10, 5), 'left none none')
+        ops.draw_line((12, 5), (20, 5), 'left none none')   # 起点不接终点 → 新 op
+        ops.draw_line((20, 5), (30, 5), 'right none none')  # 命令不同 → 新 op
+        self.assertEqual(len(ops.ops), 3)
 
 
 if __name__ == '__main__':
