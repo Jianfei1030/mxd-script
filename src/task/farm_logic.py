@@ -203,15 +203,32 @@ def should_feed_pet(now, last_feed_time, interval, enabled):
 
 
 def parse_buff_config(text):
-    """'magic_shield=q,armor=w' -> [('magic_shield','q'),('armor','w')]"""
+    """'magic_shield=q:180,armor=w' -> [('magic_shield', 'q', 180), ('armor', 'w', None)]
+    每项格式 名称=按键[:间隔秒];间隔缺省为 None(永不自动补,只手动按);
+    间隔非法(非数字)整条丢弃——配置打错字不该静默变成"手动键",用户会以为自动补生效了。"""
     result = []
     for entry in (text or '').split(','):
         entry = entry.strip()
         if '=' in entry:
-            name, key = entry.split('=', 1)
+            name, rest = entry.split('=', 1)
+            key = rest
+            interval = None
+            if ':' in rest:
+                key, _, iv = rest.partition(':')
+                try:
+                    interval = int(iv.strip())
+                except ValueError:
+                    continue  # 坏间隔:整条跳过,不保留为手动键
             if name.strip() and key.strip():
-                result.append((name.strip(), key.strip()))
+                result.append((name.strip(), key.strip(), interval))
     return result
+
+
+def due_buffs(now, buffs, last_times):
+    """buffs: parse_buff_config 输出 [(name, key, interval)];last_times: {name: 上次补的时间}
+    返回需要补的 [(name, key)]:interval 非 None 且 now - last_times.get(name, 0) >= interval。"""
+    return [(name, key) for name, key, interval in buffs
+            if interval is not None and now - last_times.get(name, 0) >= interval]
 
 
 def is_dead(hp_percent, threshold=0.02):

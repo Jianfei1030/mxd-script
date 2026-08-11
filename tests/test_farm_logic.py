@@ -90,11 +90,26 @@ class TestFarmLogic(unittest.TestCase):
         self.assertFalse(fl.should_feed_pet(900.0, 0.0, 900, False))  # 开关关
 
     def test_parse_buff_config(self):
-        self.assertEqual(fl.parse_buff_config('magic_shield=q,armor=w'),
-                         [('magic_shield', 'q'), ('armor', 'w')])
+        self.assertEqual(fl.parse_buff_config('magic_shield=q:180,armor=w'),
+                         [('magic_shield', 'q', 180), ('armor', 'w', None)])
         self.assertEqual(fl.parse_buff_config(''), [])
         self.assertEqual(fl.parse_buff_config('  '), [])
-        self.assertEqual(fl.parse_buff_config('bad-entry,good=x'), [('good', 'x')])
+        self.assertEqual(fl.parse_buff_config('bad-entry,good=x'), [('good', 'x', None)])
+        self.assertEqual(fl.parse_buff_config('bad=x:abc,good=y:60'), [('good', 'y', 60)])  # 坏间隔跳过
+
+    def test_due_buffs(self):
+        buffs = [('magic_shield', 'q', 180), ('armor', 'w', 300), ('manual', 'e', None)]
+        # 从未补过 → 视为到期
+        self.assertEqual(fl.due_buffs(400.0, buffs, {}),
+                         [('magic_shield', 'q'), ('armor', 'w')])
+        # 未到期不返回;interval None 永不自动补
+        self.assertEqual(fl.due_buffs(200.0, buffs, {'magic_shield': 100.0, 'armor': 100.0}), [])
+        # 只补到期的
+        self.assertEqual(fl.due_buffs(200.0, buffs, {'magic_shield': 0.0, 'armor': 100.0}),
+                         [('magic_shield', 'q')])
+        # 到期边界:now - last == interval 视为到期
+        self.assertEqual(fl.due_buffs(180.0, [('magic_shield', 'q', 180)], {'magic_shield': 0.0}),
+                         [('magic_shield', 'q')])
 
     def test_is_dead(self):
         self.assertTrue(fl.is_dead(0.0))
