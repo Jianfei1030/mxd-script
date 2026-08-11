@@ -1113,13 +1113,19 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                 and farm_logic.should_attack(now, self._last_attack, cfg['攻击间隔(秒)'])
                 and not farm_logic.stun_suppressed(
                     now, self._last_hit, cfg['硬直抑制窗(秒)'])):
+            # 二连击:攻击键 + 副攻击键背靠背连按,中间不插入任何指令。
+            # 副攻击键留空 = 关闭(同群攻键约定);开启时跳过攻击前垫步——
+            # 垫步会往攻击序列里插入方向键指令,违背「攻击-副攻击零插入」。
+            double_attack = (cfg.get('二连击开关')
+                             and keys.get('副攻击键(可留空)', ''))
             # 攻击前垫步(战士可选):先朝最近怪所在侧轻点方向键再攻击。
             # 兜住 _facing 信念被击退/按键丢失破坏的盲区——区内有怪时
             # attack_turn_direction 认为"面朝侧还有目标"不转向,角色背对怪
             # 一直砍空气。垫步不信任信念,信念错则物理修正,信念对则是 no-op。
             # 键窗口不可点击时不垫步(方向键丢了 _facing 不许盲写,见 _key_sendable)。
             # 2 秒没攻击(空闲/寻怪中)不垫步:此时无朝向需求,垫步只会干扰寻怪移动。
-            if (cfg.get('攻击前垫步开关')
+            if (not double_attack
+                    and cfg.get('攻击前垫步开关')
                     and self._last_zone is not None
                     and (self._last_attack == 0.0 or now - self._last_attack < 2.0)):
                 body_x = self._last_body_x if self._last_body_x is not None else CALIBRATED_SIZE[0] / 2
@@ -1129,6 +1135,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     key = '左移键' if side == 'left' else '右移键'
                     self.send_key(keys[key], down_time=PAD_STEP_TAP_SECONDS)
             self.send_key(keys['攻击键'])
+            if double_attack:
+                self.send_key(keys['副攻击键(可留空)'])
             self._last_attack = now
 
     def _do_seek_move(self, cfg, keys):
