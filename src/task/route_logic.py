@@ -69,3 +69,83 @@ def advance_segment(idx, n_segments, command):
     if command == GOAL_COMMAND and n_segments > 0:
         return (idx + 1) % n_segments
     return idx
+
+
+# ---------- 录制操作层(spec §5;键位为自定义,MSALU 无撤销/放弃段参考实现) ----------
+
+def action_for_keys(pressed):
+    """物理按键规范名集合 → 命令字符串;无可涂动作 → None。
+    规范名:left/right/up/down/space(跳)/f2(goal)。脚本层负责真实键位→规范名。"""
+    if 'f2' in pressed:
+        return GOAL_COMMAND
+    if 'space' in pressed:
+        if 'left' in pressed:
+            return 'left none jump'
+        if 'right' in pressed:
+            return 'right none jump'
+        if 'down' in pressed:
+            return 'none down jump'
+        return 'none none jump'
+    if 'up' in pressed:
+        return 'none up none'
+    if 'down' in pressed:
+        return 'none down none'
+    if 'left' in pressed:
+        return 'left none none'
+    if 'right' in pressed:
+        return 'right none none'
+    return None
+
+
+def blob_ready(now, last_blob, cooldown=0.7):
+    """blob 落笔冷却(spec §5 防连涂)。"""
+    return now - last_blob >= cooldown
+
+
+class RouteOps:
+    """路线层操作栈:每笔入栈,撤销=弹栈+清空+重放;clear=放弃当前段(不删已落盘文件)。"""
+
+    def __init__(self, shape):
+        h, w = shape
+        self.layer = np.zeros((h, w, 4), np.uint8)  # BGRA 透明路线层
+        self.ops = []
+
+    def _paint(self, op):
+        kind = op['type']
+        color_bgr = COMMAND_COLORS[op['command']][::-1]
+        if kind == 'line':
+            cv2.line(self.layer, op['p0'], op['p1'], (*color_bgr, 255), 1)
+        else:  # blob / goal 同画圆点
+            cv2.circle(self.layer, op['center'], op.get('radius', 2), (*color_bgr, 255), -1)
+
+    def _repaint(self):
+        self.layer[:] = 0
+        for op in self.ops:
+            self._paint(op)
+
+    def draw_line(self, p0, p1, command):
+        op = {'type': 'line', 'p0': (int(p0[0]), int(p0[1])),
+              'p1': (int(p1[0]), int(p1[1])), 'command': command}
+        self.ops.append(op)
+        self._paint(op)
+
+    def draw_blob(self, center, command, radius=2):
+        op = {'type': 'blob', 'center': (int(center[0]), int(center[1])),
+              'radius': radius, 'command': command}
+        self.ops.append(op)
+        self._paint(op)
+
+    def undo(self):
+        """弹栈 + 整层重放;栈空 no-op。goal 落笔可撤销,但已保存的 routeN 文件不回滚。"""
+        if not self.ops:
+            return
+        self.ops.pop()
+        self._repaint()
+
+    def clear(self):
+        """F4 放弃当前段:清空路线层与栈,不动已保存文件。"""
+        self.ops = []
+        self._repaint()
+
+    def save(self, path):
+        minimap.imwrite_unicode(path, self.layer)  # cv2.imwrite 中文路径抛异常

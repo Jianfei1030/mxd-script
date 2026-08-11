@@ -71,5 +71,79 @@ class TestAdvanceSegment(unittest.TestCase):
         self.assertEqual(rl.advance_segment(1, 2, 'left none none'), 1)
 
 
+class TestActionForKeys(unittest.TestCase):
+
+    def test_walk_and_jump_and_climb_and_goal(self):
+        self.assertEqual(rl.action_for_keys({'left'}), 'left none none')
+        self.assertEqual(rl.action_for_keys({'right'}), 'right none none')
+        self.assertEqual(rl.action_for_keys({'space'}), 'none none jump')
+        self.assertEqual(rl.action_for_keys({'space', 'left'}), 'left none jump')
+        self.assertEqual(rl.action_for_keys({'space', 'down'}), 'none down jump')
+        self.assertEqual(rl.action_for_keys({'up'}), 'none up none')
+        self.assertEqual(rl.action_for_keys({'down'}), 'none down none')
+        self.assertEqual(rl.action_for_keys({'f2'}), 'none none goal')
+        self.assertIsNone(rl.action_for_keys(set()))
+
+
+class TestBlobCooldown(unittest.TestCase):
+
+    def test_ready_after_cooldown(self):
+        self.assertTrue(rl.blob_ready(10.0, 9.2, 0.7))
+        self.assertFalse(rl.blob_ready(10.0, 9.5, 0.7))
+
+
+class TestRouteOps(unittest.TestCase):
+
+    def test_draw_line_blob_undo_replays_stack(self):
+        ops = rl.RouteOps((94, 122))
+        ops.draw_line((5, 5), (15, 5), 'left none none')
+        ops.draw_blob((20, 20), 'none none goal')
+        self.assertGreater(len(ops.ops), 0)
+        alpha_before = int(ops.layer[:, :, 3].sum())
+        self.assertGreater(alpha_before, 0)
+        ops.undo()  # 撤销 blob → 只剩 line
+        self.assertEqual(len(ops.ops), 1)
+        self.assertLess(int(ops.layer[:, :, 3].sum()), alpha_before)
+        ops.undo()
+        ops.undo()  # 栈空 no-op 不炸
+        self.assertEqual(int(ops.layer[:, :, 3].sum()), 0)
+
+    def test_clear_keeps_saved_files_untouched(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ops = rl.RouteOps((94, 122))
+            ops.draw_blob((20, 20), 'none none goal')
+            path = os.path.join(d, 'route1.png')
+            ops.save(path)
+            ops.clear()
+            self.assertEqual(int(ops.layer[:, :, 3].sum()), 0)
+            self.assertTrue(os.path.exists(path))  # F4 不删已落盘文件(spec §5)
+
+    def test_save_writes_bgra_png(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            ops = rl.RouteOps((94, 122))
+            ops.draw_line((5, 5), (15, 5), 'left none none')
+            path = os.path.join(d, 'route1.png')
+            ops.save(path)
+            img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            self.assertEqual(img.shape, (94, 122, 4))
+            self.assertEqual(tuple(int(v) for v in img[5, 5][:3]), (0, 0, 255))  # BGR 红
+
+    def test_save_and_load_routes_in_chinese_dir(self):
+        """中文路径回归:RouteOps.save(写) + load_routes(读)全链路。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, '东部岩山5')
+            os.makedirs(sub)
+            ops = rl.RouteOps((94, 122))
+            ops.draw_blob((20, 20), 'none none goal')
+            ops.save(os.path.join(sub, 'route1.png'))
+            segments, unknown = rl.load_routes(sub)
+            self.assertEqual(len(segments), 1)
+            self.assertEqual(segments[0][(20, 20)], 'none none goal')
+            self.assertEqual(unknown, [])
+
+
 if __name__ == '__main__':
     unittest.main()
