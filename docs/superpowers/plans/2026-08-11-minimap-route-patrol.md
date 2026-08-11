@@ -52,6 +52,7 @@
 
 **Interfaces:**
 - Produces(后续 Task 全部依赖):
+  - `imread_unicode(path, flags=cv2.IMREAD_UNCHANGED) -> img | None` / `imwrite_unicode(path, img) -> None`(**中文路径 IO 助手**:cv2.imread/imwrite 在 Windows 非 ASCII 路径下失效——读侧 `cv2.imdecode(np.fromfile(...))`(模式出自 `ok/device/capture_methods/image.py:30`),写侧 `cv2.imencode(...).tobytes()` + Python `open(path,'wb')`;全特性图像 IO 统一走这两个助手)
   - `find_yellow_dots(panel_bgr) -> list[tuple[float, float, int]]` # (cx, cy, area),亚像素质心
   - `crop_panel(frame, meta) -> img` / `panel_to_map(point, meta) -> (float, float)` / `map_to_panel(point, meta) -> (float, float)`
   - `calibrate(panel_bgr, base_rgba) -> dict | None` / `terrain_match_score(panel_bgr, base_rgba, meta) -> float`
@@ -176,6 +177,32 @@ class TestMetaIO(unittest.TestCase):
 
     def test_load_missing_returns_none(self):
         self.assertIsNone(minimap.load_map_meta('不存在的目录'))
+
+
+class TestUnicodeIO(unittest.TestCase):
+    """中文路径回归(预检铁证:cv2.imread/imwrite 在 Windows 非 ASCII 路径下失效,
+    imread 静默返 None、imwrite 抛异常;沙箱合成测试全 ASCII 没覆盖到)。"""
+
+    def test_write_then_read_base_map_in_chinese_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, '东部岩山5')
+            os.makedirs(sub)
+            img = make_base()
+            minimap.imwrite_unicode(os.path.join(sub, '底图.png'), img)
+            loaded = minimap.load_base_map(sub)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.shape, img.shape)
+
+    def test_meta_roundtrip_in_chinese_dir(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, '中文目录')
+            os.makedirs(sub)
+            meta = {'panel_roi': (10, 100, 270, 190), 'scale': 2.0,
+                    'offset_x': 7.0, 'offset_y': 11.0, 'search_range': 8}
+            minimap.save_map_meta(sub, meta)
+            self.assertEqual(minimap.load_map_meta(sub)['scale'], 2.0)
 
 
 if __name__ == '__main__':
@@ -306,11 +333,30 @@ def terrain_match_score(panel_bgr, base_rgba, meta):
 
 
 def load_base_map(map_dir):
-    """读 minimap/<地图名>/底图.png(BGRA);不存在 → None。"""
+    """读 minimap/<地图名>/底图.png(BGRA);不存在 → None。
+    必须走 imread_unicode:cv2.imread 在 Windows 中文路径下静默返 None(预检铁证)。"""
     path = os.path.join(map_dir, '底图.png')
     if not os.path.exists(path):
         return None
-    return cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    return imread_unicode(path)
+
+
+def imread_unicode(path, flags=cv2.IMREAD_UNCHANGED):
+    """中文路径安全的 imread(模式出自 ok/device/capture_methods/image.py:30)。"""
+    if not os.path.exists(path):
+        return None
+    return cv2.imdecode(np.fromfile(path, dtype=np.uint8), flags)
+
+
+def imwrite_unicode(path, img):
+    """中文路径安全的 imwrite:imencode 到内存,再用 Python open 写盘
+    (open() 中文路径已实测正常;cv2.imwrite 直接抛异常)。"""
+    ext = os.path.splitext(path)[1] or '.png'
+    ok, buf = cv2.imencode(ext, img)
+    if not ok:
+        raise ValueError(f'imencode 失败: {path}')
+    with open(path, 'wb') as f:
+        f.write(buf.tobytes())
 
 
 def load_map_meta(map_dir):
@@ -506,7 +552,7 @@ class DotTracker:
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONUTF8=1; python -m unittest tests.test_minimap -v`
-Expected: PASS(17 用例)
+Expected: PASS(19 用例)
 
 - [ ] **Step 5: Commit**
 
@@ -631,6 +677,8 @@ import os
 import cv2
 import numpy as np
 
+from src.detect import minimap  # imread_unicode/imwrite_unicode:中文路径 IO(预检铁证)
+
 # 颜色命令表(spec §3):RGB → "左/右 上/下 动作"。战士裁剪版,无传送色。
 COLOR_COMMANDS = {
     (255, 0, 0): 'left none none',
@@ -656,7 +704,7 @@ def load_routes(map_dir):
     只认 alpha>0 且在色表中的像素;涂错色收进 unknown 供录制校验报告。"""
     segments, unknown = [], []
     for f in sorted(glob.glob(os.path.join(map_dir, 'route*.png'))):
-        img = cv2.imread(f, cv2.IMREAD_UNCHANGED)
+        img = minimap.imread_unicode(f)  # cv2.imread 中文路径静默返 None
         if img is None or img.ndim != 3 or img.shape[2] != 4:
             continue
         seg = {}
@@ -778,6 +826,20 @@ class TestRouteOps(unittest.TestCase):
             img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
             self.assertEqual(img.shape, (94, 122, 4))
             self.assertEqual(tuple(int(v) for v in img[5, 5][:3]), (0, 0, 255))  # BGR 红
+
+    def test_save_and_load_routes_in_chinese_dir(self):
+        """中文路径回归:RouteOps.save(写) + load_routes(读)全链路。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sub = os.path.join(d, '东部岩山5')
+            os.makedirs(sub)
+            ops = rl.RouteOps((94, 122))
+            ops.draw_blob((20, 20), 'none none goal')
+            ops.save(os.path.join(sub, 'route1.png'))
+            segments, unknown = rl.load_routes(sub)
+            self.assertEqual(len(segments), 1)
+            self.assertEqual(segments[0][(20, 20)], 'none none goal')
+            self.assertEqual(unknown, [])
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -865,13 +927,13 @@ class RouteOps:
         self._repaint()
 
     def save(self, path):
-        cv2.imwrite(path, self.layer)
+        minimap.imwrite_unicode(path, self.layer)  # cv2.imwrite 中文路径抛异常
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `$env:PYTHONUTF8=1; python -m unittest tests.test_route_logic -v`
-Expected: PASS(13 用例)
+Expected: PASS(14 用例)
 
 - [ ] **Step 5: Commit**
 
@@ -1050,7 +1112,7 @@ class Recorder:
         arch_dir = os.path.join(self.map_dir, 'archive')
         os.makedirs(arch_dir, exist_ok=True)
         for i, p in enumerate(self.archive):
-            cv2.imwrite(os.path.join(arch_dir, f'panel_{i:03d}.png'), p)
+            minimap.imwrite_unicode(os.path.join(arch_dir, f'panel_{i:03d}.png'), p)
         if len(self.jitter) >= 10:
             arr = np.array(self.jitter)
             dev = np.abs(arr - arr.mean(axis=0)).sum(axis=1)
@@ -1134,8 +1196,6 @@ import glob
 import os
 import unittest
 
-import cv2
-
 from src.detect import minimap
 
 MAP_DIR = os.path.join('minimap', '东部岩山5')
@@ -1149,8 +1209,8 @@ class TestMinimapOffline(unittest.TestCase):
     def test_dots_detected_in_most_frames(self):
         hits = 0
         for f in FRAMES:
-            panel = cv2.imread(f)
-            if minimap.find_yellow_dots(panel):
+            panel = minimap.imread_unicode(f)  # 存档帧路径含中文,cv2.imread 会静默返 None
+            if panel is not None and minimap.find_yellow_dots(panel):
                 hits += 1
         self.assertGreaterEqual(hits / len(FRAMES), 0.8,
                                 f'黄点检出率 {hits}/{len(FRAMES)} 过低')
@@ -1160,7 +1220,9 @@ class TestMinimapOffline(unittest.TestCase):
         base = minimap.load_base_map(MAP_DIR)
         h, w = base.shape[:2]
         for f in FRAMES:
-            panel = cv2.imread(f)
+            panel = minimap.imread_unicode(f)
+            if panel is None:
+                continue
             for cx, cy, _a in minimap.find_yellow_dots(panel):
                 mx, my = minimap.panel_to_map((cx, cy), meta)
                 self.assertTrue(-5 <= mx <= w + 5 and -5 <= my <= h + 5,
@@ -2104,3 +2166,7 @@ git commit -m "docs: 路线巡逻五关验收记录——30min 无干预通过,�
 4. **CLIMB 入口空走一拍(中)**:子阶段步进抽成 `_climb_step`,FOLLOW 入口委托同一段逻辑,**进入拍即对位**;退出返回 None 落回本拍 FOLLOW
 5. **重试计数少一拍(中)**:与第 4 条联动——入口拍即对位后前置 3 拍恰好完成转换,测试原样通过;测试内加拍数注释固化
 6. 附带修复:`TestNearestCommand` 类定义缺右括号(SyntaxError)
+
+## 评审修订记录(2026-08-11,预检 1 条)
+
+7. **中文路径 cv2 IO 失效(实施预检铁证)**:cv2.imread(中文路径)静默返 None、cv2.imwrite 抛异常(OpenCV-Windows 经典缺陷,系统/venv 双环境复现;沙箱合成测试全 ASCII 未覆盖)。修法:`minimap.py` 加公开助手 **`imread_unicode`(imdecode+np.fromfile,模式出自 `ok/device/capture_methods/image.py:30`)** 与 **`imwrite_unicode`(imencode→bytes→Python `open('wb')`,open() 中文路径已实测正常)**;load_base_map/load_routes/RouteOps.save/录制器 finish()/test_minimap_offline 全部改走助手。回归测试:Task 1 `TestUnicodeIO`(中文子目录,助手+load_base_map+meta 读写)、Task 4 中文路径用例(RouteOps.save→load_routes 回读全链路)
