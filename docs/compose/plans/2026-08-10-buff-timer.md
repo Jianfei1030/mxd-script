@@ -162,3 +162,7 @@ Expected: 全绿 + OK
 
 - 写 `docs/compose/reports/buff-timer.md`（frontmatter + specs/plans/branch/commits + 验收结论,格式同 `docs/compose/reports/double-attack.md`）
 - 更新 plan 文件 NOTE 标记
+
+---
+
+> NOTE: 已完成实现并交付(2026-08-12)。最终报告见 reports/buff-timer.md。
