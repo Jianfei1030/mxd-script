@@ -322,3 +322,19 @@ E2E（铁律 §11.3，截图 + 视觉模型验收）：
   - `2026-08-05-ok-mxd-design.md` §3（名字牌锚点基线与分块扫描）
   - `2026-08-07-facing-reassert-on-hit-design.md`（受击检测 `knockback_detected`，§3.5 复用其钩子）
   - `2026-08-08-seek-latency-design.md`（检测节拍三态节流，本次不动节拍，只动锚点阶梯）
+
+## 10. 训练实验记录（2026-08-10，双类模型 v8s）
+
+**标注**：分两轮——第一轮标 mob（预标注 344 框人工校对），第二轮切 `c` 标自己（100 帧 100 框）。
+「只标自己」策略效果：player mAP50=0.995 / Recall=1.0，模型 100% 找回验证集的自己。
+
+**v8s 混合训练（5 地图 511 帧）**：
+- 数据源：东部岩山2(151) + 岩山3(100) + 岩山4(100) + 野猪领地(100) + 巡逻(60)，共 511 帧 / 2031 框 / 37 负样本
+- 切分：每地图前 90% 入 train（459 帧），后 10% 入 val（52 帧），地图内时序不重叠
+- 命令（从 dataset 目录）：`..\.venv-warrior\Scripts\yolo.exe train data=mobs.yaml model=..\yolov8s.pt imgsz=1280 epochs=100 batch=8 device=0 project=runs name=<名>`
+
+**v8s vs v8n 同口径对照**（同 459/52 划分、同 100 epochs、同 COCO 起点）：
+v8s mAP50=0.984 vs v8n 0.975（**+0.9%**）、Precision +3.3%（误检更少）、Recall -2.7%（略保守）。
+v8s 收益集中在少误检，挂机场景更优。
+
+**部署**（2026-08-10）：`assets/mob_model/mob.onnx` 换为 v8s 双类 45MB（此前 master 仓库版为 mob_player_v1 12.7MB）。
