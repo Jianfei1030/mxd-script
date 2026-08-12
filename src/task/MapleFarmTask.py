@@ -1143,6 +1143,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
                     self.send_key(keys[key], down_time=PAD_STEP_TAP_SECONDS)
             self.send_key(keys['攻击键'])
             if double_attack:
+                # 二连击间隔 = 攻击间隔:两下之间 sleep 一段,让游戏输入采样能识别
+                # 第二次按键。零间隔时 keyUp/keyDown 合并到同一采样周期,第二下被吞
+                # (2026-08-13 实测)。直接用「攻击间隔(秒)」,不另设 hardcode。
+                self.sleep(cfg['攻击间隔(秒)'])
                 self.send_key(keys['副攻击键(可留空)'])
             self._last_attack = now
 

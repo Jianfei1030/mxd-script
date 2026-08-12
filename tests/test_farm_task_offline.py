@@ -38,7 +38,7 @@ def make_task(**cfg_overrides):
     task.find_mobs = MagicMock(return_value=[])
     task.find_all = MagicMock(return_value=[])
     task.get_global_config = MagicMock(return_value=dict(KEYS))
-    task._executor = SimpleNamespace(interaction=MagicMock())
+    task._executor = SimpleNamespace(interaction=MagicMock(), sleep=MagicMock())
     return task
 
 
@@ -1098,6 +1098,27 @@ class TestAttackTap(unittest.TestCase):
         task._last_attack = 0.0
         task._do_attack(task.config, keys, now=100.0)
         self.assertEqual(task.send_key.call_args_list, [call('a')])
+
+    def test_double_attack_sleeps_between_hits(self):
+        """二连击两下之间 sleep 攻击间隔(秒):零间隔时第二下被游戏输入采样吞掉。
+        间隔直接取「攻击间隔(秒)」配置,不另设 hardcode。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True,
+                            '攻击间隔(秒)': 0.2})
+        task._last_attack_present = True
+        task._do_attack(task.config, keys, now=100.0)
+        # 先攻击键 → sleep(0.2) → 副攻击键
+        self.assertEqual(task.send_key.call_args_list,
+                         [call('shift'), call('x')])
+        task._executor.sleep.assert_called_once_with(0.2)
+
+    def test_double_attack_sleep_uses_attack_interval_default(self):
+        """二连击间隔 = 攻击间隔默认值(1.5s),不是独立 hardcode 值。"""
+        keys = dict(KEYS, **{'副攻击键(可留空)': 'x'})
+        task = make_task(**{'攻击模式': '检测', '二连击开关': True})
+        task._last_attack_present = True
+        task._do_attack(task.config, keys, now=100.0)
+        task._executor.sleep.assert_called_once_with(1.5)
 
 
 class TestSitChair(unittest.TestCase):
