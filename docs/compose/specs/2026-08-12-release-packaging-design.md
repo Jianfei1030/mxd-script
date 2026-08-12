@@ -1,5 +1,10 @@
 # [S1] Release 打包功能设计(Windows exe 安装程序)
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/release-packaging.md)
+
 > 日期:2026-08-12 · 状态:设计(待实现)
 > 目标用户:拿到安装包双击安装、双击桌面图标即用的最终用户(Windows 平台,不需要 Python 环境)。
 

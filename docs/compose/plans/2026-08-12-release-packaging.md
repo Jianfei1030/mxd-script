@@ -1,5 +1,10 @@
 # Release 打包功能实现计划(PyInstaller onedir + Inno Setup)
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/release-packaging.md)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use compose:subagent (recommended) or compose:execute to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 一键构建出 Windows 安装程序 `OK-MXD-setup-<version>.exe`,用户安装后双击桌面图标即提权启动 GUI,无需 Python 环境。
