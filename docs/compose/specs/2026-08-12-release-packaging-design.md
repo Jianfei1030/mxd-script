@@ -85,7 +85,7 @@ python scripts/build_release.py --no-inno   # 只出 dist/OK-MXD/ 目录(自测�
 1. 前置校验:mob.onnx 存在、python 3.12、`pyinstaller`/`innosetup` 可用
 2. PyInstaller onedir 打包(入口 `main.py`,datas:assets/、icons/、onnxocr/models;hidden:OpenVINO、directml;`--uac-admin`;版本号取 config.py)
 3. 复制预置默认配置 `docs/configs/端侧大模型_战士_MapleFarmTask.json → dist/OK-MXD/configs/MapleFarmTask.json`(清理角色名等个人字段)
-4. 冒烟验证(两步,均可离线):先跑最小 import 探针(子进程 `python -c "import src.globals"` 指向 dist 内 `_internal`);再启动 `dist/OK-MXD/OK-MXD.exe --e2e` 3 秒探活(GUI 拉起不崩即过,有屏时人工确认窗口弹出)
+4. 冒烟验证(两步,均可离线):先跑最小 import 探针(子进程 `python -c "import src.globals"` 指向 dist 内 `_internal`);再直接启动 `dist/OK-MXD/OK-MXD.exe`,等 3 秒查进程存活、无 stderr 崩溃日志(GUI 拉起不崩即过,有屏时人工确认窗口弹出)
 5. Inno Setup 编译 `scripts/installer.iss` → `dist/OK-MXD-setup-<version>.exe`
 
 Inno 脚本要点:`PrivilegesRequired=admin`、`DefaultDirName={autopf}\OK-MXD`、桌面+开始菜单图标、`[Dirs]` 建 configs/logs/screenshots 并 `Permissions: users-modify`、卸载删整个目录。
