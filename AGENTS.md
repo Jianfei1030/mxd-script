@@ -516,3 +516,22 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_com
 - **渲染顺序**：ConfigCard 有 config_groups 时按组序渲染（`__ordered_config_keys`，组连续、每组只插一个标题）；无分组任务保持原 dict 顺序
 - **测试**：`tests/test_config_groups.py`（CONFIG_GROUPS 覆盖 DEFAULT_CONFIG 全部键且不重复、唯一组名、matches/visible_keys/visible_groups 纯函数）；`tests/test_config_card_ui.py`（offscreen 渲染：搜索框存在/组标题数/过滤/清空恢复/**折叠切换/搜索展开覆盖折叠/清空恢复折叠/持久化写入与重建恢复/残留组名忽略/无分组任务不写状态文件**/无分组任务无搜索框；grab 渲染图存 `screenshots/e2e/config_groups/`）
 - **E2E 验收（2026-08-11）**：offscreen 渲染截图经视觉模型验收通过（9 组标题 + 顶部搜索框 + 过滤后跨组匹配 + 折叠后组标题保留/内容隐藏/箭头区分）；真实 GUI 启动无崩溃。⚠️ agent 受限窗口站无法截图提权 GUI（PyAutoGUI 全屏与 `_e2e_capture.py` 都抓到空白），交互类 E2E 走 offscreen grab + 断言
+
+
+---
+
+## 13. Release 打包（2026-08-12 上线）
+
+- **入口**：scripts/build_release.py（唯一编排）——前置校验 → PyInstaller onedir → 拷贝 assets/icons 到 exe 同级 → 注入清洗后的默认配置 → 冒烟检查 → ISCC 编译 Inno 安装包
+- **产物**：dist/OK-MXD-setup-<version>.exe（~121-138MB，用户安装后双击桌面图标即提权启动，无需 Python）
+- **打包机依赖**：
+equirements-build.txt（pyinstaller 钉版，不进 requirements.txt）；Inno Setup 6（本机 C:\Users\jianfei\AppData\Local\Programs\Inno Setup 6\ISCC.exe）
+- ⚠️ **mob.onnx 在 .gitignore 不入库**：换机器打包必须先拷 ssets/mob_model/mob.onnx（12.7MB）——脚本前置校验会显式报错
+- **三个打包坑（勿重走）**：
+  1. PyInstaller 6.x onedir 的 datas 默认进 _internal/，而框架 get_path_relative_to_exe 找 exe 同级目录——assets/icons 必须**手动拷贝**到 exe 同级，不能用 --add-data
+  2. config.py 用字符串类名 + importlib 动态加载（'src.globals' 等），静态分析抓不到——必须用 _src_hidden_imports 展开全部 src 子模块为 --hidden-import（--collect-submodules 因 spec 生成时项目根未进 sys.path 只收 3 个）
+  3. 精简版 Inno Setup 6 不带 ChineseSimplified.isl——已内置到 scripts/ChineseSimplified.isl（官方 21.5KB），installer.iss 相对引用
+- **重打包前**：先关掉运行中的 OK-MXD 实例（--clean 只清 build 缓存，旧 dist 里被占用的 logs/ok-script.log 会 PermissionError；脚本已加 clean_old_build 但删不掉时仍会报错）
+- **agent 受限窗口站探活**：--uac-admin exe 用 ShellExecute 
+unas 启动（返回 42），杀进程也要提权 taskkill（/PID <id> /F /T）；窗口站弹不出 UAC 时标记「需人工桌面验证」不阻断构建
+- **测试**：	ests/test_build_release.py（版本解析/命令构建/配置清洗/前置校验 8 用例）；报告见 docs/compose/reports/release-packaging.md
