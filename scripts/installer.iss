@@ -22,7 +22,9 @@ DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 用项目内置的中文语言文件(精简版 Inno Setup 不带 ChineseSimplified.isl;
+; 相对路径按 iss 文件所在目录解析,二者同在 scripts/)
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"

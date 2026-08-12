@@ -35,8 +35,8 @@ class TestBuildPyinstallerCommand(unittest.TestCase):
         self.assertIn("--collect-all", cmd)
         self.assertIn("onnxocr", cmd)
         self.assertIn("--hidden-import", cmd)
-        # datas 用分号分隔(Windows PyInstaller 语法)
-        self.assertTrue(any(";assets" in a or "assets;" in a for a in cmd))
+        # onnxocr 模型用分号分隔的 add-data(Windows PyInstaller 语法)
+        self.assertTrue(any("onnxocr" in a and "models" in a and ";" in a for a in cmd))
         # 入口必须是 main.py(生产入口,无 --e2e)
         self.assertTrue(cmd[-1].endswith("main.py"))
 

@@ -18,5 +18,9 @@ run_train.ps1
 docs/plans/
 *.onnx.bak_*
 assets/
+# PyInstaller build artifacts
+/build/
+/dist/
+OK-MXD.spec
 
 .worktrees/

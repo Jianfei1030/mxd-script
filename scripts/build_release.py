@@ -35,19 +35,41 @@ def parse_version(project_root):
     return m.group(1)
 
 
-def _data_pair(src_rel, dst_rel):
-    """PyInstaller --add-data 条目(Windows 分号分隔)。"""
-    src = os.path.join(PROJECT_ROOT, src_rel)
+def _site_package_data_pair(package, sub_rel, dst_rel):
+    """pip 包内数据(--add-data 条目)。包可能装在 site-packages,不在项目目录。"""
+    import importlib
+    mod = importlib.import_module(package)
+    pkg_dir = os.path.dirname(os.path.abspath(mod.__file__))
+    src = os.path.join(pkg_dir, sub_rel)
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"包内数据不存在: {src}(请先 pip install -r requirements.txt)")
     return f"{src};{dst_rel}"
 
 
+def _src_hidden_imports(project_root):
+    """config.py 用字符串类名 + importlib 动态加载(src.globals / src.scene /
+    src.task.MapleFarmTask),静态分析抓不到。把 src 全部子模块展开成显式
+    --hidden-import(不能用 --collect-submodules:spec 生成时项目根未进
+    sys.path,只能收集到 3 个模块)。"""
+    import sys
+    sys.path.insert(0, project_root)
+    from PyInstaller.utils.hooks import collect_submodules
+    return collect_submodules('src')
+
+
 def build_pyinstaller_command(project_root, version, dist_dir=None, work_dir=None):
-    """拼 PyInstaller onedir 命令(列表形式,可直接 subprocess)。"""
+    """拼 PyInstaller onedir 命令(列表形式,可直接 subprocess)。
+
+    assets/icons 不通过 --add-data 收集:PyInstaller 6.x 会把 datas 打进
+    _internal/,而运行时 get_path_relative_to_exe 找 exe 同级目录,模型会
+    加载失败。因此 assets/icons 由 copy_runtime_dirs() 打包后手动拷贝到
+    exe 同级。onnxocr 模型仍走 add-data(onnxocr 用 __file__ 定位,在
+    _internal/onnxocr/models 下正好)。"""
     dist_dir = dist_dir or os.path.join(project_root, "dist")
     work_dir = work_dir or os.path.join(project_root, "build")
     entry = os.path.join(project_root, "main.py")
     icon = os.path.join(project_root, "icons", "icon.ico")
-    return [
+    cmd = [
         "pyinstaller",
         "--noconfirm",
         "--clean",
@@ -57,17 +79,34 @@ def build_pyinstaller_command(project_root, version, dist_dir=None, work_dir=Non
         "--icon", icon,
         "--distpath", dist_dir,
         "--workpath", work_dir,
-        "--add-data", _data_pair("assets", "assets"),
-        "--add-data", _data_pair("icons", "icons"),
-        "--add-data", _data_pair(os.path.join("onnxocr", "models"),
-                                 os.path.join("onnxocr", "models")),   # 22MB OCR 模型保持目录结构
+        "--add-data", _site_package_data_pair("onnxocr", "models",
+                                              os.path.join("onnxocr", "models")),  # 22MB OCR 模型
         "--collect-all", "onnxocr",
         "--hidden-import", "openvino",
         "--hidden-import", "onnxruntime",
         "--hidden-import", "onnxruntime.capi._pybind_state",
         "--collect-all", "qfluentwidgets",
-        entry,
     ]
+    for mod in _src_hidden_imports(project_root):
+        cmd.extend(["--hidden-import", mod])
+    cmd.append(entry)
+    return cmd
+
+
+def copy_runtime_dirs(project_root, dist_dir):
+    """把 assets/、icons/ 拷贝到 exe 同级(get_path_relative_to_exe 解析基准)。"""
+    import shutil
+    app_dir = os.path.join(dist_dir, DIST_NAME)
+    for rel in ("assets", "icons"):
+        src = os.path.join(project_root, rel)
+        dst = os.path.join(app_dir, rel)
+        if not os.path.exists(src):
+            raise FileNotFoundError(f"运行时目录缺失: {src}")
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print(f"[拷贝] {rel} -> {dst}")
+    return app_dir
 
 
 def sanitize_default_config(src):
@@ -96,6 +135,21 @@ def _run(cmd, cwd=None):
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def clean_old_build(dist_dir):
+    """清理旧构建产物。PyInstaller --clean 只清 build 缓存,不删 dist;
+    旧 dist 里的 logs/ok-script.log 会被运行中的实例占用,导致重打包
+    PermissionError。所以先删整个 dist(删不掉时给出明确提示)。"""
+    import shutil
+    if not os.path.exists(dist_dir):
+        return
+    try:
+        shutil.rmtree(dist_dir)
+        print(f"[清理] 已删除旧构建 {dist_dir}")
+    except OSError as e:
+        print(f"[清理失败] {e}\n请先关闭正在运行的 OK-MXD 实例再打包。")
+        raise
+
+
 def inject_default_config(project_root, dist_dir):
     """把清洗后的参考配置写入 dist 的 configs/MapleFarmTask.json。"""
     import json
@@ -115,20 +169,24 @@ def inject_default_config(project_root, dist_dir):
 
 
 def smoke_probe(dist_dir, python=None):
-    """import 探针:用系统 python 以 dist 的 _internal 为 PYTHONPATH 导入 src.globals
-    + onnxocr 模型文件存在性检查。离线可跑,不进 GUI。"""
-    python = python or sys.executable
-    internal = os.path.join(dist_dir, DIST_NAME, "_internal")
-    probe = (
-        "import src.globals, onnxocr, os;"
-        "p=os.path.join(os.path.dirname(onnxocr.__file__),'models','ppocrv5','det','det.onnx');"
-        "assert os.path.exists(p), p;"
-        "print('smoke OK', p)"
-    )
-    env = dict(os.environ)
-    env["PYTHONPATH"] = internal
-    subprocess.run([python, "-c", probe], cwd=dist_dir, env=env, check=True)
-    print("[冒烟] import 探针通过")
+    """冒烟:静态检查 dist 关键产物存在(离线可跑,不进 GUI/PYZ)。
+    - exe 存在
+    - mob.onnx 检测模型在 assets/(12.7MB)
+    - onnxocr det.onnx 在 _internal/onnxocr/models/(22MB 目录)
+    - _internal 存在(依赖已收集)"""
+    root = os.path.join(dist_dir, DIST_NAME)
+    checks = {
+        "主程序 exe": os.path.join(root, f"{DIST_NAME}.exe"),
+        "检测模型 mob.onnx": os.path.join(root, "assets", "mob_model", "mob.onnx"),
+        "OCR 模型 det.onnx": os.path.join(root, "_internal", "onnxocr", "models",
+                                          "ppocrv5", "det", "det.onnx"),
+        "_internal 依赖目录": os.path.join(root, "_internal"),
+    }
+    missing = [name for name, path in checks.items() if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError(f"冒烟检查缺失: {missing}")
+    print("[冒烟] 产物检查通过:", ", ".join(checks))
+    return root
 
 
 def run_installer(dist_dir, iscc_path, version):
@@ -148,7 +206,7 @@ def main():
     no_inno = "--no-inno" in args
     version = parse_version(PROJECT_ROOT)
     mob_onnx = os.path.join(PROJECT_ROOT, MOB_ONNX_REL)
-    iscc = "" if no_inno else DEFAULT_ISCC_PATH
+    iscc = None if no_inno else DEFAULT_ISCC_PATH
     ok, errors = verify_prerequisites(mob_onnx, iscc)
     if not ok:
         for e in errors:
@@ -156,14 +214,16 @@ def main():
         sys.exit(1)
     print(f"打包版本: {version}  (no_inno={no_inno})")
     dist_dir = os.path.join(PROJECT_ROOT, "dist")
+    clean_old_build(dist_dir)
 
     cmd = build_pyinstaller_command(PROJECT_ROOT, version, dist_dir=dist_dir)
     _run(cmd, cwd=PROJECT_ROOT)
     print("[PyInstaller] onedir 打包完成")
 
+    copy_runtime_dirs(PROJECT_ROOT, dist_dir)
     inject_default_config(PROJECT_ROOT, dist_dir)
     smoke_probe(dist_dir)
-    print("[冒烟] import 探针通过")
+    print("[冒烟] 产物检查通过")
 
     if not no_inno:
         setup_path = run_installer(dist_dir, iscc, version)
