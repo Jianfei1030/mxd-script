@@ -22,11 +22,14 @@ class OpenVinoYolo8Detect:
 
         self._ort_session = None
         self._ort_input_name = None
+        self.backend = 'cpu'  # 实际生效后端:'cpu'=OpenVINO / 'dml'=DirectML(供上层查询)
 
         # backend: 默认 'cpu'(OpenVINO,兼容性最好);'auto'/'dml' 优先 DirectML(Windows 全 GPU),
         # 失败回退 OpenVINO CPU;其他值一律按 'cpu' 处理
         if backend in ('auto', 'dml'):
             self._try_init_dml()
+            if self._ort_session is not None:
+                self.backend = 'dml'
         if self._ort_session is None:
             self._init_openvino()
 

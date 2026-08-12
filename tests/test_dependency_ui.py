@@ -153,6 +153,25 @@ class DependencyCheckUiTest(unittest.TestCase):
         self.assertEqual(config.get('启用GPU推理'), inference_config_option.default_config['启用GPU推理'],
                          'reset 后配置回到默认值')
 
+    def test_gpu_switch_has_restart_hook_and_triggers_restart_when_cpu_model(self):
+        # 「启用GPU推理」开关必须挂 on_check(勾选→检查模型后端→CPU 则自动重启)
+        import tempfile
+        from ok.util.config import Config
+        from config import inference_config_option
+        from ok.gui.settings.GlobalConfigCard import GlobalConfigCard
+        from ok.gui.tasks.LabelAndSwitchButton import LabelAndSwitchButton
+        from src.globals import should_restart_for_gpu
+        Config.config_folder = tempfile.mkdtemp()
+        config = Config('推理加速', inference_config_option.default_config)
+        card = GlobalConfigCard(config, inference_config_option)
+        switch = card.config_widget_by_key.get('启用GPU推理')
+        self.assertIsInstance(switch, LabelAndSwitchButton, '「启用GPU推理」应渲染为开关控件')
+        self.assertTrue(callable(switch.on_check), '开关必须挂 on_check 回调(勾选时检查是否需要重启)')
+        # 决策纯函数语义:模型已 CPU 创建 + 勾选 → 重启;模型未创建 → 不重启
+        self.assertTrue(should_restart_for_gpu(True, 'cpu'))
+        self.assertFalse(should_restart_for_gpu(True, None))
+        self.assertFalse(should_restart_for_gpu(True, 'dml'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -18,6 +18,17 @@ def resolve_backend(accel_config):
     return 'cpu'
 
 
+def should_restart_for_gpu(gpu_enabled, model_backend):
+    """判断是否需要重启 GUI 让 GPU 加速生效:
+    gpu_enabled=True 且模型已创建(model_backend 非 None)且当前为 CPU 后端 → True;
+    模型未创建(None)时懒加载会按新配置选后端,无需重启。"""
+    if not gpu_enabled:
+        return False
+    if model_backend is None:
+        return False
+    return model_backend == 'cpu'
+
+
 class Globals(QObject):
     """应用级单例(对应 config['my_app'])。"""
 
@@ -33,6 +44,13 @@ class Globals(QObject):
             from src.OpenVinoYolo8Detect import OpenVinoYolo8Detect
             self._yolo_model = OpenVinoYolo8Detect(weights=weights, backend=self._resolve_backend())
         return self._yolo_model
+
+    @property
+    def model_backend(self):
+        """模型实际后端:None=模型尚未创建(懒加载);'cpu'=OpenVINO CPU;'dml'=DirectML GPU。"""
+        if self._yolo_model is None:
+            return None
+        return getattr(self._yolo_model, 'backend', 'cpu')
 
     def _resolve_backend(self):
         """从全局配置「推理加速」取后端:勾选→auto,否则 cpu。读取失败一律 cpu。"""

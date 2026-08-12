@@ -29,6 +29,36 @@ def _resolve_type(the_type, default_value):
     return None
 
 
+def _restart_for_gpu_if_needed():
+    """勾选「启用GPU推理」后,若模型已用 CPU 创建则自动重启 GUI 让 GPU 生效。
+    模型未创建(懒加载未触发)时无需重启——首次检测会按新配置选后端。"""
+    import threading
+
+    from ok import Logger, og
+    from src.globals import should_restart_for_gpu
+
+    logger = Logger.get_logger(__name__)
+
+    def restart():
+        try:
+            my_app = getattr(og, 'my_app', None)
+            backend = getattr(my_app, 'model_backend', None) if my_app else None
+            if not should_restart_for_gpu(True, backend):
+                logger.info(f'启用GPU推理:模型后端={backend},无需重启')
+                return
+            logger.info('启用GPU推理但模型已用 CPU 创建,自动重启 GUI 使 DirectML 生效')
+            import ctypes
+            import sys
+            import os
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, " ".join(sys.argv), os.getcwd(), 1)
+            my_app.exit_event.set()
+        except Exception as e:
+            logger.error(f'启用GPU推理自动重启失败: {e}')
+
+    threading.Thread(target=restart, daemon=True).start()
+
+
 def config_widget(config_type, config_desc, config, key, value, task):
     the_type = config_type.get(key) if config_type is not None else None
     value = config.get_default(key)
@@ -65,7 +95,10 @@ def config_widget(config_type, config_desc, config, key, value, task):
         else:
             raise Exception('Unknown config type')
     if isinstance(value, bool):
-        return LabelAndSwitchButton(config_desc, config, key)
+        on_check = None
+        if key == '启用GPU推理' and '推理加速' in getattr(config, 'config_file', ''):
+            on_check = _restart_for_gpu_if_needed
+        return LabelAndSwitchButton(config_desc, config, key, on_check=on_check)
     elif isinstance(value, list):
         options_available = the_type.get('options_available') if isinstance(the_type, dict) else None
         allow_duplication = the_type.get('allow_duplication', False) if isinstance(the_type, dict) else False

@@ -1247,6 +1247,10 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         表现为"切回 GUI 未响应"(2026-08-10 实测修复)。"""
         if paused:
             self._release_held_keys_light()
+            # 暂停即归零补BUFF计时:暂停可能持续很久(用户挂机中断),冻结的时间戳
+            # 会让恢复后迟迟不补(now - 旧时间戳 要重新累计到 间隔 才到期)。
+            # 清空 → due_buffs 判「从未补过」→ 恢复后第一空闲拍立即补一次再重新计时。
+            self._last_buff_times = {}
 
     def disable(self):
         """停任务前松开可能还按着的长按键,防止角色在任务停止后继续走/打。"""

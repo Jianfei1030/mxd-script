@@ -103,6 +103,8 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 - 用**现有旧 mob.onnx** + `OpenVinoYolo8Detect`（不用 ultralytics，会超时）
 - 写 YOLO txt：`0 cx cy w h`（归一化），无框写空 txt（负样本），已有非空 txt 跳过
 - ⚠️ **ultralytics 加载 onnx 卡死 120s+**，自动预标必须走 OpenVINO
+- ⛔ **预标注不会自动发生（2026-08-12 两轮实证教训）**：`label_boxes.py` 只加载已有 txt 画框，**不会自己跑模型检测**。需要预标时必须**显式执行** `python scripts/prelabel_from_onnx.py <地图名> --conf 0.25`，跑完**验证 txt 确实产出**（数量/内容，不能只看无报错），且用户已开着标注工具时要提醒**重新打开**（工具不自动刷新已写 txt）
+- ⚠️ **`record_frames.py` 帧号接续用 `len(os.listdir(dir))`（png+txt 全算）**：目录已有 txt 时新帧号会跳洞（100png+100txt→从 frame_0200 起），采完需重命名整理，否则下次接续错乱
 
 ### 2.3 标注工具（label_boxes.py）
 ```powershell
@@ -121,6 +123,11 @@ $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe scripts\record_frames.py <
 ---
 
 ## 3. 训练与部署
+
+### 3.0 训练期间 GUI 可正常挂机（2026-08-12 实测定案）
+- **yolo 训练（GPU）与 GUI 挂机（OpenVINO CPU 推理）互不冲突**：训练占 GPU 显存 ~7GB（4090 24GB 余量充足），GUI 推理走 CPU（`启用GPU推理=false` 默认 OpenVINO CPU），两条路径互不干扰；训练进程不碰 WGC 会话（与采集不同——采集抢 WGC 需停 GUI，训练不需要）
+- **用户挂机时用的还是旧模型**：训练部署新模型后需**重启 GUI 才生效**（懒加载）
+- 用户要求"训练期间帮我启动 GUI 挂机"是合法操作，直接 ShellExecute runas 启动即可
 
 ### 3.1 切分（final_split.py）
 - `--train` 地图**取全部帧**（copy_map_all），`--frames` **仅作用于 val 地图**
@@ -366,6 +373,7 @@ spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）�
 | 绿框/攻击区偏移 | 名字牌锚点偏移/参数不对 | 用 `calibrate_attack_zone.py` 标定 |
 | paint 日志爆炸 | paint 回调每帧执行 | 回调内禁日志 |
 | **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配；且蓝框(搜索区宽=1.0)本身包含组队列表位置 (x≈2256, y≈538)，clamp 拦不住框内干扰源** | **⛔ 必须关闭组队血量显示（UI 设置里关）**；收窄搜索区宽/调中心Y/调高把组队列表排除出蓝框（见 §7.6） |
+| **打开标注工具无预标框** | 预标注**不会自动发生**——`label_boxes.py` 只显示已有 txt，不跑模型检测 | 显式执行 `prelabel_from_onnx.py <地图名> --conf 0.25`，跑完验证 txt，重新打开工具（见 §2.2） |
 
 ---
 

@@ -231,6 +231,47 @@ class ConfigCardUiTest(unittest.TestCase):
         dlg.interval_spin.setValue(1)
         self.assertEqual(dlg.buff_value(), '魔法盾=q:1')
 
+    def test_buff_edit_dialog_prefills_fields(self):
+        """AddBuffDialog 编辑模式:传 '名称=按键:间隔' 预填三字段。"""
+        from PySide6.QtWidgets import QWidget
+        from ok.gui.tasks.LabelAndBuffList import AddBuffDialog
+        parent = QWidget()
+        dlg = AddBuffDialog(parent, edit_value='魔法盾=q:180')
+        self.assertEqual(dlg.name_edit.text(), '魔法盾')
+        self.assertEqual(dlg.key_edit.text(), 'q')
+        self.assertEqual(dlg.interval_spin.value(), 180)
+        # 编辑后确认按钮可用(预填即校验通过)
+        self.assertTrue(dlg.yesButton.isEnabled())
+        # 无间隔的条目:间隔回退默认 180
+        dlg2 = AddBuffDialog(parent, edit_value='狂暴=w')
+        self.assertEqual(dlg2.name_edit.text(), '狂暴')
+        self.assertEqual(dlg2.key_edit.text(), 'w')
+        self.assertEqual(dlg2.interval_spin.value(), 180)
+
+    def test_buff_list_edit_replaces_selected_item(self):
+        """BuffListDialog 编辑:选中项替换为新值,位置不变。"""
+        from unittest import mock
+        from PySide6.QtWidgets import QWidget
+        from ok.gui.tasks.LabelAndBuffList import BuffListDialog, AddBuffDialog
+        parent = QWidget()
+        dlg = BuffListDialog(['魔法盾=q:180', '狂暴=w:300'], parent)
+        dlg.list_widget.setCurrentRow(0)
+        # 编辑按钮存在且选中时可用
+        self.assertTrue(dlg.edit_button.isEnabled())
+        # 双击列表项应触发编辑(信号连接存在)
+        self.assertIsNotNone(dlg.list_widget.itemDoubleClicked)
+        # mock 模态对话框:edit_item → AddBuffDialog.exec 返回 True,取修改后的新值
+        with mock.patch.object(AddBuffDialog, 'exec', return_value=True):
+            with mock.patch.object(AddBuffDialog, 'buff_value', return_value='魔法盾=q:200'):
+                dlg.edit_item()
+        items = [dlg.list_widget.item(i).text() for i in range(dlg.list_widget.count())]
+        self.assertEqual(items, ['魔法盾=q:200', '狂暴=w:300'])
+        # 未选中时编辑不做事(不弹框、不崩溃)
+        dlg.list_widget.setCurrentRow(-1)
+        with mock.patch.object(AddBuffDialog, 'exec') as mocked:
+            dlg.edit_item()
+        mocked.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

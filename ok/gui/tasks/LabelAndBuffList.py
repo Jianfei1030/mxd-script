@@ -6,10 +6,11 @@ from src.task import farm_logic
 
 
 class AddBuffDialog(MessageBoxBase):
-    """添加一个 BUFF:名称 + 按键 + 间隔秒 三字段表单。
-    确认后经 accepted_buff 信号传出 (name, key, interval)。"""
+    """添加/编辑一个 BUFF:名称 + 按键 + 间隔秒 三字段表单。
+    确认后经 accepted_buff 信号传出 (name, key, interval)。
+    edit_value 非空 = 编辑模式,预填三字段(parse_buff_config 的逆)。"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, edit_value=None):
         super().__init__(parent)
         self.titleLabel = SubtitleLabel(self.tr('Add Buff'), self)
         self.name_edit = LineEdit(self)
@@ -31,7 +32,21 @@ class AddBuffDialog(MessageBoxBase):
         self.yesButton.setDisabled(True)
         self.name_edit.textChanged.connect(self._validate)
         self.key_edit.textChanged.connect(self._validate)
+        if edit_value:
+            self.titleLabel.setText(self.tr('Edit Buff'))
+            self._prefill(edit_value)
         self.widget.setMinimumWidth(360)
+
+    def _prefill(self, edit_value):
+        """从 '名称=按键[:间隔]' 预填表单;间隔缺省/非法用默认 180。"""
+        parsed = farm_logic.parse_buff_config([edit_value])
+        if parsed:
+            name, key, interval = parsed[0]
+            self.name_edit.setText(name)
+            self.key_edit.setText(key)
+            if interval is not None:
+                self.interval_spin.setValue(interval)
+        self._validate()
 
     def _validate(self):
         self.yesButton.setEnabled(bool(self.name_edit.text().strip()
@@ -58,9 +73,12 @@ class BuffListDialog(MessageBoxBase):
         self.move_down_button.clicked.connect(self.move_down)
         self.add_button = PushButton(FluentIcon.ADD, self.tr('Add Buff'))
         self.add_button.clicked.connect(self.add_buff)
+        self.edit_button = PushButton(FluentIcon.EDIT, self.tr('Edit'))
+        self.edit_button.clicked.connect(self.edit_item)
         self.remove_button = PushButton(FluentIcon.REMOVE, self.tr('Remove'))
         self.remove_button.clicked.connect(self.remove_item)
         self.list_widget.itemSelectionChanged.connect(self.update_list_actions)
+        self.list_widget.itemDoubleClicked.connect(lambda _item: self.edit_item())
 
         self.yesButton.setText(self.tr('Confirm'))
         self.cancelButton.setText(self.tr('Cancel'))
@@ -80,6 +98,7 @@ class BuffListDialog(MessageBoxBase):
         row.addWidget(self.move_up_button)
         row.addWidget(self.move_down_button)
         row.addWidget(self.add_button)
+        row.addWidget(self.edit_button)
         row.addWidget(self.remove_button)
         row.addStretch(1)
         self.viewLayout.addLayout(row)
@@ -89,6 +108,7 @@ class BuffListDialog(MessageBoxBase):
         has_selection = row >= 0
         self.move_up_button.setEnabled(has_selection and row > 0)
         self.move_down_button.setEnabled(has_selection and row < self.list_widget.count() - 1)
+        self.edit_button.setEnabled(has_selection)
         self.remove_button.setEnabled(has_selection)
 
     def move_up(self):
@@ -110,6 +130,17 @@ class BuffListDialog(MessageBoxBase):
         if dlg.exec():
             self.list_widget.addItem(dlg.buff_value())
             self.list_widget.setCurrentRow(self.list_widget.count() - 1)
+
+    def edit_item(self):
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        current = self.list_widget.item(row).text()
+        dlg = AddBuffDialog(self.window(), edit_value=current)
+        if dlg.exec():
+            self.list_widget.takeItem(row)
+            self.list_widget.insertItem(row, dlg.buff_value())
+            self.list_widget.setCurrentRow(row)
 
     def remove_item(self):
         row = self.list_widget.currentRow()

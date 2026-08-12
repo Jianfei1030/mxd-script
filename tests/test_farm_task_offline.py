@@ -3726,3 +3726,25 @@ class TestBuffTimer(unittest.TestCase):
         run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)
         task.send_key.assert_not_called()
         self.assertEqual(task._last_buff_times, {})
+
+    def test_pause_resets_buff_timer(self):
+        """F9 暂停(executor_paused=True)归零补BUFF计时:
+        暂停可能持续很久,冻结的时间戳会让恢复后迟迟不补——
+        暂停时清空 _last_buff_times → 恢复后第一空闲拍立即补。"""
+        task = self._task('魔法盾=q:180')
+        task._last_attack_present = False
+        task._last_buff_times = {'魔法盾': 100.0}   # 暂停前累计了 100s
+        task._on_executor_paused(True)
+        self.assertEqual(task._last_buff_times, {}, '暂停必须清空补BUFF计时')
+        # 恢复后(模拟 paused=False 后的一拍)立即补:now 任意大,因从未补过 → 到期
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=2000.0)
+        self.assertEqual(task.send_key.call_args_list, [call('q')])
+        self.assertEqual(task._last_buff_times.get('魔法盾'), 2000.0)
+
+    def test_pause_resume_signal_does_not_reset_timer(self):
+        """暂停恢复信号(False)不清空计时——只在真正暂停(True)时归零。"""
+        task = self._task('魔法盾=q:180')
+        task._last_buff_times = {'魔法盾': 100.0}
+        task._on_executor_paused(False)
+        self.assertEqual(task._last_buff_times, {'魔法盾': 100.0},
+                         '恢复信号不该清空计时')
