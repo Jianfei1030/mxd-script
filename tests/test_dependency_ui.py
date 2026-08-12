@@ -120,15 +120,16 @@ class DependencyCheckUiTest(unittest.TestCase):
         with mock.patch.object(dep_mod, '_installed', return_value=False):
             widget = self._make()
         # offscreen 平台不枚举系统字体,中文会渲染成豆腐块;显式注册系统中文字体文件
-        # (路径从 WINDIR 环境变量推导,不硬编码;注册失败则跳过,截图内容尽力而为)
+        # (路径由 WINDIR 环境变量推导,缺失则跳过,截图内容尽力而为)
         import os
         from PySide6.QtGui import QFont, QFontDatabase
-        font_path = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts', 'msyh.ttc')
-        font_id = QFontDatabase.addApplicationFont(font_path)
-        if font_id >= 0:
-            families = QFontDatabase.applicationFontFamilies(font_id)
-            if families:
-                widget.setFont(QFont(families[0]))
+        windir = os.environ.get('WINDIR')
+        if windir:
+            font_id = QFontDatabase.addApplicationFont(os.path.join(windir, 'Fonts', 'msyh.ttc'))
+            if font_id >= 0:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    widget.setFont(QFont(families[0]))
         widget.resize(640, 160)
         out_dir = os.path.join('screenshots', 'e2e', 'inference_dependency')
         os.makedirs(out_dir, exist_ok=True)
