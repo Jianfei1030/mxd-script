@@ -268,7 +268,7 @@ class ConfigContentMixin:
         return (
             isinstance(the_type, dict)
             and (
-                the_type.get('type') == 'button'
+                the_type.get('type') in ('button', 'dependency_check')
                 or ('type' not in the_type and ('buttons' in the_type or 'callback' in the_type))
             )
         )

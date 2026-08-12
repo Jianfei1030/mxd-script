@@ -30,6 +30,8 @@ inference_config_option = ConfigOption('推理加速', {
     '启用GPU推理': False,
 }, description='YOLO 推理后端:默认 CPU(OpenVINO,兼容性最好);勾选后优先使用本机最强推理硬件(DirectML GPU,失败自动回退 CPU)', config_description={
     '启用GPU推理': '勾选后 YOLO 检测走 DirectML GPU(本机 RTX 4060 等),失败自动回退 CPU;不勾选始终用 CPU。默认不勾选以保兼容性',
+}, config_type={
+    '依赖状态': {'type': 'dependency_check'},
 }, show_at_tab=True, icon=FluentIcon.SPEED_HIGH)
 
 config = {
