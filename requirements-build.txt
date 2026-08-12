@@ -1,0 +1,2 @@
+# 打包机专用依赖(不进 requirements.txt,运行时不需要)
+pyinstaller==6.11.1
