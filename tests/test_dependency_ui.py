@@ -126,6 +126,22 @@ class DependencyCheckUiTest(unittest.TestCase):
         widget.grab().save(path)
         self.assertTrue(os.path.exists(path), f'渲染图应已保存: {path}')
 
+    def test_global_config_card_update_config_and_reset_do_not_crash(self):
+        # 回归:LabelAndDependencyCheck 缺 update_value 时,GlobalConfigCard 的
+        # Reset Config(reset_clicked → update_config)对每个 widget 调 update_value() 会抛
+        # AttributeError(ConfigCard.py:457-460)。渲染真实卡片 + update_config + reset 均不应崩。
+        import tempfile
+        from ok.util.config import Config
+        from config import inference_config_option
+        from ok.gui.settings.GlobalConfigCard import GlobalConfigCard
+        Config.config_folder = tempfile.mkdtemp()
+        config = Config('推理加速', inference_config_option.default_config)
+        card = GlobalConfigCard(config, inference_config_option)
+        card.update_config()  # 缺 update_value 时这里抛 AttributeError
+        card.reset_clicked()  # reset_to_default + update_config,也不应抛
+        self.assertEqual(config.get('启用GPU推理'), inference_config_option.default_config['启用GPU推理'],
+                         'reset 后配置回到默认值')
+
 
 if __name__ == '__main__':
     unittest.main()

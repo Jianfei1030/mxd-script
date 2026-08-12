@@ -41,6 +41,9 @@ class LabelAndDependencyCheck(LabelAndWidget):
 
         self.refresh()
 
+    def update_value(self):
+        pass
+
     def refresh(self):
         deps = check_dependencies()
         lines = [f"{d['desc']} {'✓ 已安装' if d['installed'] else '✗ 未安装'}" for d in deps]
