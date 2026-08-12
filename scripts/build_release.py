@@ -96,6 +96,53 @@ def _run(cmd, cwd=None):
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
+def inject_default_config(project_root, dist_dir):
+    """把清洗后的参考配置写入 dist 的 configs/MapleFarmTask.json。"""
+    import json
+    src_path = os.path.join(project_root, CONFIG_SRC_REL)
+    if not os.path.exists(src_path):
+        raise FileNotFoundError(f"参考配置不存在: {src_path}")
+    with open(src_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    cleaned = sanitize_default_config(raw)
+    cfg_dir = os.path.join(dist_dir, DIST_NAME, "configs")
+    os.makedirs(cfg_dir, exist_ok=True)
+    out_path = os.path.join(cfg_dir, "MapleFarmTask.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(cleaned, f, ensure_ascii=False, indent=4)
+    print(f"[配置注入] {out_path}")
+    return out_path
+
+
+def smoke_probe(dist_dir, python=None):
+    """import 探针:用系统 python 以 dist 的 _internal 为 PYTHONPATH 导入 src.globals
+    + onnxocr 模型文件存在性检查。离线可跑,不进 GUI。"""
+    python = python or sys.executable
+    internal = os.path.join(dist_dir, DIST_NAME, "_internal")
+    probe = (
+        "import src.globals, onnxocr, os;"
+        "p=os.path.join(os.path.dirname(onnxocr.__file__),'models','ppocrv5','det','det.onnx');"
+        "assert os.path.exists(p), p;"
+        "print('smoke OK', p)"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = internal
+    subprocess.run([python, "-c", probe], cwd=dist_dir, env=env, check=True)
+    print("[冒烟] import 探针通过")
+
+
+def run_installer(dist_dir, iscc_path, version):
+    iss = os.path.join(PROJECT_ROOT, "scripts", "installer.iss")
+    _run([iscc_path, f"/DMyAppVersion={version}",
+          f"/DMyAppSource={os.path.join(dist_dir, DIST_NAME)}", iss],
+         cwd=PROJECT_ROOT)
+    setup_path = os.path.join(dist_dir, f"OK-MXD-setup-{version}.exe")
+    if not os.path.exists(setup_path):
+        raise FileNotFoundError(f"setup.exe 未产出: {setup_path}")
+    print(f"[安装包] {setup_path}")
+    return setup_path
+
+
 def main():
     args = sys.argv[1:]
     no_inno = "--no-inno" in args
@@ -108,7 +155,22 @@ def main():
             print("[前置校验失败]", e)
         sys.exit(1)
     print(f"打包版本: {version}  (no_inno={no_inno})")
-    # Task 4 补全: pyinstaller 执行、默认配置注入、冒烟探针、ISCC 编译
+    dist_dir = os.path.join(PROJECT_ROOT, "dist")
+
+    cmd = build_pyinstaller_command(PROJECT_ROOT, version, dist_dir=dist_dir)
+    _run(cmd, cwd=PROJECT_ROOT)
+    print("[PyInstaller] onedir 打包完成")
+
+    inject_default_config(PROJECT_ROOT, dist_dir)
+    smoke_probe(dist_dir)
+    print("[冒烟] import 探针通过")
+
+    if not no_inno:
+        setup_path = run_installer(dist_dir, iscc, version)
+        print(f"\n完成: {setup_path}\n安装包大小: "
+              f"{os.path.getsize(setup_path) / 1024 / 1024:.0f} MB")
+    else:
+        print(f"\n完成(未编译安装器): {os.path.join(dist_dir, DIST_NAME)}")
 
 
 if __name__ == "__main__":
