@@ -125,3 +125,11 @@ def install_missing(missing) -> (ok: bool, detail: str):
 - 不检查其他项目依赖(onnxocr 等)——本功能只服务「推理加速」
 - 不自动安装(不点按钮不装), 不做版本升级/降级
 - 不改 OpenVinoYolo8Detect 后端选择逻辑
+
+## [S9] 验收记录(2026-08-12)
+
+- 实现: src/dependency.py(纯逻辑) + ok/gui/tasks/LabelAndDependencyCheck.py(控件) + config.py/ConfigItemFactory/ConfigCard 挂载 + tests/test_dependency.py(13) + tests/test_dependency_ui.py(9,含 GlobalConfigCard Reset 回归 + 截图证据)
+- 全量单测: 634 OK(skipped=12 为 §11.4 环境缺失显式 skip), 编译检查 OK
+- 视觉验收(offscreen 截图经视觉模型): 依赖状态两行文本可读、两按钮文字与可用外观确认。附注: 离屏渲染下 ✗ 符号缺字形显示为 □,属 offscreen 字体覆盖问题(测试已显式注册 msyh.ttc 解决中文豆腐块),真机 GUI 走系统字体回退正常
+- 流程: compose 子代理执行(brainstorm→plan→subagent 实现×2→spec 评审 pass×2→质量评审发现 update_value 缺陷已修复复审通过→终审 pass), 合并 1e90108
+- 已知限制(评审记录,留待后续): find_spec('onnxruntime') 无法区分 CPU 版与 DirectML 版 onnxruntime(检测到即显示 ✓),如需精确区分可改探 onnxruntime.get_available_providers() 的 DmlExecutionProvider
