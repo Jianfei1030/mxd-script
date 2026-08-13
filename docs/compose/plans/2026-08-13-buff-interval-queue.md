@@ -1,5 +1,10 @@
 # 补BUFF 按键间隔 + FIFO 队列 Implementation Plan
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/buff-interval-queue.md)
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use compose:subagent (recommended) or compose:execute to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让多个 BUFF 同时到期时逐拍补键（间隔 ≥「补BUFF间隔(秒)」默认 0.5s），修复同拍连按被技能前摇吞键的问题。

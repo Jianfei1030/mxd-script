@@ -1,5 +1,10 @@
 # 补BUFF 按键间隔 + FIFO 队列设计文档
 
+> [!NOTE]
+> This document may not reflect the current implementation.
+> See the final report for up-to-date state:
+> [Final Report](../reports/buff-interval-queue.md)
+
 > 日期：2026-08-13
 > 状态：已批准（用户确认全部设计决策：全局间隔 0.5s、暂停队列先打怪）
 
