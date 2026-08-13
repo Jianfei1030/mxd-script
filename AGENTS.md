@@ -374,6 +374,7 @@ spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）�
 | paint 日志爆炸 | paint 回调每帧执行 | 回调内禁日志 |
 | **绿框飘到右侧组队列表** | **组队血量显示 UI 干扰名字牌匹配；且蓝框(搜索区宽=1.0)本身包含组队列表位置 (x≈2256, y≈538)，clamp 拦不住框内干扰源** | **⛔ 必须关闭组队血量显示（UI 设置里关）**；收窄搜索区宽/调中心Y/调高把组队列表排除出蓝框（见 §7.6） |
 | **打开标注工具无预标框** | 预标注**不会自动发生**——`label_boxes.py` 只显示已有 txt，不跑模型检测 | 显式执行 `prelabel_from_onnx.py <地图名> --conf 0.25`，跑完验证 txt，重新打开工具（见 §2.2） |
+| **PageDown 等扩展键程序化触发无效**（字母键 u/x/y 正常） | pydirectinput 1.0.4 扩展键 bug（官方 Issue #26 未修）：KEYBOARD_MAPPING 里 pageup/pagedown/insert/home/end/delete 编码为 `扫描码\|0x80 + 0x400`，但 keyDown/keyUp 直接发该编码值当 wScan 且不设 `EXTENDEDKEY` → Windows 收不到 | 已修复：`ok/device/interaction_methods/pydirect.py` 的 `send_extended_key()` 对扩展键取 `& 0x7F` 扫描码 + `EXTENDEDKEY` 标志自实现发送（方向键原本就有专门处理所以正常）。测试 `tests/test_pydirect_extended.py`。**新加扩展键按键若失效先查这里** |
 
 ---
 
@@ -499,7 +500,7 @@ spec `docs/superpowers/specs/2026-08-09-player-anchor-yolo-fusion-design.md`）�
 
 ```powershell
 # 全量单测(排除重型 live/yolo 测试;它们只做编译检查)
-$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic tests.test_farm_task_offline tests.test_bars tests.test_guards tests.test_anchor_offline tests.test_potions tests.test_anchor tests.test_ocr_engine tests.test_analyze_anchor tests.test_analyze_facing tests.test_analyze_seek tests.test_analyze_turn tests.test_facing tests.test_label_boxes tests.test_yolo tests.test_config_groups tests.test_config_card_ui tests.test_dependency tests.test_dependency_ui
+$env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -m unittest tests.test_farm_logic tests.test_farm_task_offline tests.test_bars tests.test_guards tests.test_anchor_offline tests.test_potions tests.test_anchor tests.test_ocr_engine tests.test_analyze_anchor tests.test_analyze_facing tests.test_analyze_seek tests.test_analyze_turn tests.test_facing tests.test_label_boxes tests.test_yolo tests.test_config_groups tests.test_config_card_ui tests.test_dependency tests.test_dependency_ui tests.test_pydirect_extended
 # 编译检查(全源码)
 $env:PYTHONUTF8=1; .\.venv-warrior\Scripts\python.exe -c "import pathlib, py_compile; [py_compile.compile(str(p), doraise=True) for base in ['src','scripts','tests','ok'] for p in pathlib.Path(base).rglob('*.py')]; print('OK')"
 ```
