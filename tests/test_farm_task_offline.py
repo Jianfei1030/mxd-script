@@ -3810,5 +3810,5 @@ class TestBuffTimer(unittest.TestCase):
         self.assertEqual(len(task._buff_queue), 0)
         self.assertEqual(task._last_buff_times, {})
         run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=2000.0)  # 恢复,从未补过 → 重新入队
-        self.assertEqual(task.send_key.call_args_list, [call('q'), call('w')])  # 第一拍按 q,队列剩 w
-        self.assertEqual(len(task._buff_queue), 1)
+        self.assertEqual(task.send_key.call_args_list, [call('q'), call('q')])  # 重入队后第一拍按 q(累积含暂停前那次)
+        self.assertEqual(len(task._buff_queue), 1)  # 队列剩 w,待下一间隔补

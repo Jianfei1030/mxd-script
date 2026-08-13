@@ -1395,19 +1395,26 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             self._hp_at_press = 0.0
             self._last_hp_potion_press = 0.0
 
-        # 3.6 定时补BUFF(挂机辅助):攻击区内无怪才补;有怪优先解决,顺延下一拍。
+        # 3.6 定时补BUFF(挂机辅助):攻击区内无怪才补;有怪优先解决,队列保留顺延。
+        # 多个 BUFF 同时到期时入 FIFO 队列逐拍出队按键,间隔受「补BUFF间隔(秒)」控制,
+        # 避免同拍连按被技能前摇吞键(2026-08-13 用户实测)。
         # 位置在攻击块之前:补BUFF只按键不检测,放最前保证「本拍只补BUFF」的 return 语义干净。
         # 攻击区判定用上一拍的 _last_attack_present(去抖后,10Hz 足够及时)。
         if cfg['补BUFF开关'] and self._last_attack_present is False:
-            due = farm_logic.due_buffs(now, farm_logic.parse_buff_config(cfg['补BUFF列表']),
-                                       self._last_buff_times)
-            if due:
+            if not self._buff_queue:
+                due = farm_logic.due_buffs(now, farm_logic.parse_buff_config(cfg['补BUFF列表']),
+                                           self._last_buff_times)
+                if due:
+                    for name, _ in due:                     # 入队即计时,防下一拍重复入队
+                        self._last_buff_times[name] = now
+                    self._buff_queue.extend(due)
+            if self._buff_queue and now - self._last_buff_press >= cfg['补BUFF间隔(秒)']:
+                name, key = self._buff_queue.popleft()
                 self._release_seek_key()   # 停手:先松开寻怪长按的方向键
                 self._seek_dir = None      # 停追:本拍不寻怪
-                for name, key in due:
-                    self.send_key(key)
-                    self._last_buff_times[name] = now
-                self.log_info(f'补BUFF: {", ".join(n for n, _ in due)}')
+                self.send_key(key)
+                self._last_buff_press = now
+                self.log_info(f'补BUFF: {name}')
                 return   # 本拍只补BUFF,不执行攻击/寻怪/坐椅等
 
         # 4. 攻击
