@@ -2,11 +2,12 @@ from qfluentwidgets import BodyLabel, FluentIcon, LineEdit, MessageBoxBase, Push
 from PySide6.QtCore import Qt
 
 from ok.gui.tasks.ConfigLabelAndWidget import ConfigLabelAndWidget
+from ok.gui.tasks.LabelAndKeyInput import LabelAndKeyInput
 from src.task import farm_logic
 
 
 class AddBuffDialog(MessageBoxBase):
-    """添加/编辑一个 BUFF:名称 + 按键 + 间隔秒 三字段表单。
+    """添加/编辑一个 BUFF:名称 + 按键(点击即录) + 间隔秒 三字段表单。
     确认后经 accepted_buff 信号传出 (name, key, interval)。
     edit_value 非空 = 编辑模式,预填三字段(parse_buff_config 的逆)。"""
 
@@ -15,8 +16,9 @@ class AddBuffDialog(MessageBoxBase):
         self.titleLabel = SubtitleLabel(self.tr('Add Buff'), self)
         self.name_edit = LineEdit(self)
         self.name_edit.setPlaceholderText(self.tr('名称, 如 魔法盾'))
-        self.key_edit = LineEdit(self)
-        self.key_edit.setPlaceholderText(self.tr('按键, 如 q'))
+        self._key_config = {'key': ''}
+        self.key_input = LabelAndKeyInput(None, self._key_config, 'key')
+        self.key_input.recorded.connect(lambda _name: self._validate())
         self.interval_spin = SpinBox(self)
         self.interval_spin.setRange(1, 86400)
         self.interval_spin.setValue(180)
@@ -24,14 +26,13 @@ class AddBuffDialog(MessageBoxBase):
 
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.name_edit)
-        self.viewLayout.addWidget(self.key_edit)
+        self.viewLayout.addWidget(self.key_input)
         self.viewLayout.addWidget(self.interval_spin)
 
         self.yesButton.setText(self.tr('Confirm'))
         self.cancelButton.setText(self.tr('Cancel'))
         self.yesButton.setDisabled(True)
         self.name_edit.textChanged.connect(self._validate)
-        self.key_edit.textChanged.connect(self._validate)
         if edit_value:
             self.titleLabel.setText(self.tr('Edit Buff'))
             self._prefill(edit_value)
@@ -43,18 +44,19 @@ class AddBuffDialog(MessageBoxBase):
         if parsed:
             name, key, interval = parsed[0]
             self.name_edit.setText(name)
-            self.key_edit.setText(key)
+            self._key_config['key'] = key
+            self.key_input.update_value()
             if interval is not None:
                 self.interval_spin.setValue(interval)
         self._validate()
 
     def _validate(self):
         self.yesButton.setEnabled(bool(self.name_edit.text().strip()
-                                       and self.key_edit.text().strip()))
+                                       and (self._key_config.get('key') or '').strip()))
 
     def buff_value(self):
         name = self.name_edit.text().strip()
-        key = self.key_edit.text().strip()
+        key = (self._key_config.get('key') or '').strip()
         return farm_logic.buff_entry_to_text(name, key, self.interval_spin.value())
 
 

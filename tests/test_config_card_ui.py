@@ -224,7 +224,7 @@ class ConfigCardUiTest(unittest.TestCase):
         parent = QWidget()
         dlg = AddBuffDialog(parent)
         dlg.name_edit.setText('魔法盾')
-        dlg.key_edit.setText('q')
+        dlg._key_config['key'] = 'q'
         dlg.interval_spin.setValue(180)
         self.assertEqual(dlg.buff_value(), '魔法盾=q:180')
         # 间隔 1 秒是最小值,仍序列化
@@ -238,14 +238,14 @@ class ConfigCardUiTest(unittest.TestCase):
         parent = QWidget()
         dlg = AddBuffDialog(parent, edit_value='魔法盾=q:180')
         self.assertEqual(dlg.name_edit.text(), '魔法盾')
-        self.assertEqual(dlg.key_edit.text(), 'q')
+        self.assertEqual(dlg._key_config.get('key'), 'q')
         self.assertEqual(dlg.interval_spin.value(), 180)
         # 编辑后确认按钮可用(预填即校验通过)
         self.assertTrue(dlg.yesButton.isEnabled())
         # 无间隔的条目:间隔回退默认 180
         dlg2 = AddBuffDialog(parent, edit_value='狂暴=w')
         self.assertEqual(dlg2.name_edit.text(), '狂暴')
-        self.assertEqual(dlg2.key_edit.text(), 'w')
+        self.assertEqual(dlg2._key_config.get('key'), 'w')
         self.assertEqual(dlg2.interval_spin.value(), 180)
 
     def test_buff_list_edit_replaces_selected_item(self):

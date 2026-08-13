@@ -16,6 +16,7 @@ logger = Logger.get_logger(__name__)
 class StartCard(SettingCard):
     show_choose_hwnd = Signal()
     hotkey_changed = Signal()
+    VK_MAP = {'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B}
 
     def __init__(self, exit_event):
         super().__init__(og.config.get('gui_icon'), og.app.title, og.app.version)
@@ -46,6 +47,7 @@ class StartCard(SettingCard):
         communicate.executor_paused.connect(self.update_status)
         communicate.window.connect(self.update_status)
         communicate.task.connect(self.update_task)
+        communicate.hotkey_recording.connect(self.on_hotkey_recording)
 
         self.handler = Handler(exit_event, "StartCard")
         self.current_hotkey = "UNINIT"
@@ -130,11 +132,20 @@ class StartCard(SettingCard):
         self.handler.post(self.check_hotkey, 0.1)
 
     def rebind_hotkey(self, hotkey):
-        windll.user32.UnregisterHotKey(None, 999)
-        vk_map = {'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B}
+        self._unregister_hotkey()
+        if hotkey and hotkey != 'None' and hotkey in self.VK_MAP:
+            self._register_hotkey(hotkey)
 
-        if hotkey and hotkey != 'None' and hotkey in vk_map:
-            if not windll.user32.RegisterHotKey(None, 999, 0, vk_map[hotkey]):
-                logger.error(f"Failed to register hotkey {hotkey}")
+    def _register_hotkey(self, hotkey):
+        vk = self.VK_MAP.get(hotkey)
+        if vk and not windll.user32.RegisterHotKey(None, 999, 0, vk):
+            logger.error(f"Failed to register hotkey {hotkey}")
+
+    def _unregister_hotkey(self):
+        windll.user32.UnregisterHotKey(None, 999)
+
+    def on_hotkey_recording(self, recording):
+        if recording:
+            self._unregister_hotkey()
         else:
-            logger.debug(f"Hotkey disabled or invalid: {hotkey}")
+            self._register_hotkey(self.basic_options.get('Start/Stop'))

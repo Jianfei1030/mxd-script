@@ -29,6 +29,7 @@ class Communicate(QObject):
     copyright = Signal()
     global_config = Signal(str)
     restart_admin = Signal()
+    hotkey_recording = Signal(bool)
 
     def emit_draw_box(self, key: str = None, boxes=None, color=None, frame=None, debug=True):
         self.draw_box.emit(key, boxes, color, frame, debug)
