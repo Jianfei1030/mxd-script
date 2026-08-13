@@ -338,7 +338,7 @@
         </message>
         <message>
             <source>Triggers</source>
-            <translation>实时触发</translation>
+            <translation>脚本模式</translation>
         </message>
         <message>
             <source>Schedule</source>
@@ -685,7 +685,7 @@
         </message>
         <message>
             <source>Trigger Tasks</source>
-            <translation>实时触发任务</translation>
+            <translation>脚本任务</translation>
         </message>
         <message>
             <source>Waiting for task to be enabled</source>
