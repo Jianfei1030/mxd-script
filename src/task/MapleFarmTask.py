@@ -1,5 +1,6 @@
 import os
 import time
+import collections
 
 import numpy as np
 from qfluentwidgets import FluentIcon
@@ -337,6 +338,8 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
         self._last_forced_rescan = 0.0    # 上次强制慢扫时刻;0.0 哨兵=从未,配合 FORCED_RESCAN_MIN_INTERVAL 限频
         self._last_identity_scan = 0.0    # 上次身份复验慢扫时刻;0.0 哨兵=从未,配合「身份复验间隔(秒)」限频
         self._last_buff_times = {}        # 每个 BUFF 上次补的时间 {名称: 时刻};空 = 全部未补过,到点即补
+        self._buff_queue = collections.deque()  # 补BUFF 待按键 FIFO 队列 [(name, key)];空 = 无待补
+        self._last_buff_press = 0.0             # 上次补BUFF按键时刻;0.0 哨兵=从未按过,不受间隔限制
 
     def enable(self):
         """每次被用户/框架重新启用时复位运行时状态,防止上次停止的计时器秒停。"""
@@ -1257,6 +1260,7 @@ class MapleFarmTask(TriggerTask, BaseMapleTask):
             # 会让恢复后迟迟不补(now - 旧时间戳 要重新累计到 间隔 才到期)。
             # 清空 → due_buffs 判「从未补过」→ 恢复后第一空闲拍立即补一次再重新计时。
             self._last_buff_times = {}
+            self._buff_queue.clear()   # 暂停清队列:残留条目是过期计时,恢复后按"从未补过"重新入队
 
     def disable(self):
         """停任务前松开可能还按着的长按键,防止角色在任务停止后继续走/打。"""
