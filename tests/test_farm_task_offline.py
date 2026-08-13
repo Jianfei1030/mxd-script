@@ -3769,3 +3769,46 @@ class TestBuffTimer(unittest.TestCase):
         task._on_executor_paused(False)
         self.assertEqual(task._last_buff_times, {'魔法盾': 100.0},
                          '恢复信号不该清空计时')
+
+    def test_multi_buff_same_due_spaced(self):
+        """两 BUFF 同到期 → 分拍补:第一拍只按第一个,间隔未到不按,间隔到才按第二个。"""
+        task = self._task('魔法盾=q:180,狂暴=w:180')
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)  # 从未补过 → 都到期
+        self.assertEqual(task.send_key.call_args_list, [call('q')])        # 只按第一个
+        self.assertEqual(task._last_buff_times, {'魔法盾': 200.0, '狂暴': 200.0})  # 入队即计时
+        self.assertEqual(len(task._buff_queue), 1)
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.2)  # 间隔未到(0.2<0.5)
+        self.assertEqual(task.send_key.call_args_list, [call('q')])        # 不按
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.5)  # 间隔到(0.5)
+        self.assertEqual(task.send_key.call_args_list, [call('q'), call('w')])
+        self.assertEqual(len(task._buff_queue), 0)
+
+    def test_buff_queue_paused_when_mob(self):
+        """队列推进中来怪 → 不按键、队列保留;怪消失后继续补。"""
+        task = self._task('魔法盾=q:180,狂暴=w:180')
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)
+        self.assertEqual(task.send_key.call_args_list, [call('q')])
+        self.assertEqual(len(task._buff_queue), 1)
+        task._last_attack_present = True
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.5)  # 有怪:整个块跳过
+        self.assertEqual(task.send_key.call_args_list, [call('q')])        # 不按
+        self.assertEqual(len(task._buff_queue), 1)                          # 队列保留
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.5)  # 怪走,间隔已到
+        self.assertEqual(task.send_key.call_args_list, [call('q'), call('w')])
+        self.assertEqual(len(task._buff_queue), 0)
+
+    def test_pause_clears_buff_queue(self):
+        """暂停清空队列+计时;恢复后重新入队补齐。"""
+        task = self._task('魔法盾=q:180,狂暴=w:180')
+        task._last_attack_present = False
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=200.0)
+        self.assertEqual(len(task._buff_queue), 1)
+        task._on_executor_paused(True)
+        self.assertEqual(len(task._buff_queue), 0)
+        self.assertEqual(task._last_buff_times, {})
+        run_with_frame(task, hp=1.0, mp=1.0, exp=1.0, now=2000.0)  # 恢复,从未补过 → 重新入队
+        self.assertEqual(task.send_key.call_args_list, [call('q'), call('w')])  # 第一拍按 q,队列剩 w
+        self.assertEqual(len(task._buff_queue), 1)
